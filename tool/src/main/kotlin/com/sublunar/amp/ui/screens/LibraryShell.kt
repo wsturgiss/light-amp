@@ -95,6 +95,13 @@ enum class LibraryTab(val title: String) {
     ALBUMS("Albums"),
 }
 
+internal fun iconFor(tab: LibraryTab): ImageVector = when (tab) {
+    LibraryTab.PLAYLISTS -> AppIcons.QueueMusic
+    LibraryTab.ARTISTS -> AppIcons.RecordVoiceOver
+    LibraryTab.SONGS -> AppIcons.MusicNote
+    LibraryTab.ALBUMS -> AppIcons.AlbumStack
+}
+
 class ShellActions(
     val nowPlaying: () -> Unit,
     val settings: () -> Unit,
@@ -104,10 +111,10 @@ class ShellActions(
     /** More carries the showing page's modifiers up with it — see [LibraryPage]. */
     val more: (LibraryPage) -> Unit,
     /**
-     * Each takes the page back should land on — a tab list is the parent of what
-     * it opens, while a search result is a jump and names the hierarchy it
-     * belongs to instead of stacking on top of the results. See [Parent].
-     */
+      * Each takes the page back should land on — a tab list is the parent of what
+      * it opens, while a search result is a jump and names the hierarchy it
+      * belongs to instead of stacking on top of the results. See [Parent].
+      */
     val openAlbum: (String, Parent) -> Unit,
     val openArtist: (String, Parent) -> Unit,
     val openPlaylist: (String, String) -> Unit,
@@ -156,8 +163,6 @@ fun LibraryShell(
                 onMore = {
                     actions.more(if (searchActive) LibraryPage.SEARCH else currentTab.page)
                 },
-                onSearch = actions.search,
-                searchActive = searchActive,
             )
         }
     }
@@ -309,9 +314,8 @@ private fun SearchHeader(
 }
 
 /**
- * The header every tab shares: sort at the left corner, search and now-playing at
- * the right, and — when the setting puts it there — the liked/all switch in the
- * mirror of the search slot.
+ * The header every tab shares: sort folded into the title (with chevron when
+ * applicable), search, and More at the right. Now-playing moved to bottom bar.
  */
 @Composable
 private fun TabHeader(tab: LibraryTab, actions: ShellActions) {
@@ -822,5 +826,4 @@ private const val PLAYLISTS_LIFT_PX = 5
 
 /** The magnifier, at the same reference size as the rest of the bar. */
 private const val SEARCH_SCALE = PLAYLISTS_SCALE
-
 

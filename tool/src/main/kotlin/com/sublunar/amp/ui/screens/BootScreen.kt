@@ -160,7 +160,7 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
                         // results are still there. The keyboard is a screen of
                         // its own that covers all of that, including the bar,
                         // and it is one tap on the field away when it is wanted.
-                        search = { LibraryNav.openSearch() },
+                        search = { LibraryNav.openSearch()                         },
                         editSearch = { current ->
                             navigateTo<String?>(
                                 {
