@@ -488,6 +488,20 @@ class LibraryRepository(
     private val syncMutex = Mutex()
     private var syncJob: Job? = null
 
+    // Serializes every playlist mutation (create/rename/delete/add/remove/
+    // reorder) against every other one. Playlist screens fire these through
+    // App.scope rather than a screen-scoped one, so a slow reorder or bulk
+    // delete from a drag the user has already navigated away from can still
+    // be running when an unrelated "add to playlist" lands moments later.
+    // Plex (and likely the other servers) has no compare-and-swap for a
+    // playlist's contents -- these calls read the current order, then write
+    // a new one back -- so two of them racing on the same playlist can each
+    // work from a view that's already stale by the time they write, and the
+    // loser's write can wipe out entries the winner just added. One playlist
+    // edit finishing before the next starts is worth the (rare, user-paced)
+    // serialization cost.
+    private val playlistMutex = Mutex()
+
     // name -> server artist id, resolved once and reused for starring.
     private var artistIds: Map<String, String>? = null
 
@@ -670,7 +684,7 @@ class LibraryRepository(
      * [trackIds] are the playlist's opening contents, not a hint — see
      * [MusicServer.createPlaylist]. Callers must not add them again.
      */
-    suspend fun createPlaylist(name: String, trackIds: List<String>) {
+    suspend fun createPlaylist(name: String, trackIds: List<String>) = playlistMutex.withLock {
         if (playlistsAreLocal()) {
             LocalPlaylists.create(name.trim(), trackIds)
         } else {
@@ -679,7 +693,7 @@ class LibraryRepository(
         refreshPlaylists()
     }
 
-    suspend fun renamePlaylist(id: String, name: String) {
+    suspend fun renamePlaylist(id: String, name: String) = playlistMutex.withLock {
         if (playlistsAreLocal()) {
             LocalPlaylists.rename(id, name.trim())
         } else {
@@ -688,7 +702,7 @@ class LibraryRepository(
         refreshPlaylists()
     }
 
-    suspend fun deletePlaylist(id: String) {
+    suspend fun deletePlaylist(id: String) = playlistMutex.withLock {
         if (playlistsAreLocal()) {
             LocalPlaylists.delete(id)
         } else {
@@ -699,9 +713,10 @@ class LibraryRepository(
 
     /**
      * Append one track. Sequential by contract: the server's update appends, so
-     * concurrent calls would race the order.
+     * concurrent calls would race the order. [playlistMutex] is what makes that
+     * contract hold across calls, not just within a single caller's loop.
      */
-    suspend fun addToPlaylist(id: String, trackId: String) {
+    suspend fun addToPlaylist(id: String, trackId: String) = playlistMutex.withLock {
         if (playlistsAreLocal()) {
             LocalPlaylists.add(id, trackId)
         } else {
@@ -709,7 +724,7 @@ class LibraryRepository(
         }
     }
 
-    suspend fun removeFromPlaylistAt(id: String, index: Int) {
+    suspend fun removeFromPlaylistAt(id: String, index: Int) = playlistMutex.withLock {
         if (playlistsAreLocal()) {
             LocalPlaylists.removeAt(id, index)
         } else {
@@ -717,7 +732,7 @@ class LibraryRepository(
         }
     }
 
-    suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) {
+    suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) = playlistMutex.withLock {
         if (playlistsAreLocal()) {
             LocalPlaylists.reorder(id, orderedSongIds)
         } else {

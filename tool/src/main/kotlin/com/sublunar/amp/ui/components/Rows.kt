@@ -625,9 +625,12 @@ fun LibraryList(
     headerCount: Int = 0,
     /** The right-hand lane and its bar, as the few lists that never had one. */
     scrollBar: Boolean = true,
+    // Callers that need to drive the scroll themselves (drag-to-reorder
+    // auto-scroll) hoist their own state via rememberListAnchor and pass it
+    // in here instead of leaving this call to make one.
+    state: LazyListState = rememberListAnchor(anchor, headerCount),
     content: LazyListScope.() -> Unit,
 ) {
-    val state = rememberListAnchor(anchor, headerCount)
     Box(modifier = modifier) {
         LazyColumn(
             state = state,
