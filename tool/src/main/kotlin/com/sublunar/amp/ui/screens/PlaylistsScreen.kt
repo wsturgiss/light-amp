@@ -22,7 +22,6 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
@@ -38,6 +37,7 @@ import com.sublunar.amp.ui.components.LibraryList
 import com.sublunar.amp.ui.components.AppText
 import com.sublunar.amp.ui.components.HeaderAction
 import com.sublunar.amp.ui.components.PlayAllRow
+import com.sublunar.amp.ui.components.SelectionArtwork
 import com.sublunar.amp.ui.components.SelectionHeader
 import com.sublunar.amp.ui.components.SelectionState
 import com.sublunar.amp.ui.components.rowClickable
@@ -54,11 +54,6 @@ import kotlinx.coroutines.launch
 // A thicker bar than the Now Playing tab underline (3px): it has to read at a
 // glance across the full row width while a finger is on top of the handle.
 private const val DROP_LINE_HEIGHT_PX = 9
-
-// Faint enough that the check bubble reads clearly on top of it, but present
-// enough that an album cover is still recognizable behind the handful of
-// tracks it applies to — the whole point is telling albums apart at a glance.
-private const val EDIT_ARTWORK_ALPHA = 0.55f
 
 class PlaylistDetailScreen(
     sealed: SealedLightActivity,
@@ -161,7 +156,11 @@ class PlaylistDetailScreen(
         // Where the drag would land right now, so the line can track a finger
         // that hasn't lifted yet — null beforeKey means "at the very bottom".
         val dropTarget: DropTarget? = draggingIndex?.let { from ->
-            DropTarget(dropAnchor(list, from, draggingKeys, dragRowTarget(list, from, dragOffsetY, rowPx)))
+            val target = dragRowTarget(list, from, dragOffsetY, rowPx)
+            // Keyed on the row-granular target rather than dragOffsetY: dragOffsetY
+            // changes on every pointer-move, but dropAnchor only needs to rerun when
+            // that motion actually crosses into a new row.
+            remember(list, from, draggingKeys, target) { DropTarget(dropAnchor(list, from, draggingKeys, target)) }
         }
 
         LibraryList(
@@ -213,25 +212,7 @@ class PlaylistDetailScreen(
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
                         if (editing) {
-                            val checked = entry.key in selection.selected
-                            Box(Modifier.size(px(128)), contentAlignment = Alignment.Center) {
-                                // Dimmed cover behind the bubble, so a run of same-artist
-                                // rows still reads as "this many albums" while selecting.
-                                AppArtwork(
-                                    track.coverArtId,
-                                    size = px(128),
-                                    modifier = Modifier.alpha(EDIT_ARTWORK_ALPHA),
-                                )
-                                AppIcon(
-                                    if (checked) AppIcons.Selected else AppIcons.Unselected,
-                                    size = n(26),
-                                    tint = if (checked) {
-                                        LightThemeTokens.colors.content
-                                    } else {
-                                        LightThemeTokens.colors.contentSecondary
-                                    },
-                                )
-                            }
+                            SelectionArtwork(track.coverArtId, entry.key in selection.selected)
                         } else {
                             AppArtwork(track.coverArtId, size = px(128))
                         }
@@ -308,10 +289,16 @@ class PlaylistDetailScreen(
      * the two can never disagree about where the drag will land.
      */
     private fun dropAnchor(list: List<PlaylistEntry>, from: Int, keys: Set<String>, target: Int): String? {
-        val soloRemaining = list.filterIndexed { i, _ -> i != from }
-        val anchorKey = soloRemaining.getOrNull(target.coerceIn(0, soloRemaining.size))?.key
-        val anchorIndex = anchorKey?.let { key -> list.indexOfFirst { it.key == key } } ?: list.size
-        return list.drop(anchorIndex).firstOrNull { it.key !in keys }?.key
+        // Index arithmetic standing in for a soloRemaining = list-minus-`from` list:
+        // index i of that list is i in the real list when i < from, else i + 1.
+        val soloSize = list.size - 1
+        val clampedTarget = target.coerceIn(0, soloSize)
+        val anchorIndex = when {
+            clampedTarget == soloSize -> list.size
+            clampedTarget < from -> clampedTarget
+            else -> clampedTarget + 1
+        }
+        return list.subList(anchorIndex, list.size).firstOrNull { it.key !in keys }?.key
     }
 
     @Composable

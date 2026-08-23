@@ -80,6 +80,7 @@ import com.sublunar.amp.ui.components.ROW_ART_PX
 import com.sublunar.amp.ui.components.ROW_GAP_PX
 import com.sublunar.amp.ui.components.ROW_SUB_PX
 import com.sublunar.amp.ui.components.ROW_SUB_LINE_PX
+import com.sublunar.amp.ui.components.SelectionArtwork
 import com.sublunar.amp.ui.components.SelectionHeader
 import com.sublunar.amp.ui.components.SelectionState
 import com.sublunar.amp.ui.components.rememberSelection
@@ -372,18 +373,7 @@ class NowPlayingScreen(
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     if (selection.active) {
-                        val checked = track.id in selection.selected
-                        Box(Modifier.size(px(ROW_ART_PX)), contentAlignment = Alignment.Center) {
-                            AppIcon(
-                                if (checked) AppIcons.Selected else AppIcons.Unselected,
-                                size = n(26),
-                                tint = if (checked) {
-                                    LightThemeTokens.colors.content
-                                } else {
-                                    LightThemeTokens.colors.contentSecondary
-                                },
-                            )
-                        }
+                        SelectionArtwork(track.coverArtId, track.id in selection.selected, size = px(ROW_ART_PX))
                     } else {
                         AppArtwork(track.coverArtId, size = px(ROW_ART_PX))
                     }
