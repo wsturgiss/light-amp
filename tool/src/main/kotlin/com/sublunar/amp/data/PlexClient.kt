@@ -10,14 +10,9 @@ import io.ktor.client.request.put
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import java.net.URLEncoder
-import kotlinx.coroutines.async
-import kotlinx.coroutines.awaitAll
-import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -781,21 +776,14 @@ class PlexClient(
         }
 
         // Independent deletes, not a chain: one failing here just leaves a
-        // recoverable duplicate of that track, never a lost one. Plex has no
-        // bulk-delete endpoint, so this is fired as bounded-concurrency
-        // requests rather than one at a time — that's the only way to avoid
-        // paying full round-trip latency per stale entry on a large tail.
-        coroutineScope {
-            val gate = Semaphore(REORDER_DELETE_CONCURRENCY)
-            staleTail.map { (_, entryId) ->
-                async {
-                    gate.withPermit {
-                        if (!deletePlaylistEntry(id, entryId)) {
-                            android.util.Log.w(TAG, "reorderPlaylist($id): failed to remove stale entry $entryId; a duplicate remains")
-                        }
-                    }
-                }
-            }.awaitAll()
+        // recoverable duplicate of that track, never a lost one. Sequential
+        // and awaited on purpose — Plex's playlist item removal isn't known
+        // to be safe against concurrent writes to the same playlist, and a
+        // race there risks the server deleting more than the intended entry.
+        for ((_, entryId) in staleTail) {
+            if (!deletePlaylistEntry(id, entryId)) {
+                android.util.Log.w(TAG, "reorderPlaylist($id): failed to remove stale entry $entryId; a duplicate remains")
+            }
         }
     }
 
@@ -899,9 +887,6 @@ class PlexClient(
         /** Retry budget for the batched playlist-tail add in [reorderPlaylist]. */
         private const val ADD_RETRY_ATTEMPTS = 3
         private const val ADD_RETRY_BASE_MS = 300L
-
-        /** Plex has no bulk-delete for playlist entries; this bounds how many stale-tail deletes [reorderPlaylist] fires at once. */
-        private const val REORDER_DELETE_CONCURRENCY = 6
 
         /** Songs per radio when the caller leaves it to the server. */
         private const val RADIO_DEFAULT = 50
