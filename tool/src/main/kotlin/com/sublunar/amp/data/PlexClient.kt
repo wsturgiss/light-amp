@@ -10,7 +10,6 @@ import io.ktor.client.request.put
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import java.net.URLEncoder
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
@@ -733,88 +732,71 @@ class PlexClient(
         sendChecked("/playlists/$id/items/$entryId", method = "DELETE")
 
     /**
-     * Rebuilds the tail of the playlist rather than moving entries into place.
+     * Reorders via a chain of relative moves — Plex's only primitive for this;
+     * there's no bulk-reorder call and no endpoint that takes a whole new
+     * running order in one shot.
      *
-     * Plex has no bulk-reorder call — there's no endpoint that takes a whole
-     * new running order in one shot. The only primitive is a *relative* move —
-     * put this entry after that one — so a multi-row reorder used to be issued
-     * as a chain of these, one per moved entry, where each call assumed the
-     * previous one landed. Every call used to be fired through a bare
-     * `runCatching` with the result thrown away, so one silently-failed move
-     * desynced every move after it, and a large multi-select drag issues
-     * enough of these in a row that it happened routinely. Plex's own clients
-     * never shipped mass reorder either, which is a second reason not to lean
-     * on this API for it.
+     * This used to rebuild the tail instead: find where the current order
+     * first diverges from the wanted one, batch-*add* the wanted tail, then
+     * delete the old copies of those entries. That relied on re-adding a
+     * track already in the playlist creating a fresh, distinct entry for the
+     * delete step to leave in place of the one it removed. It doesn't — Plex
+     * silently no-ops an add of media the playlist already has — so on any
+     * reorder large enough to diverge near the start (moving a block from the
+     * front to the back diverges at position zero, i.e. the whole list) the
+     * "fresh" entries were never created and the delete step removed the
+     * originals anyway, wiping the playlist out with nothing put back. Moving
+     * entries in place instead never deletes anything, so there's no failure
+     * mode here that loses a track — only, in the worst case, one that
+     * doesn't finish landing every move.
      *
-     * Instead: find where the current order first diverges from the wanted one,
-     * batch-add the wanted tail in a single atomic `uri`-list PUT (the same
-     * trick [createPlaylist] uses), and only once that's confirmed, delete the
-     * now-stale old tail entries by their own stable ids. Add-then-delete makes
-     * the two failure modes asymmetric on purpose: a failed add is a clean
-     * no-op (nothing deleted yet), and a failed delete just leaves a harmless,
-     * visible duplicate — never a silently lost track.
+     * Each entry (from the second on) is moved to just after its predecessor
+     * in the wanted order, one call at a time, sequential and awaited — Plex's
+     * playlist ordering isn't known to be safe under concurrent writes to the
+     * same playlist (see [removeFromPlaylistAt]'s sibling comment on delete),
+     * and a failed move here should stop rather than let every move after it
+     * land against a playlist that isn't in the order it assumes.
      */
     override suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) {
         val entries = playlistEntries(id)
-        val currentOrder = entries.map { it.first }
-        val commonLength = minOf(currentOrder.size, orderedSongIds.size)
-        var firstDivergeIndex = 0
-        while (firstDivergeIndex < commonLength && currentOrder[firstDivergeIndex] == orderedSongIds[firstDivergeIndex]) {
-            firstDivergeIndex++
-        }
-        if (firstDivergeIndex == currentOrder.size && firstDivergeIndex == orderedSongIds.size) return
-
-        val staleTail = entries.subList(firstDivergeIndex, entries.size)
-        val wantedTail = orderedSongIds.subList(firstDivergeIndex, orderedSongIds.size)
-
-        if (wantedTail.isNotEmpty() && !addTracksToPlaylist(id, wantedTail)) {
+        if (entries.size != orderedSongIds.size) {
             android.util.Log.w(
                 TAG,
-                "reorderPlaylist($id): giving up after failing to add ${wantedTail.size} track(s); playlist left untouched",
+                "reorderPlaylist($id): wanted ${orderedSongIds.size} track(s) but the playlist has " +
+                    "${entries.size}; refusing to touch it",
             )
             return
         }
-
-        // Independent deletes, not a chain: one failing here just leaves a
-        // recoverable duplicate of that track, never a lost one. Sequential
-        // and awaited on purpose — Plex's playlist item removal isn't known
-        // to be safe against concurrent writes to the same playlist, and a
-        // race there risks the server deleting more than the intended entry.
-        for ((_, entryId) in staleTail) {
-            if (!deletePlaylistEntry(id, entryId)) {
-                android.util.Log.w(TAG, "reorderPlaylist($id): failed to remove stale entry $entryId; a duplicate remains")
+        // The same song can appear twice in a playlist, so entries are pooled
+        // per song id and handed out in their existing relative order, rather
+        // than picked arbitrarily between duplicates.
+        val bySong = mutableMapOf<String, MutableList<Long>>()
+        for ((songId, entryId) in entries) {
+            bySong.getOrPut(songId) { mutableListOf() }.add(entryId)
+        }
+        val orderedEntryIds = orderedSongIds.map { songId ->
+            val queue = bySong[songId]
+            if (queue.isNullOrEmpty()) {
+                android.util.Log.w(
+                    TAG,
+                    "reorderPlaylist($id): wanted order references a track not in the playlist; refusing to touch it",
+                )
+                return
+            }
+            queue.removeAt(0)
+        }
+        for (i in 1 until orderedEntryIds.size) {
+            val moved = sendChecked(
+                "/playlists/$id/items/${orderedEntryIds[i]}/move",
+                listOf("after" to orderedEntryIds[i - 1].toString()),
+                method = "PUT",
+            )
+            if (!moved) {
+                android.util.Log.w(TAG, "reorderPlaylist($id): move failed partway; playlist left partially reordered, nothing lost")
+                return
             }
         }
     }
-
-    /**
-     * Adds several tracks in the given order with one request, retrying with
-     * backoff — this is what lets [reorderPlaylist] set a whole tail's order
-     * atomically instead of chaining relative moves.
-     *
-     * The PUT itself isn't idempotent, so a retry after a lost response (the
-     * add landed server-side but the client saw a timeout/exception) would
-     * silently append the same tracks twice. Each failure is therefore
-     * checked against the server's actual tail before retrying or giving up.
-     */
-    private suspend fun addTracksToPlaylist(id: String, songIds: List<String>): Boolean {
-        if (songIds.isEmpty()) return true
-        val uri = itemUri(songIds.joinToString(","))
-        var backoffMs = ADD_RETRY_BASE_MS
-        repeat(ADD_RETRY_ATTEMPTS) { attempt ->
-            if (sendChecked("/playlists/$id/items", listOf("uri" to uri), method = "PUT")) return true
-            if (tailAlreadyMatches(id, songIds)) return true
-            if (attempt < ADD_RETRY_ATTEMPTS - 1) {
-                delay(backoffMs)
-                backoffMs *= 2
-            }
-        }
-        return false
-    }
-
-    /** Whether the playlist's last entries already match `songIds`, i.e. a prior add landed despite a reported failure. */
-    private suspend fun tailAlreadyMatches(id: String, songIds: List<String>): Boolean =
-        playlistEntries(id).takeLast(songIds.size).map { it.first } == songIds
 
     /** Each entry's `(songId, playlistItemID)`, in playlist order. */
     private suspend fun playlistEntries(id: String): List<Pair<String, Long>> =
@@ -883,10 +865,6 @@ class PlexClient(
         private const val TAG = "PlexClient"
 
         const val LIBRARY_IDENTIFIER = "com.plexapp.plugins.library"
-
-        /** Retry budget for the batched playlist-tail add in [reorderPlaylist]. */
-        private const val ADD_RETRY_ATTEMPTS = 3
-        private const val ADD_RETRY_BASE_MS = 300L
 
         /** Songs per radio when the caller leaves it to the server. */
         private const val RADIO_DEFAULT = 50
