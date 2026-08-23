@@ -754,8 +754,42 @@ class PlexClient(
      * no-op (nothing deleted yet), and a failed delete just leaves a harmless,
      * visible duplicate — never a silently lost track.
      */
+    /**
+     * Rebuilds the tail of the playlist: find where the current order first
+     * diverges from the wanted one, delete the old copies of everything from
+     * there on, then re-add them in the wanted order.
+     *
+     * Delete-then-add, not add-then-delete: the old order here re-added the
+     * wanted tail first and deleted the stale entries second, on the theory
+     * that a track already in the playlist gets a fresh, distinct entry when
+     * added again, leaving the original safe to delete in its favour. Plex
+     * doesn't do that — it silently no-ops an add of media the playlist
+     * already has — so on a reorder that diverges near the front (moving a
+     * block from the start to the end diverges at position zero, i.e. the
+     * whole list) nothing new ever got created and the delete step removed
+     * the originals anyway, wiping the playlist with nothing put back.
+     * Deleting first means every add below is guaranteed to create a genuine
+     * new entry, since by the time it runs none of those tracks are still in
+     * the playlist to be no-op'd against.
+     *
+     * This reverses the old failure asymmetry rather than removing it: a
+     * delete that fails now just risks a harmless leftover duplicate (the add
+     * still runs and re-creates it), but an add that fails *after* the delete
+     * has already landed leaves those tracks genuinely missing. That's why
+     * the add keeps its retry-with-backoff and is logged at error, not
+     * warning, on final failure — it's the one step here that can't be
+     * allowed to fail quietly.
+     */
     override suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) {
         val entries = playlistEntries(id)
+        if (entries.size != orderedSongIds.size) {
+            android.util.Log.w(
+                TAG,
+                "reorderPlaylist($id): wanted ${orderedSongIds.size} track(s) but the playlist has " +
+                    "${entries.size}; refusing to touch it",
+            )
+            return
+        }
         val currentOrder = entries.map { it.first }
         val commonLength = minOf(currentOrder.size, orderedSongIds.size)
         var firstDivergeIndex = 0
@@ -767,23 +801,25 @@ class PlexClient(
         val staleTail = entries.subList(firstDivergeIndex, entries.size)
         val wantedTail = orderedSongIds.subList(firstDivergeIndex, orderedSongIds.size)
 
-        if (wantedTail.isNotEmpty() && !addTracksToPlaylist(id, wantedTail)) {
-            android.util.Log.w(
-                TAG,
-                "reorderPlaylist($id): giving up after failing to add ${wantedTail.size} track(s); playlist left untouched",
-            )
-            return
-        }
-
         // Independent deletes, not a chain: one failing here just leaves a
-        // recoverable duplicate of that track, never a lost one. Sequential
-        // and awaited on purpose — Plex's playlist item removal isn't known
-        // to be safe against concurrent writes to the same playlist, and a
-        // race there risks the server deleting more than the intended entry.
+        // recoverable duplicate once the add below re-creates it, never a
+        // track that's simply missing, since the add always runs regardless.
+        // Sequential and awaited on purpose — Plex's playlist item removal
+        // isn't known to be safe against concurrent writes to the same
+        // playlist, and a race there risks the server deleting more than the
+        // intended entry.
         for ((_, entryId) in staleTail) {
             if (!deletePlaylistEntry(id, entryId)) {
-                android.util.Log.w(TAG, "reorderPlaylist($id): failed to remove stale entry $entryId; a duplicate remains")
+                android.util.Log.w(TAG, "reorderPlaylist($id): failed to remove stale entry $entryId; a duplicate may remain")
             }
+        }
+
+        if (wantedTail.isNotEmpty() && !addTracksToPlaylist(id, wantedTail)) {
+            android.util.Log.e(
+                TAG,
+                "reorderPlaylist($id): deleted the old tail but failed to re-add ${wantedTail.size} track(s) " +
+                    "after retrying -- those tracks are now missing from the playlist",
+            )
         }
     }
 
