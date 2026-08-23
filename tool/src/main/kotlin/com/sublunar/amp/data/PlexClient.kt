@@ -10,9 +10,14 @@ import io.ktor.client.request.put
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import java.net.URLEncoder
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -776,11 +781,21 @@ class PlexClient(
         }
 
         // Independent deletes, not a chain: one failing here just leaves a
-        // recoverable duplicate of that track, never a lost one.
-        for ((_, entryId) in staleTail) {
-            if (!deletePlaylistEntry(id, entryId)) {
-                android.util.Log.w(TAG, "reorderPlaylist($id): failed to remove stale entry $entryId; a duplicate remains")
-            }
+        // recoverable duplicate of that track, never a lost one. Plex has no
+        // bulk-delete endpoint, so this is fired as bounded-concurrency
+        // requests rather than one at a time — that's the only way to avoid
+        // paying full round-trip latency per stale entry on a large tail.
+        coroutineScope {
+            val gate = Semaphore(REORDER_DELETE_CONCURRENCY)
+            staleTail.map { (_, entryId) ->
+                async {
+                    gate.withPermit {
+                        if (!deletePlaylistEntry(id, entryId)) {
+                            android.util.Log.w(TAG, "reorderPlaylist($id): failed to remove stale entry $entryId; a duplicate remains")
+                        }
+                    }
+                }
+            }.awaitAll()
         }
     }
 
@@ -788,6 +803,11 @@ class PlexClient(
      * Adds several tracks in the given order with one request, retrying with
      * backoff — this is what lets [reorderPlaylist] set a whole tail's order
      * atomically instead of chaining relative moves.
+     *
+     * The PUT itself isn't idempotent, so a retry after a lost response (the
+     * add landed server-side but the client saw a timeout/exception) would
+     * silently append the same tracks twice. Each failure is therefore
+     * checked against the server's actual tail before retrying or giving up.
      */
     private suspend fun addTracksToPlaylist(id: String, songIds: List<String>): Boolean {
         if (songIds.isEmpty()) return true
@@ -795,6 +815,7 @@ class PlexClient(
         var backoffMs = ADD_RETRY_BASE_MS
         repeat(ADD_RETRY_ATTEMPTS) { attempt ->
             if (sendChecked("/playlists/$id/items", listOf("uri" to uri), method = "PUT")) return true
+            if (tailAlreadyMatches(id, songIds)) return true
             if (attempt < ADD_RETRY_ATTEMPTS - 1) {
                 delay(backoffMs)
                 backoffMs *= 2
@@ -802,6 +823,10 @@ class PlexClient(
         }
         return false
     }
+
+    /** Whether the playlist's last entries already match `songIds`, i.e. a prior add landed despite a reported failure. */
+    private suspend fun tailAlreadyMatches(id: String, songIds: List<String>): Boolean =
+        playlistEntries(id).takeLast(songIds.size).map { it.first } == songIds
 
     /** Each entry's `(songId, playlistItemID)`, in playlist order. */
     private suspend fun playlistEntries(id: String): List<Pair<String, Long>> =
@@ -874,6 +899,9 @@ class PlexClient(
         /** Retry budget for the batched playlist-tail add in [reorderPlaylist]. */
         private const val ADD_RETRY_ATTEMPTS = 3
         private const val ADD_RETRY_BASE_MS = 300L
+
+        /** Plex has no bulk-delete for playlist entries; this bounds how many stale-tail deletes [reorderPlaylist] fires at once. */
+        private const val REORDER_DELETE_CONCURRENCY = 6
 
         /** Songs per radio when the caller leaves it to the server. */
         private const val RADIO_DEFAULT = 50
