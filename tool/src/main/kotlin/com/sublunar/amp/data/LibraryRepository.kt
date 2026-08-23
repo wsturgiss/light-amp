@@ -502,6 +502,28 @@ class LibraryRepository(
     // serialization cost.
     private val playlistMutex = Mutex()
 
+    /**
+     * Playlist ids with a mutation still on its way to the server (or the
+     * disk, for a local source) -- e.g. a drag-reorder that can take a few
+     * seconds on Plex, since it has no bulk-reorder call and this app plays
+     * it safe rather than fast. A playlist screen collects this to show that
+     * its last change hasn't landed yet, since the on-screen order already
+     * updated optimistically and gives no other sign that anything is still
+     * in flight.
+     */
+    private val _pendingPlaylistWrites = MutableStateFlow<Set<String>>(emptySet())
+    val pendingPlaylistWrites: StateFlow<Set<String>> = _pendingPlaylistWrites
+
+    /** Runs [block] for playlist [id], serialized via [playlistMutex] and tracked in [pendingPlaylistWrites]. */
+    private suspend fun <T> playlistWrite(id: String, block: suspend () -> T): T {
+        _pendingPlaylistWrites.update { it + id }
+        try {
+            return playlistMutex.withLock { block() }
+        } finally {
+            _pendingPlaylistWrites.update { it - id }
+        }
+    }
+
     // name -> server artist id, resolved once and reused for starring.
     private var artistIds: Map<String, String>? = null
 
@@ -693,7 +715,7 @@ class LibraryRepository(
         refreshPlaylists()
     }
 
-    suspend fun renamePlaylist(id: String, name: String) = playlistMutex.withLock {
+    suspend fun renamePlaylist(id: String, name: String) = playlistWrite(id) {
         if (playlistsAreLocal()) {
             LocalPlaylists.rename(id, name.trim())
         } else {
@@ -702,7 +724,7 @@ class LibraryRepository(
         refreshPlaylists()
     }
 
-    suspend fun deletePlaylist(id: String) = playlistMutex.withLock {
+    suspend fun deletePlaylist(id: String) = playlistWrite(id) {
         if (playlistsAreLocal()) {
             LocalPlaylists.delete(id)
         } else {
@@ -716,7 +738,7 @@ class LibraryRepository(
      * concurrent calls would race the order. [playlistMutex] is what makes that
      * contract hold across calls, not just within a single caller's loop.
      */
-    suspend fun addToPlaylist(id: String, trackId: String) = playlistMutex.withLock {
+    suspend fun addToPlaylist(id: String, trackId: String) = playlistWrite(id) {
         if (playlistsAreLocal()) {
             LocalPlaylists.add(id, trackId)
         } else {
@@ -724,7 +746,7 @@ class LibraryRepository(
         }
     }
 
-    suspend fun removeFromPlaylistAt(id: String, index: Int) = playlistMutex.withLock {
+    suspend fun removeFromPlaylistAt(id: String, index: Int) = playlistWrite(id) {
         if (playlistsAreLocal()) {
             LocalPlaylists.removeAt(id, index)
         } else {
@@ -732,7 +754,7 @@ class LibraryRepository(
         }
     }
 
-    suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) = playlistMutex.withLock {
+    suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) = playlistWrite(id) {
         if (playlistsAreLocal()) {
             LocalPlaylists.reorder(id, orderedSongIds)
         } else {

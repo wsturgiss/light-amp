@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
@@ -142,10 +143,32 @@ class PlaylistDetailScreen(
                     fitTitle = true,
                 )
             }
+            // The list itself already reflects an edit the moment you make it --
+            // that's a local, optimistic update. This is the only sign that the
+            // save behind it (which can take a few seconds on Plex, since a
+            // reorder there is a chain of requests rather than one) hasn't
+            // landed yet.
+            if (playlistId in App.library.pendingPlaylistWrites.collectAsState().value) SavingIndicator()
             when (val list = entries.value) {
                 null -> Centered("Loading…")
                 else -> if (list.isEmpty()) Centered("Empty playlist") else TrackList(list, selection)
             }
+        }
+    }
+
+    @Composable
+    private fun SavingIndicator() {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = px(LIST_EDGE_PX), vertical = n(10)),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(n(16)),
+                strokeWidth = n(2),
+                color = LightThemeTokens.colors.content,
+            )
+            Spacer(Modifier.width(n(10)))
+            AppText("Saving…", nSp(14), dim = true)
         }
     }
 
