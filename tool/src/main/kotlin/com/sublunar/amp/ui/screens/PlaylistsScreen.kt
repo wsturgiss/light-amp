@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -348,6 +349,22 @@ class PlaylistDetailScreen(
                 itemsIndexed(list, key = { _, e -> e.key }) { index, entry ->
                     val track = entry.track
                     val isDragging = entry.key in draggingKeys
+                    // LazyColumn reuses a scrolled-away row's underlying layout
+                    // node for whichever row scrolls into that slot next, and
+                    // LayoutCoordinates from onGloballyPositioned is a live
+                    // handle to that node rather than a frozen snapshot -- so
+                    // left in place, this row's map entries would silently
+                    // start reporting the *next* occupant's position once this
+                    // one leaves composition. Removing them here instead of
+                    // leaving them to go stale is what keeps a hit-test or a
+                    // dragStartTops lookup for this key from ever reading
+                    // another row's coordinates by accident.
+                    DisposableEffect(entry.key) {
+                        onDispose {
+                            rowCoords.remove(entry.key)
+                            iconCoords.remove(entry.key)
+                        }
+                    }
                     Column(Modifier.fillMaxWidth()) {
                         if (dropTarget?.beforeKey == entry.key) DropIndicatorLine()
                         Row(

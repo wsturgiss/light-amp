@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -474,6 +475,21 @@ class NowPlayingScreen(
                     val isPast = i < index
                     val isDragging = i == draggingIndex
                     val rowKey = "$i-${track.id}"
+                    // LazyColumn reuses a scrolled-away row's underlying layout
+                    // node for whichever row scrolls into that slot next, and
+                    // LayoutCoordinates from onGloballyPositioned is a live
+                    // handle to that node rather than a frozen snapshot -- so
+                    // left in place, this row's map entries would silently
+                    // start reporting the *next* occupant's position once this
+                    // one leaves composition. Removing them here instead of
+                    // leaving them to go stale is what keeps a hit-test from
+                    // ever reading another row's coordinates by accident.
+                    DisposableEffect(rowKey) {
+                        onDispose {
+                            rowCoords.remove(rowKey)
+                            iconCoords.remove(i)
+                        }
+                    }
                     Row(
                         modifier = Modifier
                             .fillMaxWidth()
