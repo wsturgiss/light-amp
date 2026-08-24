@@ -6,7 +6,6 @@ import com.thelightphone.sdk.cast.DlnaRenderer
 import com.thelightphone.sdk.cast.DlnaState
 import com.sublunar.amp.data.AppSettings
 import com.sublunar.amp.data.Connectivity
-import com.sublunar.amp.data.DataMode
 import com.sublunar.amp.data.DownloadStore
 import com.sublunar.amp.data.LocalLibrary
 import com.sublunar.amp.data.RepeatMode
@@ -110,16 +109,9 @@ class PlaybackController(
         combine(_queue, _index) { q, i -> q.getOrNull(i) }
             .stateIn(scope, SharingStarted.Eagerly, null)
 
-    // Matches the stored default, so the window before the setting arrives
-    // errs towards not spending data rather than towards spending it.
-    private var dataMode = DataMode.WIFI_ONLY
-
-    /**
-     * Mirrored rather than queried per track: [Connectivity.isOnWifi] enumerates
-     * network interfaces, and source selection happens on the main thread.
-     */
+    /** Mirrored from [Connectivity.unmetered]; source selection is on the main thread. */
     @Volatile
-    private var onWifi = false
+    private var unmetered = false
     private var lastScrobbledId: String? = null
     private var nowPlayingId: String? = null
     /** Identity of the queue last handed to the server — see pushQueueToServer. */
@@ -415,12 +407,6 @@ class PlaybackController(
                     }
                 }
         }
-        scope.launch {
-            settings.dataMode.collect {
-                dataMode = it
-                reresolveQueue()
-            }
-        }
         // The server answering again is the signal to stop pinning playback to
         // local files; the next track resolves normally.
         scope.launch {
@@ -433,8 +419,8 @@ class PlaybackController(
             }
         }
         scope.launch {
-            Connectivity.wifiConnected.collect {
-                onWifi = it
+            Connectivity.unmetered.collect {
+                unmetered = it
                 reresolveQueue()
             }
         }
@@ -2058,7 +2044,7 @@ class PlaybackController(
         // has been getting rid of everywhere else. Whoever wants Opus on
         // cellular can now say so, and be believed.
         val source = App.source.value
-        return if (onWifi) source.wifiFormat else source.cellularFormat
+        return if (unmetered) source.wifiFormat else source.cellularFormat
     }
 
     /**
@@ -2066,13 +2052,10 @@ class PlaybackController(
      *
      * Downloads win by default — that's the point of having them. A download is
      * abandoned only when the user's chosen streaming format is genuinely better
-     * than the copy on disk, *and* the bytes are cheap: either Wi-Fi (whatever the
-     * data mode, including Wi-Fi Only) or Make it Hurt, which buys quality on any
-     * connection.
-     *
-     * Low Data needs no special case either: off Wi-Fi it pins [effectiveFormat]
-     * to MP3, the lowest rank, so it can never outrank what was downloaded — and
-     * on Wi-Fi it behaves like any other mode.
+     * than the copy on disk, *and* the bytes are free: an unmetered connection,
+     * whatever the mode. Even Make it Hurt — which spends cellular data on
+     * everything else — plays a downloaded track from its file: a copy on the
+     * phone beats paying for the same song again.
      */
     private fun Track.source(): LightAudioSource {
         // A track from the phone's own library is the file, always — there is no
@@ -2082,8 +2065,7 @@ class PlaybackController(
         if (local != null) {
             val (file, downloadedFormat) = local
             val streamed = effectiveFormat()
-            val worthTheBytes = onWifi || dataMode == DataMode.MAKE_IT_HURT
-            val preferStream = !forceOffline && id !in streamFailed && worthTheBytes &&
+            val preferStream = !forceOffline && id !in streamFailed && unmetered &&
                 streamed.qualityRank > downloadedFormat.qualityRank
             if (!preferStream) return LightAudioSource.FileSource(file)
         }

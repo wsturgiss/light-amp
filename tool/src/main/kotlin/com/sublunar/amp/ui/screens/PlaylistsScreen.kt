@@ -40,8 +40,13 @@ import com.sublunar.amp.ui.components.SelectionHeader
 import com.sublunar.amp.ui.components.SelectionState
 import com.sublunar.amp.ui.components.rowClickable
 import com.sublunar.amp.ui.components.rememberSelection
-import com.sublunar.amp.ui.n
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.pxSp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.components.ROW_GAP_PX
+import com.sublunar.amp.ui.components.ROW_SUB_LINE_PX
+import com.sublunar.amp.ui.components.ROW_SUB_PX
+import com.sublunar.amp.ui.components.ROW_TITLE_LINE_PX
+import com.sublunar.amp.ui.components.ROW_TITLE_PX
 import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
@@ -185,7 +190,7 @@ class PlaylistDetailScreen(
                         Box(Modifier.size(px(128)), contentAlignment = Alignment.Center) {
                             AppIcon(
                                 if (checked) AppIcons.Selected else AppIcons.Unselected,
-                                size = n(26),
+                                size = px(66),
                                 tint = if (checked) {
                                     LightThemeTokens.colors.content
                                 } else {
@@ -196,15 +201,15 @@ class PlaylistDetailScreen(
                     } else {
                         AppArtwork(track.coverArtId, size = px(128))
                     }
-                    Spacer(Modifier.width(n(15)))
+                    Spacer(Modifier.width(px(ROW_GAP_PX)))
                     Column(Modifier.weight(1f)) {
-                        AppText(track.title, nSp(18), lineHeight = nSp(22), maxLines = 1)
-                        AppText(track.artist, nSp(15), lineHeight = nSp(19), dim = true, maxLines = 1)
+                        AppText(track.title, pxSp(ROW_TITLE_PX), lineHeight = pxSp(ROW_TITLE_LINE_PX), maxLines = 1)
+                        AppText(track.artist, pxSp(ROW_SUB_PX), lineHeight = pxSp(ROW_SUB_LINE_PX), dim = true, maxLines = 1)
                     }
                     // Drag the handle to reorder the song within the playlist.
                     if (editing) AppIcon(
                         AppIcons.Dehaze,
-                        size = n(20),
+                        size = px(51),
                         modifier = Modifier.pointerInput(list.size) {
                             detectDragGestures(
                                 onDragStart = { draggingIndex = index; dragOffsetY = 0f },
@@ -234,7 +239,7 @@ class PlaylistDetailScreen(
     @Composable
     private fun Centered(text: String) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            AppText(text, nSp(16), dim = true)
+            AppText(text, pxSp(LightType.DETAIL_PX), dim = true)
         }
     }
 

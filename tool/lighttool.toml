@@ -1,8 +1,8 @@
 [tool]
 id = "com.sublunar.amp"
 label = "Amp"
-versionCode = 11
-versionName = "0.4.1"
+versionCode = 12
+versionName = "0.5.0"
 orientation = "portrait"
 permissions = [
     "android.permission.INTERNET",

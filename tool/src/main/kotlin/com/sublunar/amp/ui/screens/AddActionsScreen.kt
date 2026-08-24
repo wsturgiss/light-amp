@@ -57,7 +57,7 @@ class AddActionsScreen(
                     }
                 }
                 if (source.supportsRatings) {
-                    TextRow(title = "Rating", subtitle = ratingStars(track.rating)) {
+                    TextRow(title = "Rating", value = ratingStars(track.rating)) {
                         go { RatingScreen(it, track.id, track.title, track.rating, isAlbum = false) }
                     }
                 }

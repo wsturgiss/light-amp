@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.5.0
+
+### Fixed
+
+- Data modes now hold everywhere. Downloads and cover fetches never run on
+  metered data (cellular, or a phone-hotspot Wi-Fi): the download queue shows
+  "Waiting for Wi-Fi" and keeps its place. Wi-Fi Only off Wi-Fi makes no
+  network requests at all. Make it Hurt passes everything through, as it says.
+  Previously the downloader consulted nothing but the server's reachability, so
+  an auto-download queue built at home drained over cellular in any mode.
+- The network check reads the connection the phone is actually using, through
+  the SDK's new ConnectivityManager hooks (light-sdk #163). A Wi-Fi that had
+  lost internet used to still count as Wi-Fi while every byte rode cellular.
+- New installs no longer switch themselves to the Simplified layout on their
+  second launch. The migration that caused it — meant to hold pre-0.2 installs
+  to the old default — is gone entirely; an old install it strands on the
+  standard layout can switch back in Settings → Appearance.
+- The whole UI now sizes itself from the panel's real width, the way the
+  phone's own tools do. Changing Android's "smallest width" (density) setting
+  used to shrink every control and font while other apps stayed put; now Amp
+  renders the same pixels at any setting, and scales properly on any future
+  panel.
+
+### Changed
+
+- Low Data is now the default for new installs. It was Wi-Fi Only — which,
+  now that Wi-Fi Only really means no network, would have left a first
+  sign-in over cellular with nothing synced and no visible reason.
+- Menus and settings draw the way the phone's own do: one large line for an
+  action, a small label over a large value for a setting, on the same axis and
+  pitch as LightOS's Phone and Settings lists. The Output sheet uses the same
+  rows.
+- Menu and settings text is set one step down Light's scale (the size the
+  phone's lists title in) — the stock menus' larger step read as shouting.
+- The back chevron is the system's own glyph, where the stock tools put it.
+- About, the Plex link page and the welcome screen use Light's prose sizes and
+  margins.
+
+### Added
+
+
 ## 0.4.1
 
 ### Fixed

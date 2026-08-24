@@ -119,7 +119,7 @@ class ServerScreen(
                     item {
                         TextRow(
                             title = "Name",
-                            subtitle = nickname.ifBlank { "Required" },
+                            value = nickname.ifBlank { "Required" },
                             onClick = { edit("Name", nickname) { nickname = it } },
                         )
                     }
@@ -128,7 +128,7 @@ class ServerScreen(
                     item {
                     TextRow(
                         title = "Name",
-                        subtitle = source.name,
+                        value = source.name,
                         onClick = {
                             edit("Name", source.name) { text ->
                                 App.scope.launch {
@@ -142,21 +142,21 @@ class ServerScreen(
                 item {
                     TextRow(
                         title = "Address",
-                        subtitle = address.ifBlank { "Not set" },
+                        value = address.ifBlank { "Not set" },
                         onClick = { edit("Address", address) { url = it } },
                     )
                 }
                 item {
                     TextRow(
                         title = "Username",
-                        subtitle = name.ifBlank { "Not set" },
+                        value = name.ifBlank { "Not set" },
                         onClick = { edit("Username", name) { user = it } },
                     )
                 }
                 item {
                     TextRow(
                         title = "Password",
-                        subtitle = when {
+                        value = when {
                             !passwordSet -> "Not set"
                             newPass != null -> "$dots · changed"
                             else -> dots

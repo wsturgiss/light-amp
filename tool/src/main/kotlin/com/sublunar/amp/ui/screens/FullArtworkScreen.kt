@@ -6,11 +6,11 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -22,9 +22,6 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.layout.onSizeChanged
-import androidx.compose.ui.platform.LocalConfiguration
-import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.unit.dp
 import com.sublunar.amp.App
 import com.sublunar.amp.ui.PlayerTheme
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,7 +30,8 @@ import com.sublunar.amp.ui.components.AppIcon
 import com.sublunar.amp.ui.components.AppIcons
 import com.sublunar.amp.ui.components.TitleCard
 import com.sublunar.amp.ui.components.rememberArtwork
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.currentScale
+import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightThemeTokens
@@ -62,9 +60,7 @@ class AlbumArtworkScreen(
     override fun Content() {
         val albums by App.library.albums.collectAsState()
         val album = remember(albums, albumId) { albums.firstOrNull { it.id == albumId } }
-        val width = LocalConfiguration.current.screenWidthDp.dp
-        val widthPx = with(LocalDensity.current) { width.roundToPx() }
-        val image = rememberArtwork(album?.coverArtId, widthPx)
+        val image = rememberArtwork(album?.coverArtId, currentScale().windowWidthPx)
 
         PlayerTheme {
             Column(modifier = Modifier.fillMaxSize()) {
@@ -157,7 +153,7 @@ class AlbumArtworkScreen(
                     } else {
                         AppIcon(
                             AppIcons.Album,
-                            size = n(64),
+                            size = px(163),
                             tint = LightThemeTokens.colors.contentSecondary,
                             modifier = Modifier.align(Alignment.Center),
                         )

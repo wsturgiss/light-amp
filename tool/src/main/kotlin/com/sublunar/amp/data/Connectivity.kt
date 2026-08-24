@@ -1,49 +1,53 @@
 package com.sublunar.amp.data
 
-import java.net.Inet4Address
-import java.net.NetworkInterface
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
+import com.thelightphone.sdk.NetworkStatus
+import com.thelightphone.sdk.SealedLightContext
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.flow
-import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 
 /**
- * Whether the phone is on Wi-Fi, without a `Context`.
+ * What the connection costs, from the SDK's ConnectivityManager hooks.
  *
- * `ConnectivityManager` is the obvious answer and is unreachable: it needs
- * `getSystemService`, which the plugin sandbox forbids outright, and a `Context`,
- * which a tool module cannot obtain. Enumerating network interfaces is plain
- * `java.net`, needs no permission beyond what the tool already declares, and is
- * good enough for the question being asked — is there a usable Wi-Fi link?
+ * This replaces an interface-list heuristic — "a wlan interface with an
+ * address means Wi-Fi" — that could be lied to: Android moves traffic to
+ * cellular when a Wi-Fi link stops validating, and the interface keeps its
+ * address while the bytes ride LTE. That is how a heavy data day happens with
+ * every setting right. The SDK's [com.thelightphone.sdk.LightConnectivity]
+ * (upstream #163/#166) reads the *active* network, so the answer here is about
+ * the route the bytes will actually take — and the callback makes changes land
+ * at once rather than on a five-second poll.
  *
- * A `wlan` interface that is up and holds a real IPv4 address means associated
- * with an access point. Loopback and link-local (169.254.x.x, i.e. a failed DHCP)
- * do not count.
+ * Gates ask about *metered-ness*, not "is it Wi-Fi": a phone-hotspot Wi-Fi is
+ * metered and is treated as the cellular it rides on. The settings keep saying
+ * "Wi-Fi", because that is the phone in most hands.
  */
 object Connectivity {
 
-    /** How often [wifiConnected] re-checks. Cheap, and Wi-Fi comes and goes. */
-    private const val POLL_MS = 5_000L
+    /** Metered until told otherwise, so the gap before [bind] errs cheap. */
+    private val status = MutableStateFlow(
+        NetworkStatus(isConnected = false, isWifi = false, isMetered = true),
+    )
 
-    fun isOnWifi(): Boolean = runCatching {
-        NetworkInterface.getNetworkInterfaces()?.toList().orEmpty().any { nic ->
-            nic.name.startsWith("wlan", ignoreCase = true) &&
-                nic.isUp &&
-                nic.inetAddresses.toList().any { address ->
-                    address is Inet4Address &&
-                        !address.isLoopbackAddress &&
-                        !address.isLinkLocalAddress
-                }
+    /** Wired once at boot — see App.boot. */
+    fun bind(context: SealedLightContext, scope: CoroutineScope) {
+        status.value = runCatching { context.connectivity.currentStatus }
+            .getOrDefault(status.value)
+        scope.launch {
+            context.connectivity.observeNetworkStatus().collect { status.value = it }
         }
-    }.getOrDefault(false)
+    }
 
-    /** Polled rather than event-driven: callbacks would need a Context too. */
-    val wifiConnected: Flow<Boolean> = flow {
-        while (true) {
-            emit(isOnWifi())
-            delay(POLL_MS)
-        }
-    }.distinctUntilChanged().flowOn(Dispatchers.IO)
+    val network: StateFlow<NetworkStatus> = status
+
+    /** Bytes are free here: Wi-Fi, or any other unmetered connection. */
+    fun isUnmetered(): Boolean =
+        status.value.isConnected && !status.value.isMetered
+
+    val unmetered: Flow<Boolean> =
+        status.map { it.isConnected && !it.isMetered }.distinctUntilChanged()
 }

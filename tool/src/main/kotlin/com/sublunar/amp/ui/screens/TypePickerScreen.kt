@@ -11,7 +11,7 @@ import com.sublunar.amp.App
 import com.sublunar.amp.ui.components.AppIcon
 import com.sublunar.amp.ui.components.ListScreen
 import com.sublunar.amp.ui.components.TextRow
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightIcon
@@ -54,7 +54,7 @@ class TypePickerScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(se
         onClick: (LibraryTab) -> Unit,
     ) {
         TextRow(
-            leading = { AppIcon(iconFor(tab), size = n(22)) },
+            leading = { AppIcon(iconFor(tab), size = px(56)) },
             title = tab.title,
             trailing = { if (tab == current) LightIcon(LightIcons.ACCEPT, size = 1.4f) },
             onClick = { onClick(tab) },

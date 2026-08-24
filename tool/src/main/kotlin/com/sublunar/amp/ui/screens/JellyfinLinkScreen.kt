@@ -66,11 +66,11 @@ class JellyfinLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(
                 item {
                     TextRow(
                         title = "Address",
-                        subtitle = address.ifBlank { "http://192.168.1.10:8096" },
+                        value = address.ifBlank { "http://192.168.1.10:8096" },
                     ) { edit("Address", address) { address = it } }
                 }
                 item {
-                    TextRow(title = "Username", subtitle = username.ifBlank { "Required" }) {
+                    TextRow(title = "Username", value = username.ifBlank { "Required" }) {
                         edit("Username", username) { username = it }
                     }
                 }
@@ -79,7 +79,7 @@ class JellyfinLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(
                     // way is a normal thing to point at — so this is not required.
                     TextRow(
                         title = "Password",
-                        subtitle = if (password.isBlank()) "Leave blank if none" else "••••••••",
+                        value = if (password.isBlank()) "Leave blank if none" else "••••••••",
                     ) { edit("Password", password) { password = it } }
                 }
                 item {

@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.runtime.Composable
@@ -22,10 +21,11 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.runtime.remember
-import com.sublunar.amp.ui.n
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.LightType
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
+import com.thelightphone.sdk.ui.LightIcon
+import com.thelightphone.sdk.ui.LightIcons
 
 /**
  * The corner button: what a tap does, and optionally what a hold does.
@@ -62,13 +62,10 @@ private const val SEARCH_TO_NOW_PLAYING_PX = 120
 /**
  * The corner glyph's own box, in physical pixels — the same 66px the player's
  * header gives its More, so the two corners draw the same size as well as the
- * same shape. n(26) came to 66.3px, and a third of a pixel is enough to put a
+ * same shape. The RN app's 26-unit icon came to 66.3px, and a third of a pixel is enough to put a
  * one-pixel stem between two of them and take the edge off it.
  */
 const val CORNER_ICON_PX = 66
-
-/** Nudge that puts the back chevron on the same axis as the other edge controls. */
-private val BACK_ICON_BIAS = px(15)
 
 /**
  * A header's title, dropped a size only when the full one will not fit.
@@ -89,7 +86,7 @@ private val BACK_ICON_BIAS = px(15)
  */
 @Composable
 private fun HeaderTitle(title: String, fit: Boolean, roomPx: Int) {
-    val full = nSp(20)
+    val full = pxSp(LightType.FINE_PX)
     val style = appTextStyle(full, role = TextRole.Subheading, align = TextAlign.Center)
     val measurer = rememberTextMeasurer()
     val fits = !fit || roomPx <= 0 || remember(title, roomPx, style) {
@@ -126,10 +123,10 @@ private const val SUBPAGE_TITLE_LINE_PX = 54
 const val HEADER_BAR_PX = 160
 
 /**
- * Top header matching the original app: one tall band (screen height − width,
- * min n(52)), every button a full-height square so hit zones line up. Left is
- * back or a custom action, centre is a title or custom content, right is an
- * optional action; a search icon can sit left of the right action.
+ * The header every page wears: a [HEADER_BAR_PX] band with a full-height square
+ * at each end so hit zones line up. Left is back or a custom action, centre is a
+ * title or custom content, right is an optional action; a search icon can sit
+ * left of the right action.
  */
 @Composable
 fun AppHeader(
@@ -180,14 +177,11 @@ fun AppHeader(
     ) {
         HeaderSquare(headerHeight, onClick = leftAction?.onClick ?: onBack) {
             when {
-                leftAction != null -> AppIcon(leftAction.icon, size = n(28))
-                // ArrowBackIos draws its chevron left of centre inside the glyph
-                // box, leaving it ~15px inboard of every other edge control.
-                onBack != null -> AppIcon(
-                    AppIcons.ArrowBackIos,
-                    size = n(22),
-                    modifier = Modifier.offset(x = BACK_ICON_BIAS),
-                )
+                leftAction != null -> AppIcon(leftAction.icon, size = px(71))
+                // The phone's own chevron, in the 80px box LightOS gives it,
+                // centred in the corner square — which lands it at x=48–82,
+                // exactly where the stock tools' headers draw theirs.
+                onBack != null -> LightIcon(LightIcons.BACK, size = 2f)
                 else -> {}
             }
         }
@@ -202,7 +196,7 @@ fun AppHeader(
                 px(SEARCH_SLOT_PX),
                 onClick = secondaryLeftAction.onClick,
             ) {
-                AppIcon(secondaryLeftAction.icon, size = n(26))
+                AppIcon(secondaryLeftAction.icon, size = px(66))
             }
         }
         Spacer(Modifier.width(leadingSpacer).height(headerHeight))
@@ -226,7 +220,7 @@ fun AppHeader(
         if (searchAction != null) {
             // An 80px square, not the full header height, per the design.
             HeaderSlot(px(SEARCH_SLOT_PX), px(SEARCH_SLOT_PX), onClick = searchAction) {
-                AppIcon(searchIcon, size = n(26))
+                AppIcon(searchIcon, size = px(66))
             }
             Spacer(Modifier.width(searchGap).height(headerHeight))
         }

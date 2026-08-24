@@ -8,6 +8,7 @@ import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -27,13 +28,13 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.setValue
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import androidx.compose.ui.Alignment
@@ -44,7 +45,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.zIndex
 import kotlin.math.roundToInt
@@ -86,8 +86,8 @@ import com.sublunar.amp.ui.components.rememberSelection
 import com.sublunar.amp.ui.components.TitleCard
 import com.sublunar.amp.ui.components.HEADER_BAR_PX
 import com.sublunar.amp.ui.components.formatTime
-import com.sublunar.amp.ui.n
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.currentScale
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import com.sublunar.amp.ui.components.rowClickable
@@ -105,7 +105,7 @@ private const val LYRIC_ANCHOR = 0.38f
  * Shared width for the trailing control on a queue row, so the drag handles line
  * up down the right edge of the list.
  */
-private val QUEUE_TRAILING_SLOT = n(20)
+private const val QUEUE_TRAILING_SLOT_PX = 51
 
 enum class NpView { ARTWORK, QUEUE }
 
@@ -228,7 +228,7 @@ class NowPlayingScreen(
                 title = "Now Playing",
             )
             Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                AppText("Nothing playing", nSp(22))
+                AppText("Nothing playing", pxSp(LightType.COPY_PX))
             }
         }
     }
@@ -273,26 +273,32 @@ class NowPlayingScreen(
                             -(viewport * LYRIC_ANCHOR).toInt(),
                         )
                     }
-                    val tailPadding = (LocalConfiguration.current.screenHeightDp * 0.45f).dp
-                    LazyColumn(
-                        state = listState,
-                        modifier = Modifier.fillMaxSize(),
-                        contentPadding = PaddingValues(
-                            start = n(20),
-                            end = n(20),
-                            top = n(18),
-                            bottom = if (synced) tailPadding else n(18),
-                        ),
-                    ) {
-                        itemsIndexed(lines) { i, line ->
-                            AppText(
-                                text = line.text,
-                                size = nSp(17),
-                                lineHeight = nSp(22),
-                                align = TextAlign.Center,
-                                dim = synced && i != activeIndex,
-                                modifier = Modifier.fillMaxWidth().padding(vertical = n(2)),
-                            )
+                    // Room under the last line for it to reach the anchor: the
+                    // pane's own height less the anchor's share of it. It was a
+                    // share of the screen's height, which is only the pane's on
+                    // the LP3.
+                    BoxWithConstraints(modifier = Modifier.fillMaxSize()) {
+                        val tailPadding = maxHeight * (1f - LYRIC_ANCHOR)
+                        LazyColumn(
+                            state = listState,
+                            modifier = Modifier.fillMaxSize(),
+                            contentPadding = PaddingValues(
+                                start = px(51),
+                                end = px(51),
+                                top = px(46),
+                                bottom = if (synced) tailPadding else px(46),
+                            ),
+                        ) {
+                            itemsIndexed(lines) { i, line ->
+                                AppText(
+                                    text = line.text,
+                                    size = pxSp(LightType.DETAIL_PX),
+                                    lineHeight = pxSp(54),
+                                    align = TextAlign.Center,
+                                    dim = synced && i != activeIndex,
+                                    modifier = Modifier.fillMaxWidth().padding(vertical = px(5)),
+                                )
+                            }
                         }
                     }
                 }
@@ -303,7 +309,7 @@ class NowPlayingScreen(
     @Composable
     private fun CenteredText(text: String) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            AppText(text, nSp(15), dim = true)
+            AppText(text, pxSp(LightType.DETAIL_PX), dim = true)
         }
     }
 
@@ -323,7 +329,7 @@ class NowPlayingScreen(
         index: Int,
         selection: SelectionState,
         modifier: Modifier = Modifier,
-        horizontalPadding: Dp = n(16),
+        horizontalPadding: Dp = px(41),
         listState: LazyListState = rememberLazyListState(),
     ) {
         var draggingIndex by remember { mutableStateOf<Int?>(null) }
@@ -376,7 +382,7 @@ class NowPlayingScreen(
                         Box(Modifier.size(px(ROW_ART_PX)), contentAlignment = Alignment.Center) {
                             AppIcon(
                                 if (checked) AppIcons.Selected else AppIcons.Unselected,
-                                size = n(26),
+                                size = px(66),
                                 tint = if (checked) {
                                     LightThemeTokens.colors.content
                                 } else {
@@ -391,8 +397,8 @@ class NowPlayingScreen(
                     Column(Modifier.weight(1f)) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             if (isCurrent) {
-                                AppIcon(AppIcons.Waveform, size = n(18))
-                                Spacer(Modifier.width(n(6)))
+                                AppIcon(AppIcons.Waveform, size = px(46))
+                                Spacer(Modifier.width(px(15)))
                             }
                             AppText(
                                 track.title,
@@ -414,8 +420,8 @@ class NowPlayingScreen(
                     if (!isPast && !isCurrent && !selection.active) {
                         AppIcon(
                             AppIcons.Dehaze,
-                            size = n(20),
-                            modifier = Modifier.width(QUEUE_TRAILING_SLOT).pointerInput(queue.size, index) {
+                            size = px(51),
+                            modifier = Modifier.width(px(QUEUE_TRAILING_SLOT_PX)).pointerInput(queue.size, index) {
                                 detectDragGestures(
                                     onDragStart = { draggingIndex = i; dragOffsetY = 0f },
                                     onDrag = { change, amount ->
@@ -446,7 +452,7 @@ class NowPlayingScreen(
     private fun ScrubButton(
         icon: ImageVector,
         direction: Int,
-        size: androidx.compose.ui.unit.Dp = n(42),
+        size: androidx.compose.ui.unit.Dp = px(107),
         onSkip: () -> Unit,
     ) {
         val scope = rememberCoroutineScope()
@@ -652,11 +658,11 @@ class NowPlayingScreen(
             }
             val listState = rememberLazyListState()
             Box(
+                // Between the header and the bar at the foot: whatever the
+                // screen leaves between them, not a height of its own.
                 modifier = Modifier
-                    .align(Alignment.TopStart)
-                    .offset(y = px(QUEUE_TOP_PX))
-                    .fillMaxWidth()
-                    .height(px(SCREEN_H_PX - QUEUE_TOP_PX - QUEUE_END_PX)),
+                    .fillMaxSize()
+                    .padding(top = px(QUEUE_TOP_PX), bottom = px(QUEUE_END_PX)),
             ) {
                 QueueView(
                     queue,
@@ -713,7 +719,7 @@ class NowPlayingScreen(
         Column(horizontalAlignment = Alignment.CenterHorizontally) {
             AppText(
                 title,
-                nSp(20),
+                pxSp(LightType.FINE_PX),
                 role = TextRole.Subheading,
                 maxLines = 1,
                 align = TextAlign.Center,
@@ -785,9 +791,8 @@ class NowPlayingScreen(
         onTap: () -> Unit,
         onLongPress: () -> Unit,
     ) {
-        val width = LocalConfiguration.current.screenWidthDp.dp
-        val widthPx = with(LocalDensity.current) { width.roundToPx() }
-        val image = rememberArtwork(current.coverArtId, widthPx)
+        // Decoded at the panel's own width, which is what a full-bleed cover fills.
+        val image = rememberArtwork(current.coverArtId, currentScale().windowWidthPx)
 
         // One panel, one occupant. Lyrics take the cover's place rather than
         // sitting over it: a wash dark enough to read against had already hidden
@@ -795,10 +800,14 @@ class NowPlayingScreen(
         val panel = if (fullBleed) {
             Modifier.matchParentSize()
         } else {
+            // Everything above the controls: the screen less the block they
+            // take, rather than a height of its own — so a taller panel gives
+            // the cover more room and a shorter one takes some back, and the
+            // seek line stays at the depth the design puts it either way.
             Modifier
                 .align(Alignment.TopStart)
-                .fillMaxWidth()
-                .height(px(PANEL_H_PX))
+                .fillMaxSize()
+                .padding(bottom = px(PANEL_END_PX))
                 .padding(horizontal = px(INSET_PX))
         }
 
@@ -847,8 +856,8 @@ class NowPlayingScreen(
         Box(
             modifier = Modifier
                 .align(Alignment.TopStart)
-                .fillMaxWidth()
-                .height(px(PANEL_H_PX)),
+                .fillMaxSize()
+                .padding(bottom = px(PANEL_END_PX)),
         ) {
             Column(
                 modifier = Modifier.fillMaxSize().padding(horizontal = px(INSET_PX)),
@@ -948,18 +957,18 @@ class NowPlayingScreen(
     private fun BoxScope.TransportRow() {
         val isPlaying by App.playback.isPlaying.collectAsState()
         Band(TRANSPORT_UP_PX, TRANSPORT_ROW_PX) {
-            Slot(SIDE_X_PX) {
+            Slot(SlotAt.FromStart(SIDE_X_PX)) {
                 ScrubButton(AppIcons.FastRewind, direction = -1, size = px(SEEK_BOX_PX)) {
                     App.playback.previous()
                 }
             }
-            Slot(CENTRE_X_PX, onClick = { App.playback.togglePlayPause() }) {
+            Slot(SlotAt.Centre, onClick = { App.playback.togglePlayPause() }) {
                 AppIcon(
                     if (isPlaying) AppIcons.Pause else AppIcons.PlayArrow,
                     size = px(PLAY_BOX_PX),
                 )
             }
-            Slot(SCREEN_W_PX - SIDE_X_PX) {
+            Slot(SlotAt.FromEnd(SIDE_X_PX)) {
                 ScrubButton(AppIcons.FastForward, direction = 1, size = px(SEEK_BOX_PX)) {
                     App.playback.next()
                 }
@@ -991,7 +1000,7 @@ class NowPlayingScreen(
             // Ringed once it *is* liked — the same glyph, so the button doesn't
             // change meaning, with a mark to say the track is already filed.
             if (canFile) {
-                Slot(SIDE_X_PX, onClick = { go { AddActionsScreen(it, current.id) } }) {
+                Slot(SlotAt.FromStart(SIDE_X_PX), onClick = { go { AddActionsScreen(it, current.id) } }) {
                     AppIcon(
                         if (liked) AppIcons.AddCircle else AppIcons.Add,
                         size = size,
@@ -999,11 +1008,11 @@ class NowPlayingScreen(
                     )
                 }
             }
-            Slot(CENTRE_X_PX, onClick = { openOutput() }) {
+            Slot(SlotAt.Centre, onClick = { openOutput() }) {
                 AppIcon(AppIcons.Cast, size = size, modifier = Modifier.alpha(alpha))
             }
             Slot(
-                SCREEN_W_PX - SIDE_X_PX,
+                SlotAt.FromEnd(SIDE_X_PX),
                 onClick = { NowPlayingNav.view.value = nextView(NowPlayingNav.view.value) },
             ) {
                 // On the queue, the glyph inverts — black lines in a white tile —
@@ -1062,17 +1071,35 @@ class NowPlayingScreen(
         )
     }
 
-    /** A control centred on an exact x within a [Band]. */
+    /** Where a [Slot] sits across its band: a distance in from either edge, or the middle. */
+    private sealed interface SlotAt {
+        data class FromStart(val px: Int) : SlotAt
+        data class FromEnd(val px: Int) : SlotAt
+        data object Centre : SlotAt
+    }
+
+    /**
+     * A control centred within a [Band] at [at].
+     *
+     * Anchored to an edge or to the centre rather than put at an x across the
+     * screen, so the right-hand control mirrors the left on any width without
+     * the screen's own width appearing anywhere in the arithmetic.
+     */
     @Composable
     private fun BoxScope.Slot(
-        centreX: Int,
+        at: SlotAt,
         onClick: (() -> Unit)? = null,
         content: @Composable () -> Unit,
     ) {
+        val place = when (at) {
+            is SlotAt.FromStart ->
+                Modifier.align(Alignment.CenterStart).offset(x = px(at.px - SLOT_W_PX / 2))
+            is SlotAt.FromEnd ->
+                Modifier.align(Alignment.CenterEnd).offset(x = -px(at.px - SLOT_W_PX / 2))
+            SlotAt.Centre -> Modifier.align(Alignment.Center)
+        }
         Box(
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .offset(x = px(centreX - SLOT_W_PX / 2))
+            modifier = place
                 .width(px(SLOT_W_PX))
                 .fillMaxHeight()
                 // The click belongs to the slot, not the glyph: hung off the icon
@@ -1153,13 +1180,13 @@ class NowPlayingScreen(
 /**
  * Geometry for the full-width-artwork player, in LP3 physical pixels.
  *
- * Every depth is measured up from the bottom of the screen and every x from the
- * left edge, exactly as the design states them, so a number here can be checked
- * against the design with a ruler rather than by adding up the elements above it.
+ * Every depth is measured up from the bottom of the screen and every x in from
+ * the nearer edge, exactly as the design states them, so a number here can be
+ * checked against the design with a ruler rather than by adding up the elements
+ * above it. Nothing states the screen's own size: whatever is not a depth or an
+ * inset is what the screen leaves, so another panel gets the same controls at
+ * the same depths and a cover sized to the rest.
  */
-private const val SCREEN_W_PX = 1080
-private const val SCREEN_H_PX = 1240
-
 
 /** The clocks under the seek line, in physical pixels. */
 private const val TIME_PX = 36
@@ -1171,28 +1198,22 @@ private const val TIME_PX = 36
  * nothing else on the page, the smaller setting read as a caption for a missing
  * picture rather than as the thing the page is about.
  */
-private const val HERO_TITLE_PX = 81
-private const val HERO_TITLE_LINE_PX = 96
-private const val HERO_SIDE_PX = 51
-private const val HERO_SIDE_LINE_PX = 63
+private const val HERO_TITLE_PX = LightType.HEADING_PX
+private const val HERO_TITLE_LINE_PX = LightType.HEADING_LINE_PX
+private const val HERO_SIDE_PX = LightType.FINE_PX
+private const val HERO_SIDE_LINE_PX = LightType.FINE_LINE_PX
 
 /**
- * The panel the lyrics and a small cover fill: everything on the player between
- * the header and the seek line. The queue page has no controls to clear, so it
+ * What the controls take at the foot of the player; the panel the lyrics and a
+ * small cover fill is everything above it. Clears the seek line's band, which
+ * starts 400px up, by a little. The queue page has no controls to clear, so it
  * runs deeper — see [QUEUE_END_PX].
  */
 private const val PANEL_END_PX = 420
-private const val PANEL_H_PX = SCREEN_H_PX - HEADER_BAR_PX - PANEL_END_PX
 
 /** The queue list's bounds: between the header and the shuffle/repeat bar. */
 private const val QUEUE_TOP_PX = HEADER_BAR_PX
 private const val QUEUE_END_PX = HEADER_BAR_PX
-
-/**
- * The panel the lyrics and a small cover fill: everything on the player between
- * the header and the seek line. The queue page has no controls to clear, so it
- * runs deeper — see [QUEUE_END_PX].
- */
 
 /** The underline that marks a header toggle as on. */
 private const val UNDERLINE_GAP_PX = 3
@@ -1216,7 +1237,6 @@ private const val SECONDARY_ROW_PX = 100
 
 /** Horizontal placement: outer controls 280px in, clocks and seek line 80px in. */
 private const val SIDE_X_PX = 280
-private const val CENTRE_X_PX = SCREEN_W_PX / 2
 private const val INSET_PX = 80
 private const val SLOT_W_PX = 200
 

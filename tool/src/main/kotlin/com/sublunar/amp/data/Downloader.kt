@@ -50,6 +50,15 @@ class Downloader(
     private val scope: CoroutineScope,
     /** Used only to hold the process at foreground priority while draining. */
     private val lightContext: SealedLightContext,
+    /**
+     * Whether real bytes may move right now — see App.heavyDataAllowed.
+     *
+     * Checked between tracks, like every other pause: the queue keeps its
+     * order and simply waits. This is the gate that was missing when a queue
+     * built at home drained over cellular the moment the server still
+     * answered — reachability was the only thing ever consulted.
+     */
+    private val heavyDataAllowed: () -> Boolean,
 ) {
     private val dao: LibraryDao get() = daoProvider()
 
@@ -123,10 +132,12 @@ class Downloader(
 
     private val waiting: Boolean get() = System.currentTimeMillis() < retryAtMs
 
-    private val paused: Boolean get() = syncing || userPaused || waiting
+    private val paused: Boolean get() =
+        syncing || userPaused || waiting || !heavyDataAllowed()
 
     private fun pauseReason(): String = when {
         userPaused -> "Paused"
+        !heavyDataAllowed() -> "Waiting for Wi-Fi"
         waiting -> "Waiting for the server"
         else -> "Paused while syncing"
     }

@@ -1,6 +1,9 @@
 package com.sublunar.amp.ui.screens
 
 import android.view.KeyEvent
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.components.AppText
+import com.sublunar.amp.ui.pxSp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,8 +26,6 @@ import com.thelightphone.sdk.InitialScreen
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
-import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextVariant
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -232,7 +233,7 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                LightText(text = "amp", variant = LightTextVariant.Heading)
+                AppText("amp", pxSp(LightType.HEADING_PX))
             }
         }
     }

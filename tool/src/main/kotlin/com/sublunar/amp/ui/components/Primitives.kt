@@ -2,7 +2,6 @@ package com.sublunar.amp.ui.components
 
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
 import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
 import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
@@ -64,7 +63,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.ui.LightProgressBar
 import com.thelightphone.sdk.ui.LightThemeTokens
 
@@ -124,7 +123,6 @@ object AppIcons {
     /** Selection state in multi-select mode: filled when picked, ring when not. */
     val Selected = Icons.Filled.CheckCircle
     val Unselected = Icons.Filled.RadioButtonUnchecked
-    val ArrowBackIos = Icons.AutoMirrored.Filled.ArrowBackIos
 
     /** Marks a header title that opens a menu. */
     val ArrowDropDown = Icons.Filled.ArrowDropDown
@@ -158,7 +156,7 @@ object AppIcons {
 fun AppIcon(
     icon: ImageVector,
     modifier: Modifier = Modifier,
-    size: Dp = n(28),
+    size: Dp = px(71),
     tint: Color = LightThemeTokens.colors.content,
 ) {
     Icon(

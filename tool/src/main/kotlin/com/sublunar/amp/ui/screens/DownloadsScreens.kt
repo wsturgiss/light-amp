@@ -31,7 +31,7 @@ import com.sublunar.amp.ui.components.TextRow
 import com.sublunar.amp.ui.components.TrackRow
 import com.sublunar.amp.ui.components.ScrollableList
 import com.sublunar.amp.ui.components.LibraryList
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightIcon
@@ -53,7 +53,7 @@ private fun offlineModeDetail(mode: OfflineMode): String = when (mode) {
 fun dataModeLabel(mode: DataMode): String = when (mode) {
     DataMode.MAKE_IT_HURT -> "Make it Hurt"
     DataMode.LOW_DATA -> "Low Data"
-    DataMode.WIFI_ONLY -> "WiFi Only"
+    DataMode.WIFI_ONLY -> "Wi-Fi Only"
 }
 
 /**
@@ -64,9 +64,9 @@ fun dataModeLabel(mode: DataMode): String = when (mode) {
 private const val MODE_DETAIL_LINES = 2
 
 private fun dataModeDetail(mode: DataMode): String = when (mode) {
-    DataMode.MAKE_IT_HURT -> "Stream on cellular even when a download would do"
-    DataMode.LOW_DATA -> "Off Wi-Fi, play the download rather than streaming"
-    DataMode.WIFI_ONLY -> "Streams on Wi-Fi; downloads only on cellular"
+    DataMode.MAKE_IT_HURT -> "No limits — streaming, downloads and artwork all use cellular data when there's no Wi-Fi"
+    DataMode.LOW_DATA -> "Streams music on cellular data, but downloads and artwork wait for Wi-Fi"
+    DataMode.WIFI_ONLY -> "Never uses cellular data. Without Wi-Fi, only your downloads play"
 }
 
 /** Everything the user has downloaded, newest first. */
@@ -133,7 +133,7 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
                             title = "Cancel Downloads",
                             subtitle = "Clears what's still queued",
                             onClick = { App.downloader.cancelAll() },
-                            trailing = { AppIcon(AppIcons.Close, size = n(24)) },
+                            trailing = { AppIcon(AppIcons.Close, size = px(61)) },
                         )
                     }
                     item {
@@ -150,7 +150,7 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
                             trailing = {
                                 AppIcon(
                                     if (paused) AppIcons.PlayArrow else AppIcons.Pause,
-                                    size = n(24),
+                                    size = px(61),
                                 )
                             },
                         )

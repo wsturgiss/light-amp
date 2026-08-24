@@ -50,7 +50,9 @@ enum class OfflineMode {
  */
 enum class DataMode {
     /**
-     * Off Wi-Fi, still stream when the stream would beat the copy on disk.
+     * Nothing waits for Wi-Fi: downloads, covers and streams all run on any
+     * connection. The one exception is a track already downloaded, which still
+     * plays from its file — a copy on the phone beats paying for the same song.
      */
     MAKE_IT_HURT,
 
@@ -90,8 +92,11 @@ enum class LastSection { LIBRARY, SEARCH, NOW_PLAYING }
  * people expect of a music library, and the tag lists and liked lists that were
  * Simplified's reason to exist are reachable from any tab's own menu.
  *
- * The default moved after installs already existed, so an install that predates
- * the change keeps what it had — see [migrateLayoutDefault].
+ * The default moved after installs already existed. A migration briefly held
+ * those installs to Simplified, but it could not tell an old install from a
+ * fresh one that had just added a source, and flipped new installs on their
+ * second launch — so it is gone. Anyone it strands on the wrong layout is one
+ * toggle from the one they want.
  */
 enum class LayoutMode {
     /** Expanded: the four library tabs along the bar, with search as a fifth. */
@@ -382,7 +387,10 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
      * they have found the setting. Streaming a FLAC album over cellular is a
      * choice worth making deliberately, not one to discover on a bill.
      */
-    val dataMode: Flow<DataMode> = enumFlow(DATA_MODE, DataMode.WIFI_ONLY)
+    // Low Data for a fresh install: safe on a metered plan but *working* —
+    // Wi-Fi Only as the default meant a first sign-in over cellular synced
+    // nothing and the app looked broken, with the reason buried on this page.
+    val dataMode: Flow<DataMode> = enumFlow(DATA_MODE, DataMode.LOW_DATA)
 
     /**
      * How much of the phone the downloads may take, across the whole tool.
@@ -423,6 +431,7 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
     val invertColors: Flow<Boolean> = boolFlow(INVERT_COLORS, false)
     val karaokeLyrics: Flow<Boolean> = boolFlow(KARAOKE_LYRICS, true)
+
 
     /** Whether to use the simplified or standard layout mode. */
     val layoutMode: Flow<LayoutMode> = enumFlow(LAYOUT_MODE, LayoutMode.STANDARD)
@@ -565,32 +574,6 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     suspend fun setDownloadsPaused(value: Boolean) = putBool(DOWNLOADS_PAUSED, value)
     suspend fun setLayoutMode(value: LayoutMode) = putString(LAYOUT_MODE, value.name)
 
-    /**
-     * Hold an existing install to the layout it already had.
-     *
-     * The default flipped from Simplified to Expanded, and a default is only
-     * ever consulted when nothing is stored — so without this, every phone that
-     * had never opened the setting would rearrange itself on update. Someone
-     * who has been using the app for months should not have to find out where
-     * everything went because a new install wanted a different first impression.
-     *
-     * "Already existed" means a source is configured: nothing else is true of
-     * every old install and no new one. Run once, before anything reads the
-     * mode — see App.boot.
-     */
-    suspend fun migrateLayoutDefault() {
-        // Read first, and edit only where there is something to write. This runs
-        // on the launch path, where every launch would otherwise pay for opening
-        // a write transaction to discover it had nothing to do — and the launch
-        // path is what stands between the app opening and the last track being
-        // ready to play again.
-        val p = dataStore.data.first()
-        if (p[LAYOUT_MODE] != null) return
-        // BASE_URL as well as SOURCES: an install from before sources existed
-        // has only the one server, and is the oldest of all.
-        if (p[SOURCES].isNullOrBlank() && p[BASE_URL].isNullOrBlank()) return
-        putString(LAYOUT_MODE, LayoutMode.SIMPLIFIED.name)
-    }
     suspend fun setLastSection(value: LastSection) = putString(LAST_SECTION, value.name)
 
     // --- helpers -------------------------------------------------------------
