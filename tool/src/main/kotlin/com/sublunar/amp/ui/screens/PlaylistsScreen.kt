@@ -58,8 +58,13 @@ import com.sublunar.amp.ui.components.SelectionHeader
 import com.sublunar.amp.ui.components.SelectionState
 import com.sublunar.amp.ui.components.rowClickable
 import com.sublunar.amp.ui.components.rememberSelection
-import com.sublunar.amp.ui.n
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.pxSp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.components.ROW_GAP_PX
+import com.sublunar.amp.ui.components.ROW_SUB_LINE_PX
+import com.sublunar.amp.ui.components.ROW_SUB_PX
+import com.sublunar.amp.ui.components.ROW_TITLE_LINE_PX
+import com.sublunar.amp.ui.components.ROW_TITLE_PX
 import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
@@ -160,16 +165,16 @@ class PlaylistDetailScreen(
     @Composable
     private fun SavingIndicator() {
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = px(LIST_EDGE_PX), vertical = n(10)),
+            modifier = Modifier.fillMaxWidth().padding(horizontal = px(LIST_EDGE_PX), vertical = px(26)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             CircularProgressIndicator(
-                modifier = Modifier.size(n(16)),
-                strokeWidth = n(2),
+                modifier = Modifier.size(px(41)),
+                strokeWidth = px(5),
                 color = LightThemeTokens.colors.content,
             )
-            Spacer(Modifier.width(n(10)))
-            AppText("Saving…", nSp(14), dim = true)
+            Spacer(Modifier.width(px(26)))
+            AppText("Saving…", pxSp(36), dim = true)
         }
     }
 
@@ -404,17 +409,17 @@ class PlaylistDetailScreen(
                             } else {
                                 AppArtwork(track.coverArtId, size = px(128))
                             }
-                            Spacer(Modifier.width(n(15)))
+                            Spacer(Modifier.width(px(ROW_GAP_PX)))
                             Column(Modifier.weight(1f)) {
-                                AppText(track.title, nSp(18), lineHeight = nSp(22), maxLines = 1)
-                                AppText(track.artist, nSp(15), lineHeight = nSp(19), dim = true, maxLines = 1)
+                                AppText(track.title, pxSp(ROW_TITLE_PX), lineHeight = pxSp(ROW_TITLE_LINE_PX), maxLines = 1)
+                                AppText(track.artist, pxSp(ROW_SUB_PX), lineHeight = pxSp(ROW_SUB_LINE_PX), dim = true, maxLines = 1)
                             }
                             // Drag the handle to reorder the song within the playlist. The
                             // actual gesture is handled by the container above; this just
                             // marks where the handle is so that gesture can hit-test it.
                             if (editing) AppIcon(
                                 AppIcons.Dehaze,
-                                size = n(20),
+                                size = px(51),
                                 modifier = Modifier.onGloballyPositioned { iconCoords[entry.key] = it },
                             )
                         }
@@ -466,12 +471,12 @@ class PlaylistDetailScreen(
                 verticalAlignment = Alignment.CenterVertically,
             ) {
                 SelectionArtwork(entry.track.coverArtId, entry.key in selection.selected)
-                Spacer(Modifier.width(n(15)))
+                Spacer(Modifier.width(px(ROW_GAP_PX)))
                 Column(Modifier.weight(1f)) {
-                    AppText(entry.track.title, nSp(18), lineHeight = nSp(22), maxLines = 1)
-                    AppText(entry.track.artist, nSp(15), lineHeight = nSp(19), dim = true, maxLines = 1)
+                    AppText(entry.track.title, pxSp(ROW_TITLE_PX), lineHeight = pxSp(ROW_TITLE_LINE_PX), maxLines = 1)
+                    AppText(entry.track.artist, pxSp(ROW_SUB_PX), lineHeight = pxSp(ROW_SUB_LINE_PX), dim = true, maxLines = 1)
                 }
-                Spacer(Modifier.width(n(20)))
+                Spacer(Modifier.width(px(51)))
             }
         }
     }
@@ -522,7 +527,7 @@ class PlaylistDetailScreen(
     @Composable
     private fun Centered(text: String) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            AppText(text, nSp(16), dim = true)
+            AppText(text, pxSp(LightType.DETAIL_PX), dim = true)
         }
     }
 

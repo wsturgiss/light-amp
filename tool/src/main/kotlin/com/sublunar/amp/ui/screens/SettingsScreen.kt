@@ -111,7 +111,7 @@ class SettingsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                 item {
                     TextRow(
                         title = "Sources",
-                        subtitle = sourceNames,
+                        value = sourceNames,
                         onClick = { go { SourceListScreen(it) } },
                     )
                 }
@@ -119,14 +119,14 @@ class SettingsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                     item {
                         TextRow(
                             title = "Data",
-                            subtitle = dataModeLabel(dataMode),
+                            value = dataModeLabel(dataMode),
                             onClick = { go { DataScreen(it) } },
                         )
                     }
                     item {
                         TextRow(
                             title = "Offline",
-                            subtitle = if (used == 0L) {
+                            value = if (used == 0L) {
                                 "Nothing downloaded"
                             } else {
                                 "${formatGb(used)} / ${formatGb(downloadLimit)}"
@@ -261,7 +261,7 @@ class DataScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) 
                 item {
                     TextRow(
                         title = "Data Mode",
-                        subtitle = dataModeLabel(dataMode),
+                        value = dataModeLabel(dataMode),
                         onClick = { go { DataModeScreen(it) } },
                     )
                 }
@@ -277,14 +277,14 @@ class DataScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) 
                     item(key = "${server.id}/wifi") {
                         TextRow(
                             title = "On Wi-Fi",
-                            subtitle = formatLabel(server.wifiFormat),
+                            value = formatLabel(server.wifiFormat),
                             onClick = { go { StreamFormatScreen(it, server.id) } },
                         )
                     }
                     item(key = "${server.id}/cellular") {
                         TextRow(
                             title = "On Cellular",
-                            subtitle = formatLabel(server.cellularFormat),
+                            value = formatLabel(server.cellularFormat),
                             onClick = { go { CellularFormatScreen(it, server.id) } },
                         )
                     }
@@ -353,7 +353,7 @@ class OfflineScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
                 item {
                     TextRow(
                         title = "Downloads",
-                        subtitle = if (used == 0L) "Nothing downloaded yet" else formatBytes(used),
+                        value = if (used == 0L) "Nothing downloaded yet" else formatBytes(used),
                         onClick = { go { DownloadsScreen(it) } },
                     )
                 }
@@ -362,7 +362,7 @@ class OfflineScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
                 item {
                     TextRow(
                         title = "Storage Limit",
-                        subtitle = formatBytes(downloadLimit),
+                        value = formatBytes(downloadLimit),
                         onClick = { go { SizeLimitScreen(it) } },
                     )
                 }
@@ -373,14 +373,14 @@ class OfflineScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
                     item(key = "${server.id}/auto") {
                         TextRow(
                             title = "Auto-Download",
-                            subtitle = offlineModeLabel(server.offlineMode),
+                            value = offlineModeLabel(server.offlineMode),
                             onClick = { go { OfflineModeScreen(it, server.id) } },
                         )
                     }
                     item(key = "${server.id}/quality") {
                         TextRow(
                             title = "Download Quality",
-                            subtitle = formatLabel(server.downloadFormat),
+                            value = formatLabel(server.downloadFormat),
                             onClick = { go { SourceDownloadFormatScreen(it, server.id) } },
                         )
                     }
@@ -558,14 +558,14 @@ class SourceStreamingScreen(
                 item {
                     TextRow(
                         title = "On Wi-Fi",
-                        subtitle = formatLabel(source.wifiFormat),
+                        value = formatLabel(source.wifiFormat),
                         onClick = { go { StreamFormatScreen(it, source.id) } },
                     )
                 }
                 item {
                     TextRow(
                         title = "On Cellular",
-                        subtitle = formatLabel(source.cellularFormat),
+                        value = formatLabel(source.cellularFormat),
                         onClick = { go { CellularFormatScreen(it, source.id) } },
                     )
                 }
@@ -600,14 +600,14 @@ class SourceOfflineScreen(
                 item {
                     TextRow(
                         title = "Auto-Download",
-                        subtitle = offlineModeLabel(source.offlineMode),
+                        value = offlineModeLabel(source.offlineMode),
                         onClick = { go { OfflineModeScreen(it, source.id) } },
                     )
                 }
                 item {
                     TextRow(
                         title = "Download Quality",
-                        subtitle = formatLabel(source.downloadFormat),
+                        value = formatLabel(source.downloadFormat),
                         onClick = { go { SourceDownloadFormatScreen(it, source.id) } },
                     )
                 }

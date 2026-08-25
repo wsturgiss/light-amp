@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.5.0
+
+### Fixed
+
+- Data modes now hold everywhere. Downloads and cover fetches never run on
+  metered data (cellular, or a phone-hotspot Wi-Fi).
+- The network check reads the connection the phone is actually using, through
+  the SDK's new ConnectivityManager hooks (light-sdk #163). A Wi-Fi that had
+  lost internet used to still count as Wi-Fi while every byte rode cellular.
+- The whole UI now sizes itself from the panel's real width, the way the
+  phone's own tools do. Changing Android's "smallest width" (density) setting
+  used to shrink every control and font while other apps stayed put; now Amp
+  renders the same pixels at any setting, and scales properly on any future
+  panel.
+
+### Changed
+
+- Low Data is now the default for new installs. It was Wi-Fi Only — which,
+  now that Wi-Fi Only really means no network, would have left a first
+  sign-in over cellular with nothing synced and no visible reason.
+
+
 ## 0.4.1
 
 ### Fixed

@@ -29,6 +29,8 @@ import kotlinx.coroutines.withContext
 class ArtworkLoader(
     filesDir: File,
     private val serverClient: StateFlow<MusicServer?>,
+    /** Whether a cover may be fetched over the network now — see App.heavyDataAllowed. */
+    private val fetchAllowed: () -> Boolean = { true },
     /**
      * Which source a cover belongs to, read at the moment it is asked for.
      *
@@ -103,8 +105,12 @@ class ArtworkLoader(
         // A local track's cover id is its own path: the sleeve is inside the
         // file, and there is no server to ask for it.
         LocalLibrary.fileOf(coverArtId)?.let { return embedded(it) }
+        // A cover is a quarter-megabyte at panel size, so it waits for cheap
+        // bytes: the placeholder shows, nothing is cached, and the next look
+        // on Wi-Fi fetches as though this never happened.
+        if (!fetchAllowed()) return null
         val client = serverClient.value ?: return null
-        val sized = client.coverArtUrl(coverArtId, FETCH_PX)
+        val sized = client.coverArtUrl(coverArtId, panelWidthPx)
         val original = client.coverArtUrl(coverArtId)
         // Not all at once. A grid asks for a screenful of covers the moment it
         // appears, and thirty of those in flight over a connection that leaves
@@ -257,13 +263,22 @@ class ArtworkLoader(
         return sample
     }
 
+    /**
+     * The panel's own width, told to the loader by the first themed frame — the
+     * fetch size on any panel, as [FETCH_PX] is on the LP3. A plain field is
+     * enough for a hint read at fetch time, and until that frame the LP3's
+     * width stands in.
+     */
+    @Volatile
+    var panelWidthPx: Int = FETCH_PX
+
     /** Snap to a few size buckets so different callers reuse the same decode. */
     private fun sizeBucket(px: Int): Int = when {
         px <= 0 -> 128
         px <= 160 -> 128
         px <= 360 -> 320
         px <= 720 -> 640
-        else -> FETCH_PX
+        else -> panelWidthPx
     }
 
     companion object {

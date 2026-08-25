@@ -50,6 +50,15 @@ class Downloader(
     private val scope: CoroutineScope,
     /** Used only to hold the process at foreground priority while draining. */
     private val lightContext: SealedLightContext,
+    /**
+     * Whether real bytes may move right now — see App.heavyDataAllowed.
+     *
+     * Checked between tracks, like every other pause: the queue keeps its
+     * order and simply waits. This is the gate that was missing when a queue
+     * built at home drained over cellular the moment the server still
+     * answered — reachability was the only thing ever consulted.
+     */
+    private val heavyDataAllowed: () -> Boolean,
 ) {
     private val dao: LibraryDao get() = daoProvider()
 
@@ -121,39 +130,14 @@ class Downloader(
     @Volatile
     private var failures = 0
 
-    // Matches the stored default, so the window before the setting arrives errs
-    // towards not spending data rather than towards spending it -- same reasoning
-    // as PlaybackController's copy of this default.
-    @Volatile
-    private var dataMode = DataMode.WIFI_ONLY
-
-    /** Mirrored rather than queried per track -- see PlaybackController.onWifi. */
-    @Volatile
-    private var onWifi = false
-
-    init {
-        // These used to only gate which *format* to stream, leaving the
-        // downloader itself free to pull whole albums (or, with Auto-Download
-        // set to Favorites/All, most of the library) over cellular regardless
-        // of what the user had told the rest of the app about spending data.
-        // Mirroring the same two signals streaming already reads makes a
-        // download wait for Wi-Fi under exactly the conditions a stream would
-        // now avoid preferring the network over a local copy for -- see
-        // PlaybackController.effectiveFormat's sibling comment on Low Data.
-        scope.launch { settings.dataMode.collect { dataMode = it } }
-        scope.launch { Connectivity.wifiConnected.collect { onWifi = it } }
-    }
-
     private val waiting: Boolean get() = System.currentTimeMillis() < retryAtMs
 
-    /** Off Wi-Fi, with a mode that hasn't said spending cellular data is fine. */
-    private val offMeteredConnection: Boolean get() = !onWifi && dataMode != DataMode.MAKE_IT_HURT
-
-    private val paused: Boolean get() = syncing || userPaused || waiting || offMeteredConnection
+    private val paused: Boolean get() =
+        syncing || userPaused || waiting || !heavyDataAllowed()
 
     private fun pauseReason(): String = when {
         userPaused -> "Paused"
-        offMeteredConnection -> "Waiting for Wi-Fi"
+        !heavyDataAllowed() -> "Waiting for Wi-Fi"
         waiting -> "Waiting for the server"
         else -> "Paused while syncing"
     }

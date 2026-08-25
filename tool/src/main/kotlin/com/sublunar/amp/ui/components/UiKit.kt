@@ -31,19 +31,11 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import com.sublunar.amp.App
-import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextVariant
-import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.px
+import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.ui.lightClickable
-
-/** Shared layout constants (tuned further on-device). */
-object Dimens {
-    val ArtworkCorner: Dp = 3.dp
-}
 
 // --- Artwork ----------------------------------------------------------------
 
@@ -188,21 +180,35 @@ fun Modifier.appClickable(
 
 // --- Rows -------------------------------------------------------------------
 
-/** A single-line text row (no artwork) — used for menus and text lists. */
+/**
+ * A menu row, drawn the way the phone's own menus are.
+ *
+ * Measured off LightOS's stock tools — the Phone list, Calendar's settings, the
+ * SDK-built Weather's: one line for a row that does something, and for a row
+ * that names a setting, the name small above its current value large, the
+ * value being the information. The stock menus set the line in Heading; tried,
+ * and it shouted on a page of rows, so it sits one step down Light's scale at
+ * Copy — the size the phone's own lists title in. Text starts [MENU_INSET_PX] in, the two units
+ * Light's text-only lists use; the lists with a mark and a cover keep the 72px
+ * axis Light's own Music list has ([ROW_LEAD_PX]).
+ */
 @Composable
 fun TextRow(
     title: String,
     modifier: Modifier = Modifier,
-    subtitle: String? = null,
     /**
-     * How many lines the subtitle may take.
-     *
-     * One by default, because most subtitles are a name or a count — an artist,
-     * "3 songs", a format — and letting those wrap would make a list of rows
-     * ragged to no purpose. Raised where the subtitle is a sentence explaining
-     * what the row does, which is a different job: there the words are the
-     * point, and a clipped explanation explains nothing.
+     * The setting's current value, drawn large under the title — which becomes
+     * its label. For a row that names a setting rather than doing something.
      */
+    value: String? = null,
+    /**
+     * A line under the title saying what the row does, or how it stands.
+     *
+     * One line by default: most are a name or a count, and letting those wrap
+     * would make a list of rows ragged to no purpose. Raised where it is a
+     * sentence explaining what the row does, which is a different job.
+     */
+    subtitle: String? = null,
     subtitleLines: Int = 1,
     onLongClick: (() -> Unit)? = null,
     /** Sits before the text, for a row that needs saying what it opens. */
@@ -211,8 +217,8 @@ fun TextRow(
     /**
      * Null for a row that states something rather than opening it — a setting
      * with only one possible value, which More still shows so the page's
-     * modifiers all read alike. It doesn't take a press, and its title is
-     * lightened to say so before the press is tried.
+     * modifiers all read alike. It doesn't take a press, and its main line is
+     * dimmed to say so before the press is tried.
      */
     onClick: (() -> Unit)? = null,
 ) {
@@ -222,48 +228,93 @@ fun TextRow(
             .let {
                 if (onClick == null) it else it.slowLongPress(onClick, onLongPress = onLongClick)
             }
-            .padding(horizontal = 1.5f.gridUnitsAsDp(), vertical = 0.6f.gridUnitsAsDp()),
+            .padding(horizontal = px(MENU_INSET_PX), vertical = px(MENU_PAD_PX)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (leading != null) {
             leading()
-            Spacer(Modifier.width(1f.gridUnitsAsDp()))
+            Spacer(Modifier.width(px(MENU_GAP_PX)))
         }
         Column(modifier = Modifier.weight(1f)) {
-            LightText(
-                text = title,
-                variant = LightTextVariant.Copy,
-                lighten = onClick == null,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (!subtitle.isNullOrBlank()) {
-                LightText(
-                    text = subtitle,
-                    variant = LightTextVariant.Detail,
-                    lighten = true,
-                    maxLines = subtitleLines,
-                    overflow = TextOverflow.Ellipsis,
-                )
+            if (value != null) {
+                MenuLabel(title)
+                MenuLine(value, dim = onClick == null)
+            } else {
+                MenuLine(title, dim = onClick == null)
+                if (!subtitle.isNullOrBlank()) MenuLabel(subtitle, maxLines = subtitleLines)
             }
         }
         if (trailing != null) trailing()
     }
 }
 
+/** A menu row's main line: Light's Copy — Heading read too big, see [TextRow]. */
+@Composable
+private fun MenuLine(text: String, dim: Boolean) {
+    AppText(
+        text,
+        pxSp(LightType.COPY_PX),
+        lineHeight = pxSp(LightType.COPY_LINE_PX),
+        role = TextRole.Copy,
+        dim = dim,
+        maxLines = 1,
+    )
+}
+
+/** A menu row's small line, above a value or under a verb: Light's Detail. */
+@Composable
+private fun MenuLabel(text: String, maxLines: Int = 1) {
+    AppText(
+        text,
+        pxSp(LightType.DETAIL_PX),
+        lineHeight = pxSp(LightType.DETAIL_LINE_PX),
+        role = TextRole.Detail,
+        dim = true,
+        maxLines = maxLines,
+    )
+}
+
+/**
+ * Where a menu row's text starts: two grid units, as on the phone's own
+ * text-only lists (the Phone tool, every stock Settings page). The same 80px
+ * the corner glyphs and the bar glyphs sit on.
+ */
+const val MENU_INSET_PX = 80
+
+/** Above and below a row's text: with Copy's line, a 136px pitch. */
+private const val MENU_PAD_PX = 32
+
+/** Between a leading glyph and the text: one unit. */
+private const val MENU_GAP_PX = 40
+
 @Composable
 fun EmptyState(text: String, modifier: Modifier = Modifier) {
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        LightText(text = text, variant = LightTextVariant.Copy, lighten = true, align = TextAlign.Center)
+        AppText(
+            text,
+            pxSp(LightType.COPY_PX),
+            lineHeight = pxSp(LightType.COPY_LINE_PX),
+            dim = true,
+            align = TextAlign.Center,
+        )
     }
 }
 
 @Composable
 fun SectionLabel(text: String) {
-    LightText(
-        text = text,
-        variant = LightTextVariant.Detail,
-        lighten = true,
-        modifier = Modifier.padding(start = 1.5f.gridUnitsAsDp(), top = 1f.gridUnitsAsDp(), bottom = 0.3f.gridUnitsAsDp()),
+    AppText(
+        text,
+        pxSp(LightType.DETAIL_PX),
+        lineHeight = pxSp(LightType.DETAIL_LINE_PX),
+        role = TextRole.Detail,
+        dim = true,
+        modifier = Modifier.padding(
+            start = px(MENU_INSET_PX),
+            top = px(SECTION_TOP_PX),
+            bottom = px(SECTION_BOTTOM_PX),
+        ),
     )
 }
+
+private const val SECTION_TOP_PX = 40
+private const val SECTION_BOTTOM_PX = 12

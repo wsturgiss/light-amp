@@ -371,7 +371,7 @@ class SourceDetailScreen(
                     item {
                         TextRow(
                             title = "Connection",
-                            subtitle = source.baseUrl.ifBlank { "Not set" },
+                            value = source.baseUrl.ifBlank { "Not set" },
                             onClick = { go { ServerScreen(it, sourceId = source.id) } },
                         )
                     }
@@ -383,7 +383,7 @@ class SourceDetailScreen(
                     item {
                         TextRow(
                             title = "Connection",
-                            subtitle = source.baseUrl.ifBlank { "Not set" },
+                            value = source.baseUrl.ifBlank { "Not set" },
                         )
                     }
                 }
@@ -394,7 +394,7 @@ class SourceDetailScreen(
                     item {
                         TextRow(
                             title = "Player name",
-                            subtitle = source.playerName.ifBlank { "Amp (default)" },
+                            value = source.playerName.ifBlank { "Amp (default)" },
                             onClick = {
                                 navigateTo<String?>(
                                     {
@@ -427,7 +427,7 @@ class SourceDetailScreen(
                     item {
                         TextRow(
                             title = "Shown on Sources",
-                            subtitle = "$shown of ${source.libraries.size + 1}",
+                            value = "$shown of ${source.libraries.size + 1}",
                             onClick = { go { LibraryVisibilityScreen(it, source.id) } },
                         )
                     }

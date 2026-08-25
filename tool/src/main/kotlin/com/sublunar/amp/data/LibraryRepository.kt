@@ -77,6 +77,8 @@ class LibraryRepository(
     private val libraryId: Flow<String?>,
     /** True when only downloaded media should be visible (offline / Wi-Fi only). */
     offlineOnly: Flow<Boolean>,
+    /** Whether the server may be spoken to at all — see App.metadataAllowed. */
+    private val metadataAllowed: () -> Boolean = { true },
     /** Where likes and ratings go when the server can't be told about them. */
     private val pending: PendingActions,
     /** For the handful of things cached in preferences rather than in a table. */
@@ -456,6 +458,7 @@ class LibraryRepository(
      */
     suspend fun primeArtistImages() {
         if (_artistImages.value.isNotEmpty()) return
+        if (!metadataAllowed()) return
         val client = serverClient.value ?: return
         val refs = runCatching { client.getArtistIndex(libraryId.first()) }.getOrNull() ?: return
         // Doubles as the id index that starring needs, which is the same call.
@@ -603,6 +606,7 @@ class LibraryRepository(
             _playlists.value = LocalPlaylists.list()
             return
         }
+        if (!metadataAllowed()) return
         val fetched = runCatching { serverClient.value?.getPlaylists(libraryId.first()) }.getOrNull()
         if (fetched != null) {
             _playlists.value = fetched
@@ -672,6 +676,7 @@ class LibraryRepository(
             playlistTracks(id)
             return
         }
+        if (!metadataAllowed()) return
         val tracks = runCatching { serverClient.value?.getPlaylistTracks(id) }.getOrNull() ?: return
         _playlistTrackIds.update { it + (id to tracks.map { track -> track.id }) }
     }
@@ -887,6 +892,9 @@ class LibraryRepository(
             runLocalScan(dao)
             return
         }
+        // Wi-Fi Only off Wi-Fi means no network — and a sync is hundreds of
+        // requests, plus the download top-up it triggers on success.
+        if (!metadataAllowed()) return
         // A build that changed how a track is read has to refill the cache once,
         // because the incremental filter below can only see what the *server*
         // changed — see MusicSource.parserGeneration.

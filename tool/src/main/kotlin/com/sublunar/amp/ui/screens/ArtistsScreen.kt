@@ -33,7 +33,8 @@ import com.sublunar.amp.ui.components.PlayAllRow
 import com.sublunar.amp.ui.components.SplitActionRow
 import com.sublunar.amp.ui.components.rememberGridAnchor
 import com.sublunar.amp.ui.components.rememberSelection
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import kotlinx.coroutines.launch
@@ -214,8 +215,8 @@ class ArtistTopSongsScreen(
                     onBack = { goBack() },
                     titleContent = {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            AppText("Popular Songs", nSp(18), lineHeight = nSp(21), maxLines = 1)
-                            AppText(name, nSp(14), lineHeight = nSp(16), dim = true, maxLines = 1)
+                            AppText("Popular Songs", pxSp(LightType.FINE_PX), lineHeight = pxSp(LightType.FINE_LINE_PX), maxLines = 1)
+                            AppText(name, pxSp(LightType.DETAIL_PX), lineHeight = pxSp(LightType.DETAIL_LINE_PX), dim = true, maxLines = 1)
                         }
                     },
                     rightAction = libraryCornerAction(LibraryPage.ARTIST_POPULAR),

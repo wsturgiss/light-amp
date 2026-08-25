@@ -38,7 +38,7 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sublunar.amp.App
 import com.sublunar.amp.data.SourceKind
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.CANVAS_W_PX
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.ui.LightThemeTokens
@@ -48,7 +48,7 @@ fun AppArtwork(
     coverArtId: String?,
     size: Dp,
     modifier: Modifier = Modifier,
-    corner: Dp = n(4),
+    corner: Dp = px(10),
     fallback: ImageVector = AppIcons.MusicNote,
 ) {
     // Not even the placeholder tile: a column of identical glyphs is the thing
@@ -94,7 +94,7 @@ fun SelectionArtwork(coverArtId: String?, selected: Boolean, size: Dp = px(ROW_A
         AppArtwork(coverArtId, size = size, modifier = Modifier.alpha(EDIT_ARTWORK_ALPHA))
         AppIcon(
             if (selected) AppIcons.Selected else AppIcons.Unselected,
-            size = n(26),
+            size = px(66),
             tint = if (selected) {
                 LightThemeTokens.colors.content
             } else {
@@ -177,15 +177,17 @@ fun TrackRow(
 }
 
 /**
- * List metrics taken from the Light music app, in physical pixels and multiples
- * of 3 so each is a whole dp as well.
+ * The list's type and pitch, in canvas pixels.
  *
- * Sized off its screenshot rather than guessed: at a 163px row pitch the title's
- * caps measure ~43px and the subtitle's ~29px, which at Akkurat's cap height
- * (~0.72 em) puts the two at 60px and 42px. Shared with the queue and the artist
- * list so every row in the app is the same piece of typography.
+ * A notch under what Light's own Music list draws (Copy 62 over Detail 41 on a
+ * 163px pitch), chosen on the device: at Light's sizes the rows crowd the
+ * screen and the titles shout over the covers. The 72px title axis is shared
+ * with that list either way. Sized off its screenshot rather than guessed — at
+ * a 163px pitch the title's caps measure ~43px and the subtitle's ~29px, which
+ * at Akkurat's cap height (~0.72 em) puts the two at 60px and 42px. Shared with
+ * the queue and the artist list so every row in the app is the same piece of
+ * typography.
  */
-// Previous settings, kept for a quick revert: row 160, title 60/72, sub 42/51.
 const val ROW_H_PX = 150
 
 /** A row carrying one line only — see [ArtistRow] with its counts switched off. */
@@ -219,9 +221,6 @@ const val ROW_ACTION_ICON_PX = 57
 private const val ACTION_GAP_PX = 24
 const val ROW_ACTION_H_PX = 102
 
-/** The LP3's panel, in physical pixels — the axis these rows are placed on. */
-private const val SCREEN_W_PX = 1080
-
 /**
  * Where the left of a pair centres, with the right mirrored across the screen.
  *
@@ -230,14 +229,14 @@ private const val SCREEN_W_PX = 1080
  * fits because [ROW_ACTION_ICON_PX] and [ACTION_GAP_PX] are trimmed for these
  * rows — it was over by about two characters at the list's usual spacing.
  */
-private const val SPLIT_LEFT_X_PX = SCREEN_W_PX * 3 / 10
+private const val SPLIT_LEFT_X_PX = CANVAS_W_PX * 3 / 10
 
 /** Wide enough for "Shuffle", narrow enough that the two slots don't meet. */
 /**
  * As wide as a pair can be without overlapping: half the distance between the
  * two centres, each side. "Liked Albums" needs all but a few pixels of it.
  */
-private const val ACTION_SLOT_PX = SCREEN_W_PX - SPLIT_LEFT_X_PX * 2
+private const val ACTION_SLOT_PX = CANVAS_W_PX - SPLIT_LEFT_X_PX * 2
 
 /**
  * A button with no neighbour can have the room a long label wants — as much as
@@ -386,7 +385,7 @@ fun SplitActionRow(
         when {
             left != null && right != null -> {
                 ActionSlot(SPLIT_LEFT_X_PX, left.first, leftLabel, left.second)
-                ActionSlot(SCREEN_W_PX - SPLIT_LEFT_X_PX, right.first, rightLabel, right.second)
+                ActionSlot(CANVAS_W_PX - SPLIT_LEFT_X_PX, right.first, rightLabel, right.second)
             }
             // A lone button keeps the left slot rather than moving to the
             // middle: every one of these rows then starts on the same axis,
@@ -520,7 +519,7 @@ fun NumberedRow(
                 contentAlignment = Alignment.CenterEnd,
             ) {
                 if (current) {
-                    AppIcon(AppIcons.Waveform, size = n(16))
+                    AppIcon(AppIcons.Waveform, size = px(41))
                 } else {
                     AppText(
                         number?.toString() ?: "",

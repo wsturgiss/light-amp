@@ -20,7 +20,7 @@ import com.sublunar.amp.ui.components.ListScreen
 import com.sublunar.amp.ui.components.ScrollableList
 import com.sublunar.amp.ui.components.SectionLabel
 import com.sublunar.amp.ui.components.TextRow
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightIcon
@@ -178,7 +178,7 @@ private fun <T> SortOptions(
                             val descending = naturallyDescending(option) != reversed
                             AppIcon(
                                 if (descending) AppIcons.ArrowDownward else AppIcons.ArrowUpward,
-                                size = n(18),
+                                size = px(46),
                             )
                         }
                     },

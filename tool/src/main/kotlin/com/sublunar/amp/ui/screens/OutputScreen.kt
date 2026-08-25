@@ -35,8 +35,10 @@ import com.sublunar.amp.ui.components.AppIcons
 import com.sublunar.amp.ui.components.AppProgressBar
 import com.sublunar.amp.ui.components.AppText
 import com.sublunar.amp.ui.components.SectionLabel
-import com.sublunar.amp.ui.n
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.components.TextRow
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.px
+import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.cast.DlnaRenderer
@@ -79,19 +81,19 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
             Column(modifier = Modifier.fillMaxSize()) {
                 AppHeader(onBack = { goBack() }, title = "Output")
 
-                Column(modifier = Modifier.padding(horizontal = n(20), vertical = n(10))) {
+                Column(modifier = Modifier.padding(horizontal = px(80), vertical = px(32))) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
-                        AppText("Volume", nSp(16))
-                        AppText("${(volume * 100).roundToInt()}%", nSp(16), dim = true)
+                        AppText("Volume", pxSp(LightType.DETAIL_PX))
+                        AppText("${(volume * 100).roundToInt()}%", pxSp(LightType.DETAIL_PX), dim = true)
                     }
-                    Spacer(Modifier.height(n(10)))
+                    Spacer(Modifier.height(px(26)))
                     VolumeFader(volume)
                 }
 
-                Spacer(Modifier.height(n(8)))
+                Spacer(Modifier.height(px(20)))
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     item { SectionLabel("Playing on") }
                     item {
@@ -121,10 +123,10 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                         item {
                             AppText(
                                 "No network speakers found. They need to be on the same Wi-Fi.",
-                                nSp(13),
-                                lineHeight = nSp(18),
+                                pxSp(LightType.DETAIL_PX),
+                                lineHeight = pxSp(LightType.DETAIL_LINE_PX),
                                 dim = true,
-                                modifier = Modifier.padding(horizontal = n(20), vertical = n(8)),
+                                modifier = Modifier.padding(horizontal = px(80), vertical = px(20)),
                             )
                         }
                     }
@@ -138,10 +140,10 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                         AppText(
                             "Bluetooth speakers and headphones play automatically when they're " +
                                 "paired — Light handles that routing, so it can't be switched here.",
-                            nSp(13),
-                            lineHeight = nSp(18),
+                            pxSp(LightType.DETAIL_PX),
+                            lineHeight = pxSp(LightType.DETAIL_LINE_PX),
                             dim = true,
-                            modifier = Modifier.padding(horizontal = n(20), vertical = n(12)),
+                            modifier = Modifier.padding(horizontal = px(80), vertical = px(31)),
                         )
                     }
                 }
@@ -154,13 +156,13 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(n(12)),
+            horizontalArrangement = Arrangement.spacedBy(px(31)),
         ) {
-            AppIcon(AppIcons.VolumeDown, size = n(22))
+            AppIcon(AppIcons.VolumeDown, size = px(56))
             Box(
                 modifier = Modifier
                     .weight(1f)
-                    .height(n(28))
+                    .height(px(71))
                     .pointerInput(Unit) {
                         awaitEachGesture {
                             val down = awaitFirstDown()
@@ -182,7 +184,7 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
             ) {
                 AppProgressBar(volume)
             }
-            AppIcon(AppIcons.VolumeUp, size = n(22))
+            AppIcon(AppIcons.VolumeUp, size = px(56))
         }
     }
 
@@ -194,20 +196,15 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
         enabled: Boolean = true,
         onClick: (() -> Unit)? = null,
     ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .then(
-                    if (enabled && onClick != null) Modifier.appClickable(onClick = onClick)
-                    else Modifier,
-                )
-                .padding(horizontal = n(20), vertical = n(10)),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppIcon(icon, size = n(22), modifier = if (selected) Modifier else Modifier.alpha(0.5f))
-            Spacer(Modifier.width(n(14)))
-            AppText(label, nSp(17), align = TextAlign.Start, modifier = Modifier.weight(1f), dim = !selected)
-            if (selected) LightIcon(LightIcons.ACCEPT, size = 1.4f)
-        }
+        // The same row every other menu draws, with the route's glyph in
+        // front of it — one component, not a rendering of its own.
+        TextRow(
+            title = label,
+            leading = {
+                AppIcon(icon, size = px(56), modifier = if (selected) Modifier else Modifier.alpha(0.5f))
+            },
+            trailing = { if (selected) LightIcon(LightIcons.ACCEPT, size = 1.4f) },
+            onClick = if (enabled) onClick else null,
+        )
     }
 }

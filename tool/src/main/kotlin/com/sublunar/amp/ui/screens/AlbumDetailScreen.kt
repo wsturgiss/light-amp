@@ -23,7 +23,6 @@ import com.sublunar.amp.ui.components.AppText
 import com.sublunar.amp.ui.components.NumberedRow
 import com.sublunar.amp.ui.components.SelectionHeader
 import com.sublunar.amp.ui.components.rememberSelection
-import com.sublunar.amp.ui.nSp
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import androidx.compose.foundation.layout.Box
@@ -45,6 +44,7 @@ import com.sublunar.amp.ui.components.ROW_LEAD_PX
 import com.sublunar.amp.ui.components.ROW_SUB_PX
 import com.sublunar.amp.ui.components.ROW_SUB_LINE_PX
 import com.sublunar.amp.ui.components.formatRunTime
+import com.sublunar.amp.ui.LightType
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import kotlinx.coroutines.launch
@@ -246,15 +246,15 @@ class AlbumDetailScreen(
     @Composable
     private fun Loading() {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            AppText("Loading…", nSp(16), dim = true)
+            AppText("Loading…", pxSp(LightType.DETAIL_PX), dim = true)
         }
     }
 }
 
 /** The record's own block at the head of its list. */
 private const val CARD_ART_PX = 300
-private const val CARD_TITLE_PX = 60
-private const val CARD_TITLE_LINE_PX = 72
+private const val CARD_TITLE_PX = LightType.COPY_PX
+private const val CARD_TITLE_LINE_PX = LightType.COPY_LINE_PX
 private const val CARD_GAP_PX = 24
 private const val CARD_ICON_PX = 60
 private const val CARD_ICON_GAP_PX = 66

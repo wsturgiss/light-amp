@@ -233,15 +233,39 @@ object App {
         combine(
             settings.dataMode,
             serverReachable,
-            Connectivity.wifiConnected,
-        ) { mode, reachable, onWifi ->
-            // "Wi-Fi only" restricts the library on *cellular*, not everywhere. It
-            // used to hide the streamable library unconditionally, because there was
-            // no way to see the network — Connectivity works that out from the
-            // interface list instead of taking the setting at its word.
-            (mode == DataMode.WIFI_ONLY && !onWifi) || !reachable
+            Connectivity.unmetered,
+        ) { mode, reachable, unmetered ->
+            // "Wi-Fi only" restricts the library on *metered* data, not
+            // everywhere — and the network state comes from the SDK's
+            // ConnectivityManager hooks, which answer for the route the bytes
+            // actually take rather than for which interfaces hold an address.
+            (mode == DataMode.WIFI_ONLY && !unmetered) || !reachable
         }
     }
+
+    /** The mode as it stands, for gates that must answer synchronously. */
+    val dataMode: StateFlow<DataMode> by lazy {
+        settings.dataMode.stateIn(scope, SharingStarted.Eagerly, DataMode.WIFI_ONLY)
+    }
+
+    /**
+     * Whether the server may be spoken to at all — sync, playlists, lyrics.
+     *
+     * Wi-Fi Only's own words are "assume no usable connection", and a sync
+     * alone is hundreds of requests: off an unmetered link it means none. The
+     * other modes allow metadata anywhere; what they restrict is real bytes.
+     */
+    fun metadataAllowed(): Boolean =
+        dataMode.value != DataMode.WIFI_ONLY || Connectivity.isUnmetered()
+
+    /**
+     * Whether real bytes may move — downloads, cover art.
+     *
+     * Free on an unmetered link. On a metered one, only Make it Hurt, whose
+     * name is the consent: everything passes through there, by design.
+     */
+    fun heavyDataAllowed(): Boolean =
+        Connectivity.isUnmetered() || dataMode.value == DataMode.MAKE_IT_HURT
 
     private var coreReady = false
     val isReady: Boolean get() = coreReady
@@ -253,12 +277,14 @@ object App {
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             settings = AppSettings(context.dataStore)
             lightContext = context
-            artwork = ArtworkLoader(context.filesDir, serverClient) { _source.value.id }
+            Connectivity.bind(context, scope)
+            artwork = ArtworkLoader(
+                context.filesDir,
+                serverClient,
+                fetchAllowed = { heavyDataAllowed() },
+            ) { _source.value.id }
             // Whatever was last in use, resolved before anything reads the
             // library — the DAO has to exist before the repository is built.
-            // Before anything reads the layout: an install that predates the
-            // default flip keeps Simplified — see AppSettings.migrateLayoutDefault.
-            runBlocking { settings.migrateLayoutDefault() }
             // The download budget became one for the whole tool; carry the
             // largest of the old per-source ones up to it.
             runBlocking { settings.migrateDownloadLimit() }
@@ -276,11 +302,15 @@ object App {
                 serverClient = serverClient,
                 libraryId = settings.libraryId,
                 offlineOnly = offlineOnly,
+                metadataAllowed = ::metadataAllowed,
                 pending = pending,
                 settings = settings,
                 scope = scope,
             )
-            downloader = Downloader(::dao, downloads, serverClient, settings, scope, context)
+            downloader = Downloader(
+                ::dao, downloads, serverClient, settings, scope, context,
+                heavyDataAllowed = ::heavyDataAllowed,
+            )
             playback = PlaybackController(settings, serverClient, ::dao, downloads, scope)
 
             // Sync is our only reliable connectivity signal, and the moment fresh

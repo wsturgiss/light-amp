@@ -76,7 +76,6 @@ import com.sublunar.amp.ui.components.rememberListAnchor
 import com.sublunar.amp.ui.components.rememberSelection
 import com.sublunar.amp.ui.components.SelectionHeader
 import com.sublunar.amp.ui.components.TrackRow
-import com.sublunar.amp.ui.n
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.ui.LightThemeTokens
@@ -288,10 +287,19 @@ private fun SearchView(
             if (results.artists.isNotEmpty()) {
                 item { SectionLabel("Artists") }
                 items(results.artists, key = { "ar-${it.name}" }) { artist ->
-                    TextRow(title = artist.name, modifier = Modifier.padding(end = lane)) {
-                        onClose()
-                        actions.openArtist(artist.name, Parent.tab(LibraryTab.ARTISTS))
-                    }
+                    // A list row like the albums and songs under it, not a menu
+                    // row: a result is a thing in the library, and the menus'
+                    // larger line between two list rows read as a heading.
+                    ArtistRow(
+                        name = artist.name,
+                        subtitle = "",
+                        imageId = artist.imageId,
+                        modifier = Modifier.padding(end = lane),
+                        onClick = {
+                            onClose()
+                            actions.openArtist(artist.name, Parent.tab(LibraryTab.ARTISTS))
+                        },
+                    )
                 }
             }
             if (results.albums.isNotEmpty()) {
@@ -437,7 +445,7 @@ private const val SEARCH_AXIS_PX = LIST_EDGE_PX + ROW_LEAD_PX
  * they read against ROW_TITLE_PX (54) and its neighbours rather than against a
  * scale of their own, and the header matches the rows beneath it.
  */
-private const val SEARCH_TEXT_PX = ROW_TITLE_PX
+private val SEARCH_TEXT_PX: Int @Composable get() = ROW_TITLE_PX
 private const val SEARCH_GLYPH_PX = ROW_ACTION_ICON_PX
 
 
@@ -926,7 +934,7 @@ private fun LibraryIndex(actions: ShellActions) {
 private fun IndexRow(tab: LibraryTab) {
     TextRow(
         title = tab.title,
-        leading = { AppIcon(iconFor(tab), size = n(22)) },
+        leading = { AppIcon(iconFor(tab), size = px(56)) },
         onClick = {
             // The unnarrowed list: an entry named "Albums" that showed only the
             // liked ones because the filter was left on would be lying.
@@ -941,7 +949,7 @@ private fun IndexRow(tab: LibraryTab) {
 private fun LikedRow(tab: LibraryTab) {
     TextRow(
         title = "Liked ${tab.title}",
-        leading = { AppIcon(AppIcons.Favorite, size = n(22)) },
+        leading = { AppIcon(AppIcons.Favorite, size = px(56)) },
         onClick = {
             App.scope.launch { setLikedOnly(tab, true) }
             LibraryNav.selectTab(tab)
@@ -1179,7 +1187,7 @@ private fun NavTile(
         AppIcon(
             icon = icon,
             // The size the tabs are drawn at, so the bar reads as one row
-            // whichever layout is showing. n(28) was a measure of its own and
+            // whichever layout is showing. A 71px box was a measure of its own and
             // came out visibly smaller than the standard bar's glyphs beside it.
             size = px(NAV_ICON_PX) * scale,
             tint = LightThemeTokens.colors.content,
@@ -1195,11 +1203,6 @@ private fun NavTile(
 
 private const val NAV_TILE_PX = 144
 private const val NAV_TILE_RADIUS_PX = 6
-
-/** Chevron shown next to type icon only on the library root. Match top-bar chevron (n(22)). */
-private const val BROWSE_CHEVRON_SIZE = 22
-/** Slight shrink so icon + chevron balance inside the NAV_TILE hit area. */
-private const val BROWSE_ICON_SCALE_WITH_CHEVRON = 0.92f
 
 // --- Standard layout constants ---
 

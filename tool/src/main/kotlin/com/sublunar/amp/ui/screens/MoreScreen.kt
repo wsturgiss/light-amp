@@ -28,8 +28,9 @@ import com.sublunar.amp.ui.components.HeaderAction
 import com.sublunar.amp.ui.components.ListScreen
 import com.sublunar.amp.ui.components.ScrollableList
 import com.sublunar.amp.ui.components.TextRow
-import com.sublunar.amp.ui.n
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.px
+import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.SealedLightActivity
 import kotlinx.coroutines.launch
 import com.thelightphone.sdk.SimpleLightScreen
@@ -112,7 +113,7 @@ class MoreScreen(
                 item {
                     TextRow(
                         title = "Source",
-                        subtitle = when {
+                        value = when {
                             sources.size > 1 -> "${active?.name.orEmpty()} · ${sources.size} sources"
                             else -> active?.name
                         },
@@ -161,7 +162,7 @@ class MoreScreen(
     private fun Setting(name: String, state: PageSetting) {
         TextRow(
             title = name,
-            subtitle = state.value,
+            value = state.value,
             trailing = state.trailing,
             onClick = state.open?.let { factory -> { change(factory) } },
         )
@@ -315,7 +316,7 @@ private fun sortable(
             {
                 AppIcon(
                     if (descending) AppIcons.ArrowDownward else AppIcons.ArrowUpward,
-                    size = n(18),
+                    size = px(46),
                 )
             }
         },
@@ -385,18 +386,18 @@ class AboutScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed)
     override fun Content() {
         ListScreen(onBack = { goBack() }, title = "About") {
             Column(
-                modifier = Modifier.fillMaxSize().padding(n(24)),
-                verticalArrangement = Arrangement.spacedBy(n(10)),
+                modifier = Modifier.fillMaxSize().padding(px(40)),
+                verticalArrangement = Arrangement.spacedBy(px(26)),
                 horizontalAlignment = Alignment.CenterHorizontally,
             ) {
-                AppText("amp", nSp(26))
-                AppText("Version ${BuildConfig.VERSION_NAME}", nSp(14), dim = true)
+                AppText("amp", pxSp(LightType.HEADING_PX))
+                AppText("Version ${BuildConfig.VERSION_NAME}", pxSp(LightType.DETAIL_PX), dim = true)
                 AppText(
                     "(A)nother (M)usic (P)layer — for the Light Phone III. Streams " +
                         "and downloads from your own Navidrome, Subsonic, Plex or " +
                         "Bandcamp library, and plays files kept on the phone.",
-                    nSp(15),
-                    lineHeight = nSp(21),
+                    pxSp(LightType.PARAGRAPH_PX),
+                    lineHeight = pxSp(LightType.PARAGRAPH_LINE_PX),
                     dim = true,
                     align = TextAlign.Center,
                 )

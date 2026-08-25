@@ -30,8 +30,9 @@ import com.sublunar.amp.ui.components.ListScreen
 import com.sublunar.amp.ui.components.SectionLabel
 import com.sublunar.amp.ui.components.ScrollableList
 import com.sublunar.amp.ui.components.TextRow
-import com.sublunar.amp.ui.n
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.px
+import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import kotlinx.coroutines.launch
@@ -90,17 +91,17 @@ class PlexLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                 if (servers.isEmpty()) {
                     item {
                         Column(
-                            modifier = Modifier.fillMaxWidth().padding(n(20)),
+                            modifier = Modifier.fillMaxWidth().padding(px(40)),
                             horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.spacedBy(n(12)),
+                            verticalArrangement = Arrangement.spacedBy(px(31)),
                         ) {
-                            AppText("plex.tv/link", nSp(18), align = TextAlign.Center)
+                            AppText("plex.tv/link", pxSp(LightType.COPY_PX), align = TextAlign.Center)
                             code?.let {
                                 // The whole point of the screen, so it gets the
                                 // size: read off this and typed somewhere else.
-                                AppText(it, nSp(48), align = TextAlign.Center)
+                                AppText(it, pxSp(122), align = TextAlign.Center)
                             }
-                            AppText(status, nSp(14), dim = true, align = TextAlign.Center)
+                            AppText(status, pxSp(LightType.DETAIL_PX), dim = true, align = TextAlign.Center)
                         }
                     }
                 } else if (pending != null) {
@@ -263,18 +264,18 @@ class PlexManualScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(se
                 }
                 item { SectionLabel(status ?: "For a server not linked to an account") }
                 item {
-                    TextRow(title = "Name", subtitle = name.ifBlank { "Required" }) {
+                    TextRow(title = "Name", value = name.ifBlank { "Required" }) {
                         edit("Name", name) { name = it }
                     }
                 }
                 item {
                     TextRow(
                         title = "Address",
-                        subtitle = address.ifBlank { "http://192.168.1.10:32400" },
+                        value = address.ifBlank { "http://192.168.1.10:32400" },
                     ) { edit("Address", address) { address = it } }
                 }
                 item {
-                    TextRow(title = "Token", subtitle = token.ifBlank { "X-Plex-Token" }) {
+                    TextRow(title = "Token", value = token.ifBlank { "X-Plex-Token" }) {
                         edit("Token", token) { token = it }
                     }
                 }

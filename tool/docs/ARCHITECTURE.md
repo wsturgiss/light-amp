@@ -93,10 +93,25 @@ unconditionally, branch on the result.
 
 ## Units
 
-Every dimension is in the LP3's own physical pixels, against its 40px grid:
-`px(n)` is `(n / 3).dp` and `pxSp(n)` is `(n / 3).sp`. Sizes were measured on the
-panel rather than converted from a design made for another phone — where a
-comment quotes a measurement, it came off a screenshot.
+Every dimension is in the LP3's own physical pixels: a 1080-wide canvas, which
+is Light's 27-unit grid at 40px a unit. `px(n)` and `pxSp(n)` resolve the canvas
+against the window's real width (`Scale`, in `ui/Sizing.kt`) and round to whole
+panel pixels — a design pixel is a fraction of the panel, never a dp. Absolute
+dp is how 0.4.x broke: Android's "smallest width" setting lowers the density,
+every dp becomes fewer pixels, and the app shrank on a panel that hadn't moved,
+while the SDK's own width-fraction components didn't. On the LP3 the factor is
+exactly 1, so the numbers in the code are still what a ruler finds on the
+screen. Sizes were measured on the panel rather than converted from a design
+made for another phone — where a comment quotes a measurement, it came off a
+screenshot.
+
+Type sits on Light's own scale (`LightType`, measured off the phone's stock
+tools): Detail 41, Fine 52, Copy 62, Heading 79. Menu rows follow the shape of
+LightOS's own — one line for a verb, a Detail label over a large value for a
+setting, text on the 80px axis — but set a step down its scale, at Copy: the
+stock menus' Heading was tried and read too loud on a page of rows. The lists
+keep the Music list's 72px axis. The lists sit a notch under Light's own
+(`ROW_*_PX` in `ui/components/Rows.kt`), judged on the device against them.
 
 ## Comments
 

@@ -22,9 +22,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.text.style.TextAlign
 import com.sublunar.amp.ui.px
-import com.sublunar.amp.ui.n
 import com.thelightphone.sdk.ui.LightThemeTokens
-import com.sublunar.amp.ui.nSp
+import com.sublunar.amp.ui.pxSp
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
 
@@ -87,7 +86,7 @@ fun AlphabetIndex(
         modifier = Modifier
             .fillMaxHeight()
             .fillMaxWidth()
-            .padding(vertical = n(4))
+            .padding(vertical = px(10))
             .pointerInput(firstIndex) {
                 awaitEachGesture {
                     // Map the touch's y position onto the strip; works for a tap
@@ -118,8 +117,8 @@ fun AlphabetIndex(
         strip.forEach { letter ->
             AppText(
                 text = letter.toString(),
-                size = nSp(10),
-                lineHeight = nSp(10),
+                size = pxSp(26),
+                lineHeight = pxSp(26),
                 align = TextAlign.Center,
                 dim = letter !in firstIndex,
             )
