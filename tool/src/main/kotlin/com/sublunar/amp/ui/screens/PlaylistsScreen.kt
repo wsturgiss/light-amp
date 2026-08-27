@@ -1,6 +1,7 @@
 package com.sublunar.amp.ui.screens
 
 import android.view.KeyEvent
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -25,6 +27,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -119,63 +122,84 @@ class PlaylistDetailScreen(
             .firstOrNull { it.id == playlistId }?.name ?: playlistName
 
         LibrarySubPage(LibraryPage.PLAYLIST, liveName) {
-            if (selection.active) {
-                SelectionHeader(
-                    selection = selection,
-                    onDelete = {
-                        removeSongs(selection.selected)
-                        // Stay in edit mode with an empty selection: pruning a
-                        // playlist is usually more than one pass, and the X is
-                        // right there when it isn't.
-                        selection.begin()
-                    },
-                    onConfirm = {
-                        openSelectionActions(
-                            selection.pick(entries.value.orEmpty()) { it.key }.map { it.track },
-                            selection,
+            Box(Modifier.fillMaxSize()) {
+                Column(Modifier.fillMaxSize()) {
+                    if (selection.active) {
+                        SelectionHeader(
+                            selection = selection,
+                            onDelete = {
+                                removeSongs(selection.selected)
+                                // Stay in edit mode with an empty selection: pruning a
+                                // playlist is usually more than one pass, and the X is
+                                // right there when it isn't.
+                                selection.begin()
+                            },
+                            onConfirm = {
+                                openSelectionActions(
+                                    selection.pick(entries.value.orEmpty()) { it.key }.map { it.track },
+                                    selection,
+                                )
+                            },
                         )
-                    },
+                    } else {
+                        AppHeader(
+                            onBack = { goBack() },
+                            title = liveName,
+                            // The playlist's own menu, not the library's sort: a
+                            // playlist plays in its own order, so the corner that
+                            // offered a dead sort now offers its verbs — play, rename,
+                            // delete. Same menu as a long-press on its row; see the
+                            // album page, which made the same trade.
+                            rightAction = HeaderAction(
+                                AppIcons.MoreVert,
+                                onLongClick = { go { SettingsScreen(it) } },
+                            ) {
+                                go { PlaylistActionsScreen(it, playlistId, liveName, fromDetail = true) }
+                            },
+                            fitTitle = true,
+                        )
+                    }
+                    when (val list = entries.value) {
+                        null -> Centered("Loading…")
+                        else -> if (list.isEmpty()) Centered("Empty playlist") else TrackList(list, selection)
+                    }
+                }
+                // Dead center and above everything else, since a row-level cue (the
+                // spinner on the affected row) is easy to miss on a slow connection.
+                StatusOverlay(
+                    pending = playlistId in App.library.pendingPlaylistWrites.collectAsState().value,
+                    done = successKeys.value.isNotEmpty(),
                 )
-            } else {
-                AppHeader(
-                    onBack = { goBack() },
-                    title = liveName,
-                    // The playlist's own menu, not the library's sort: a
-                    // playlist plays in its own order, so the corner that
-                    // offered a dead sort now offers its verbs — play, rename,
-                    // delete. Same menu as a long-press on its row; see the
-                    // album page, which made the same trade.
-                    rightAction = HeaderAction(
-                        AppIcons.MoreVert,
-                        onLongClick = { go { SettingsScreen(it) } },
-                    ) {
-                        go { PlaylistActionsScreen(it, playlistId, liveName, fromDetail = true) }
-                    },
-                    fitTitle = true,
-                )
-            }
-            // Edits apply locally right away; this indicates the server save hasn't landed yet.
-            if (playlistId in App.library.pendingPlaylistWrites.collectAsState().value) SavingIndicator()
-            when (val list = entries.value) {
-                null -> Centered("Loading…")
-                else -> if (list.isEmpty()) Centered("Empty playlist") else TrackList(list, selection)
             }
         }
     }
 
     @Composable
-    private fun SavingIndicator() {
+    private fun BoxScope.StatusOverlay(pending: Boolean, done: Boolean) {
+        // Pending wins the moment both are briefly true, e.g. a second edit landing
+        // while the last one's success flash is still winding down.
+        if (!pending && !done) return
         Row(
-            modifier = Modifier.fillMaxWidth().padding(horizontal = px(LIST_EDGE_PX), vertical = px(26)),
+            modifier = Modifier
+                .align(Alignment.Center)
+                .clip(RoundedCornerShape(px(24)))
+                .background(LightThemeTokens.colors.content)
+                .padding(horizontal = px(32), vertical = px(20)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            CircularProgressIndicator(
-                modifier = Modifier.size(px(41)),
-                strokeWidth = px(5),
-                color = LightThemeTokens.colors.content,
-            )
-            Spacer(Modifier.width(px(26)))
-            AppText("Saving…", pxSp(36), dim = true)
+            if (pending) {
+                CircularProgressIndicator(
+                    modifier = Modifier.size(px(34)),
+                    strokeWidth = px(4),
+                    color = LightThemeTokens.colors.background,
+                )
+                Spacer(Modifier.width(px(16)))
+                AppText("Saving…", pxSp(36), color = LightThemeTokens.colors.background)
+            } else {
+                AppIcon(AppIcons.Selected, size = px(41), tint = LightThemeTokens.colors.background)
+                Spacer(Modifier.width(px(16)))
+                AppText("Done", pxSp(36), color = LightThemeTokens.colors.background)
+            }
         }
     }
 
@@ -307,8 +331,6 @@ class PlaylistDetailScreen(
                                         color = LightThemeTokens.colors.content,
                                     )
                                 }
-                            } else if (entry.key in successKeys.value) {
-                                AppIcon(AppIcons.Selected, size = px(51))
                             } else if (editing) {
                                 // Drag handle for reordering within the playlist.
                                 AppIcon(
@@ -375,10 +397,19 @@ class PlaylistDetailScreen(
         }
     }
 
+    /** Shows [StatusOverlay]'s "Done" state for [SUCCESS_FLASH_MS], then clears it. */
+    private suspend fun flashSuccess(keys: Set<String>) {
+        successKeys.value = successKeys.value + keys
+        delay(SUCCESS_FLASH_MS)
+        successKeys.value = successKeys.value - keys
+    }
+
     /**
      * Pessimistic on purpose: the on-screen order doesn't change until the server
-     * confirms it, since pendingPlaylistWrites/SavingIndicator is the only sign an edit
-     * is in flight, and there's currently no error surfaced on failure.
+     * confirms it, since [StatusOverlay] is the only sign an edit is in flight, and
+     * there's currently no error surfaced on failure. `refreshPlaylists` runs after the
+     * fact, unwaited -- it updates each playlist's track-count badge elsewhere, not
+     * this write's own success, so it shouldn't hold up the flash confirming it.
      */
     private fun removeSong(index: Int) {
         val entry = entries.value?.getOrNull(index) ?: return
@@ -387,7 +418,9 @@ class PlaylistDetailScreen(
             try {
                 if (App.library.removeFromPlaylistAt(playlistId, index)) {
                     entries.value = entries.value?.filterNot { it.key == entry.key }
-                    App.library.refreshPlaylists()
+                    App.scope.launch { App.library.refreshPlaylists() }
+                    pendingKeys.value = pendingKeys.value - entry.key
+                    flashSuccess(setOf(entry.key))
                 }
             } finally {
                 pendingKeys.value = pendingKeys.value - entry.key
@@ -410,7 +443,9 @@ class PlaylistDetailScreen(
             try {
                 if (App.library.reorderPlaylist(playlistId, remaining.map { it.track.id })) {
                     entries.value = remaining
-                    App.library.refreshPlaylists()
+                    App.scope.launch { App.library.refreshPlaylists() }
+                    pendingKeys.value = pendingKeys.value - keys
+                    flashSuccess(keys)
                 }
             } finally {
                 pendingKeys.value = pendingKeys.value - keys
@@ -444,13 +479,9 @@ class PlaylistDetailScreen(
                 if (App.library.reorderPlaylist(playlistId, newList.map { it.track.id })) {
                     entries.value = newList
                     scrollToKey.value = topmostKey
-                    App.library.refreshPlaylists()
-                    // Cleared here, ahead of the general `finally`, so the row can show a
-                    // brief success check instead of jumping straight back to its handle.
+                    App.scope.launch { App.library.refreshPlaylists() }
                     pendingKeys.value = pendingKeys.value - keys
-                    successKeys.value = successKeys.value + keys
-                    delay(SUCCESS_FLASH_MS)
-                    successKeys.value = successKeys.value - keys
+                    flashSuccess(keys)
                 }
             } finally {
                 pendingKeys.value = pendingKeys.value - keys
