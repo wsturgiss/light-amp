@@ -2,7 +2,6 @@ package com.sublunar.amp.ui.screens
 
 import android.view.KeyEvent
 import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -188,7 +187,6 @@ class PlaylistDetailScreen(
                 // the phone's normal theme (and its invertColors setting) instead of
                 // assuming most people are on dark mode.
                 .background(LightThemeTokens.colors.background)
-                .border(px(3), LightThemeTokens.colors.content, RoundedCornerShape(px(24)))
                 .padding(horizontal = px(32), vertical = px(20)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
