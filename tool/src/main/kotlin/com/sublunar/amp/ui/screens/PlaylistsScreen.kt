@@ -187,21 +187,22 @@ class PlaylistDetailScreen(
                 // the phone's normal theme (and its invertColors setting) instead of
                 // assuming most people are on dark mode.
                 .background(LightThemeTokens.colors.background)
-                .padding(horizontal = px(32), vertical = px(20)),
+                .padding(horizontal = px(44), vertical = px(28)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             if (pending) {
                 CircularProgressIndicator(
-                    modifier = Modifier.size(px(34)),
-                    strokeWidth = px(4),
+                    modifier = Modifier.size(px(46)),
+                    strokeWidth = px(5),
                     color = LightThemeTokens.colors.content,
                 )
-                Spacer(Modifier.width(px(16)))
-                AppText("Saving…", pxSp(36))
+                Spacer(Modifier.width(px(20)))
+                // Same size as a track title, the largest text already on this screen.
+                AppText("Saving…", pxSp(ROW_TITLE_PX))
             } else {
-                AppIcon(AppIcons.Selected, size = px(41))
-                Spacer(Modifier.width(px(16)))
-                AppText("Done", pxSp(36))
+                AppIcon(AppIcons.Selected, size = px(54))
+                Spacer(Modifier.width(px(20)))
+                AppText("Done", pxSp(ROW_TITLE_PX))
             }
         }
     }
