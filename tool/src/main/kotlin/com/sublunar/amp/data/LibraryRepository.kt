@@ -496,13 +496,11 @@ class LibraryRepository(
     private val playlistMutex = Mutex()
 
     /**
-     * Playlist ids with a mutation still on its way to the server (or the
-     * disk, for a local source) -- e.g. a drag-reorder that can take a few
-     * seconds on Plex, since it has no bulk-reorder call and this app plays
-     * it safe rather than fast. A playlist screen collects this to show that
-     * its last change hasn't landed yet, since the on-screen order already
-     * updated optimistically and gives no other sign that anything is still
-     * in flight.
+     * Playlist ids with a mutation still on its way to the server (or the disk, for a
+     * local source) -- e.g. a drag-reorder that can take a few seconds on Plex, since it
+     * has no bulk-reorder call and this app plays it safe rather than fast. Playlist edits
+     * are applied on screen only once the write this tracks succeeds, so this is what
+     * tells a playlist screen its last change is still in flight.
      */
     private val _pendingPlaylistWrites = MutableStateFlow<Set<String>>(emptySet())
     val pendingPlaylistWrites: StateFlow<Set<String>> = _pendingPlaylistWrites
@@ -741,20 +739,27 @@ class LibraryRepository(
         }
     }
 
-    suspend fun removeFromPlaylistAt(id: String, index: Int) = playlistWrite(id) {
+    /** Whether the edit landed, so callers can hold off applying it locally until it has. */
+    suspend fun removeFromPlaylistAt(id: String, index: Int): Boolean = playlistWrite(id) {
         if (playlistsAreLocal()) {
             LocalPlaylists.removeAt(id, index)
+            true
         } else {
             runCatching { serverClient.value?.removeFromPlaylistAt(id, index) }
+                .onFailure { android.util.Log.w("AmpSync", "removeFromPlaylistAt($id) failed: ${it.message}", it) }
+                .isSuccess
         }
     }
 
-    suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) = playlistWrite(id) {
+    /** Whether the edit landed, so callers can hold off applying it locally until it has. */
+    suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>): Boolean = playlistWrite(id) {
         if (playlistsAreLocal()) {
             LocalPlaylists.reorder(id, orderedSongIds)
+            true
         } else {
             runCatching { serverClient.value?.reorderPlaylist(id, orderedSongIds) }
                 .onFailure { android.util.Log.w("AmpSync", "reorderPlaylist($id) failed: ${it.message}", it) }
+                .isSuccess
         }
     }
 

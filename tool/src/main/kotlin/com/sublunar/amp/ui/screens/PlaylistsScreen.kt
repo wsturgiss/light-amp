@@ -336,30 +336,36 @@ class PlaylistDetailScreen(
         }
     }
 
+    /**
+     * Pessimistic on purpose: the on-screen order doesn't change until the server
+     * confirms it, since pendingPlaylistWrites/SavingIndicator is the only sign an edit
+     * is in flight, and there's currently no error surfaced on failure.
+     */
     private fun removeSong(index: Int) {
-        val current = entries.value ?: return
-        if (index !in current.indices) return
-        entries.value = current.toMutableList().apply { removeAt(index) }
+        val entry = entries.value?.getOrNull(index) ?: return
         App.scope.launch {
-            App.library.removeFromPlaylistAt(playlistId, index)
-            App.library.refreshPlaylists()
+            if (App.library.removeFromPlaylistAt(playlistId, index)) {
+                entries.value = entries.value?.filterNot { it.key == entry.key }
+                App.library.refreshPlaylists()
+            }
         }
     }
 
     /**
      * Remove several at once by rewriting the playlist with the survivors: the
      * per-index endpoint would shift every index behind each removal, and one
-     * request can't half-apply.
+     * request can't half-apply. Pessimistic, like [removeSong].
      */
     private fun removeSongs(keys: Set<String>) {
         val current = entries.value ?: return
         if (keys.isEmpty()) return
         val remaining = current.filterNot { it.key in keys }
         if (remaining.size == current.size) return
-        entries.value = remaining
         App.scope.launch {
-            App.library.reorderPlaylist(playlistId, remaining.map { it.track.id })
-            App.library.refreshPlaylists()
+            if (App.library.reorderPlaylist(playlistId, remaining.map { it.track.id })) {
+                entries.value = remaining
+                App.library.refreshPlaylists()
+            }
         }
     }
 
@@ -368,6 +374,8 @@ class PlaylistDetailScreen(
      * them out in their current relative order, then reinsert them there. For a lone
      * dragged row this is the familiar single-row reorder; for a multi-row selection the
      * whole set rides along together, so moving one selected row moves them all.
+     * Pessimistic, like [removeSong]: a dropped row holds its old spot until the server
+     * confirms the move, then jumps to its new one.
      */
     private fun reorderGroup(indices: Set<Int>, insertAt: Int) {
         val current = entries.value ?: return
@@ -377,10 +385,11 @@ class PlaylistDetailScreen(
         val remaining = current.filterIndexed { i, _ -> i !in indices }
         val newList = remaining.toMutableList().apply { addAll(insertAt.coerceIn(0, remaining.size), moving) }
         if (newList == current) return
-        entries.value = newList
         App.scope.launch {
-            App.library.reorderPlaylist(playlistId, newList.map { it.track.id })
-            App.library.refreshPlaylists()
+            if (App.library.reorderPlaylist(playlistId, newList.map { it.track.id })) {
+                entries.value = newList
+                App.library.refreshPlaylists()
+            }
         }
     }
 }

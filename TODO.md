@@ -1,0 +1,8 @@
+- [x] song select pages should all have the same styling.  Have them all copy the playlist song select styling: a darkened album cover next to each song.  Currently some of the song select pages just have a checkbox with no album art and the checkboxes are styled inconsistently
+- [ ] Plex casting at least to a plex client running on a computer doesn't work
+
+## PR #10 (multi-select-drag-reorder) review findings — to fix after the DRY reorder refactor
+
+- [ ] Bulk delete of multi-selected playlist tracks is still broken on Plex: `PlaylistsScreen.kt` `removeSongs()` calls `reorderPlaylist` with a shorter song-id list, which `PlexClient.kt`'s new size-equality guard (~line 760) now refuses. No longer *silent* — playlist edits are now pessimistic, so the tracks just never disappear — but the delete itself still doesn't work.
+- [ ] `PlexClient.kt` `reorderPlaylist` (~line 786) now issues a sequential awaited PUT move request for every entry from index 1 onward, with no skip for entries already in the correct position (main's prior code skipped no-ops via `if (at != target)`). Dragging one track in a large playlist now fires hundreds of requests, and any single failure aborts the whole reorder.
+- [ ] `LibraryRepository.kt` `pendingPlaylistWrites` (~line 511) tracks in-flight writes with a plain `Set<String>`, not a reference count. Two concurrent writes to the same playlist id can cause the saving indicator to disappear while a save is still in flight.
