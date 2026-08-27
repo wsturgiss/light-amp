@@ -76,9 +76,7 @@ fun AppArtwork(
     }
 }
 
-// Faint enough that the check bubble reads clearly on top of it, but present
-// enough that an album cover is still recognizable behind the handful of
-// tracks it applies to — the whole point is telling albums apart at a glance.
+// Faint enough for the check bubble to read clearly, still recognizable as the cover.
 private const val EDIT_ARTWORK_ALPHA = 0.55f
 
 /**
@@ -502,16 +500,11 @@ fun NumberedRow(
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (selected != null) {
-            // Selecting swaps the number gutter for the same cover-and-bubble
-            // every other select-mode row wears — a printed tracklist's margin
-            // has no equivalent for "choosing among these", so it borrows the
-            // library's instead.
+            // Select mode swaps the number gutter for cover art + check bubble.
             SelectionArtwork(coverArtId, selected)
             Spacer(Modifier.width(px(ROW_GAP_PX)))
         } else {
-            // The number hangs in the gutter, right-aligned the way a printed
-            // tracklist sets its numbers — 9 and 10 end on the same edge — and
-            // the waveform takes the number's place, not a slot beside it.
+            // Number is right-aligned in the gutter; waveform replaces it when playing.
             Box(
                 modifier = Modifier
                     .width(px(NUMBERED_LEAD_PX))
@@ -624,9 +617,7 @@ fun LibraryList(
     headerCount: Int = 0,
     /** The right-hand lane and its bar, as the few lists that never had one. */
     scrollBar: Boolean = true,
-    // Callers that need to drive the scroll themselves (drag-to-reorder
-    // auto-scroll) hoist their own state via rememberListAnchor and pass it
-    // in here instead of leaving this call to make one.
+    // Callers driving scroll themselves (drag auto-scroll) pass their own state here.
     state: LazyListState = rememberListAnchor(anchor, headerCount),
     content: LazyListScope.() -> Unit,
 ) {

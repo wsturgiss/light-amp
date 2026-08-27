@@ -767,9 +767,7 @@ class PlexClient(
             )
             return
         }
-        // The same song can appear twice in a playlist, so entries are pooled
-        // per song id and handed out in their existing relative order, rather
-        // than picked arbitrarily between duplicates.
+        // Duplicate song ids: pool entries per song id, hand out in original order.
         val bySong = mutableMapOf<String, MutableList<Long>>()
         for ((songId, entryId) in entries) {
             bySong.getOrPut(songId) { mutableListOf() }.add(entryId)

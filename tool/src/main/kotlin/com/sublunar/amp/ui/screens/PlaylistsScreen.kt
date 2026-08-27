@@ -72,8 +72,7 @@ import com.thelightphone.sdk.ui.LightThemeTokens
 import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
 
-// A thicker bar than the Now Playing tab underline (3px): it has to read at a
-// glance across the full row width while a finger is on top of the handle.
+// Thicker than the Now Playing tab underline so it reads under a finger.
 private const val DROP_LINE_HEIGHT_PX = 9
 
 class PlaylistDetailScreen(
@@ -86,10 +85,7 @@ class PlaylistDetailScreen(
     // push/pop of the track-options sheet without a fresh server round-trip.
     private val entries = mutableStateOf<List<PlaylistEntry>?>(null)
 
-    // A playlist can contain the same song twice on purpose (see
-    // LocalPlaylists.add), so selection/drag/reorder can't key off track.id --
-    // two rows would select and move as one. Each row gets its own synthetic
-    // key instead, assigned once on load and carried through local edits.
+    // Duplicate songs can appear in a playlist, so rows use a synthetic key, not track.id.
     private var nextEntryKey = 0
     private fun newEntryKey(): String = "e${nextEntryKey++}"
 
@@ -149,11 +145,7 @@ class PlaylistDetailScreen(
                     fitTitle = true,
                 )
             }
-            // The list itself already reflects an edit the moment you make it --
-            // that's a local, optimistic update. This is the only sign that the
-            // save behind it (which can take a few seconds on Plex, since a
-            // reorder there is a chain of requests rather than one) hasn't
-            // landed yet.
+            // Edits apply locally right away; this indicates the server save hasn't landed yet.
             if (playlistId in App.library.pendingPlaylistWrites.collectAsState().value) SavingIndicator()
             when (val list = entries.value) {
                 null -> Centered("Loading…")
@@ -192,50 +184,30 @@ class PlaylistDetailScreen(
         val editing = selection.active
         var draggingIndex by remember { mutableStateOf<Int?>(null) }
         var dragOffsetY by remember { mutableStateOf(0f) }
-        // The slice of dragOffsetY contributed by auto-scroll rather than by the
-        // finger itself. dragOffsetY (finger + auto-scroll combined) is right for
-        // the reorder math -- it's list-relative displacement -- but wrong for
-        // "is the finger still near the edge" and for the overlay's screen
-        // position, both of which want the finger's actual, unscrolled movement.
-        // Without this split, auto-scroll compensating for its own previous
-        // scroll reads as the finger having moved even further into the edge
-        // zone, which pushes the scroll speed up further still: a feedback loop
-        // that runs away and can outrun the list and overshoot off screen.
+        // Portion of dragOffsetY caused by auto-scroll, not the finger; needed to avoid
+        // feedback loops when computing edge proximity and the overlay's screen position.
         var autoScrolledPx by remember { mutableStateOf(0f) }
-        // Normally just the dragged row, but grabbing the handle of a row that's
-        // part of a multi-row selection carries the whole selection along with it.
+        // Grabbing a handle within a multi-row selection drags the whole selection.
         var draggingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
-        // Each dragged row's on-screen top when the drag started, relative to
-        // the list's container -- see DragOverlay for why the floating rows
-        // are anchored here instead of just translating the real row in place.
+        // Each dragged row's on-screen top at drag start, relative to the list container.
         var dragStartTops by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
         var containerCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
         val rowCoords = remember { mutableMapOf<String, LayoutCoordinates>() }
-        // Hit regions for the drag handles, checked by the container-level
-        // gesture below rather than by a pointerInput on each icon -- see that
-        // gesture's comment for why.
+        // Drag handle hit regions, checked by the container-level gesture below.
         val iconCoords = remember { mutableMapOf<String, LayoutCoordinates>() }
         val rowPx = with(LocalDensity.current) { px(160).toPx() }
         val headerCount = if (editing) 0 else 2
         val listState = rememberListAnchor("playlist:$playlistId", headerCount)
-        // Where the drag would land right now, so the line can track a finger
-        // that hasn't lifted yet — null beforeKey means "at the very bottom".
+        // Where the drag would land right now; null beforeKey means "at the very bottom".
         val dropTarget: DropTarget? = draggingIndex?.let { from ->
             val target = dragRowTarget(list, from, dragOffsetY, rowPx)
-            // Keyed on the row-granular target rather than dragOffsetY: dragOffsetY
-            // changes on every pointer-move, but dropAnchor only needs to rerun when
-            // that motion actually crosses into a new row.
+            // Keyed on the row-granular target, not dragOffsetY, so it only recomputes
+            // when the drag crosses into a new row.
             remember(list, from, draggingKeys, target) { DropTarget(dropAnchor(list, from, draggingKeys, target)) }
         }
 
-        // While a drag is pinned against the top or bottom edge, keep the list
-        // creeping in that direction instead of making the user drop, scroll,
-        // and re-grab their way down a long playlist. dragOffsetY is nudged by
-        // the same amount we scroll so the dragged row(s) stay glued under a
-        // finger that hasn't actually moved. This only needs the drag's fixed
-        // starting point (dragStartTops), not the row's live position, so it
-        // keeps working even once auto-scroll has carried the row's real slot
-        // in the list far outside the visible window.
+        // Auto-scroll while a drag is pinned against an edge; nudge dragOffsetY to match
+        // so the dragged row(s) stay glued under the finger.
         LaunchedEffect(draggingIndex) {
             val from = draggingIndex ?: return@LaunchedEffect
             val anchorKey = list.getOrNull(from)?.key ?: return@LaunchedEffect
@@ -264,18 +236,9 @@ class PlaylistDetailScreen(
             }
         }
 
-        // Drag handling lives on this container, not on each row's handle icon.
-        // A gesture that starts on an icon inside the LazyColumn is tied to that
-        // icon's node for its whole lifetime: once auto-scroll carries the real
-        // (invisible) row far enough that the LazyColumn recycles it, the node
-        // is gone, its pointerInput coroutine is cancelled, and the drag dies
-        // mid-air. This Box is never recycled, so hosting the gesture here --
-        // and hit-testing which icon (if any) a touch landed on -- keeps a long
-        // drag alive no matter how far the list scrolls underneath it. Consuming
-        // the down event in the Initial pass (before the LazyColumn's own
-        // scroll gesture and the row's click handler see it in their Main pass)
-        // is what lets this container intercept a handle touch instead of it
-        // being read as a scroll or a tap.
+        // Drag handling lives on this container rather than each row's icon, since
+        // LazyColumn can recycle the row (and cancel its pointerInput) mid-drag.
+        // Consuming Initial pass beats LazyColumn's scroll and the row's click handler.
         Box(
             Modifier
                 .fillMaxSize()
@@ -348,22 +311,13 @@ class PlaylistDetailScreen(
                             go { NowPlayingScreen(it) }
                         }
                     }
-                    // Same glyph as the handles it reveals, so the row says what it does.
                     item { PlayAllRow(AppIcons.Dehaze, "Edit") { selection.begin() } }
                 }
                 itemsIndexed(list, key = { _, e -> e.key }) { index, entry ->
                     val track = entry.track
                     val isDragging = entry.key in draggingKeys
-                    // LazyColumn reuses a scrolled-away row's underlying layout
-                    // node for whichever row scrolls into that slot next, and
-                    // LayoutCoordinates from onGloballyPositioned is a live
-                    // handle to that node rather than a frozen snapshot -- so
-                    // left in place, this row's map entries would silently
-                    // start reporting the *next* occupant's position once this
-                    // one leaves composition. Removing them here instead of
-                    // leaving them to go stale is what keeps a hit-test or a
-                    // dragStartTops lookup for this key from ever reading
-                    // another row's coordinates by accident.
+                    // Clear coords on dispose: LazyColumn recycles nodes, so a stale
+                    // entry would silently report the next occupant's position.
                     DisposableEffect(entry.key) {
                         onDispose {
                             rowCoords.remove(entry.key)
@@ -377,10 +331,7 @@ class PlaylistDetailScreen(
                                 .fillMaxWidth()
                                 .height(px(160))
                                 .onGloballyPositioned { rowCoords[entry.key] = it }
-                                // The real row goes invisible but keeps its slot in the
-                                // list -- its floating stand-in is drawn by DragOverlay,
-                                // which (unlike a plain translation here) survives the
-                                // row scrolling out of the LazyColumn's composed range.
+                                // Real row goes invisible; DragOverlay draws the floating stand-in.
                                 .alpha(if (isDragging) 0f else 1f)
                                 .rowClickable(
                                     onClick = {
@@ -414,9 +365,7 @@ class PlaylistDetailScreen(
                                 AppText(track.title, pxSp(ROW_TITLE_PX), lineHeight = pxSp(ROW_TITLE_LINE_PX), maxLines = 1)
                                 AppText(track.artist, pxSp(ROW_SUB_PX), lineHeight = pxSp(ROW_SUB_LINE_PX), dim = true, maxLines = 1)
                             }
-                            // Drag the handle to reorder the song within the playlist. The
-                            // actual gesture is handled by the container above; this just
-                            // marks where the handle is so that gesture can hit-test it.
+                            // Drag handle for reordering within the playlist.
                             if (editing) AppIcon(
                                 AppIcons.Dehaze,
                                 size = px(51),
@@ -436,19 +385,9 @@ class PlaylistDetailScreen(
     }
 
     /**
-     * The floating copy of the row(s) being dragged, drawn above the list
-     * instead of translated in place. A row translated in place stops being
-     * drawn the moment the LazyColumn decides its untransformed slot is off
-     * screen and recycles it -- exactly what auto-scroll does as it carries a
-     * long drag toward the top or bottom. This overlay lives outside the
-     * LazyColumn entirely, so it keeps drawing at dragStartTops[key] +
-     * fingerOffsetY regardless of how the list underneath has scrolled.
-     *
-     * [fingerOffsetY] is the finger's own movement with any auto-scroll
-     * compensation subtracted back out -- the overlay's position on screen
-     * never shifts just because the list under it scrolled, unlike a row
-     * translated in place, so folding auto-scroll into this offset would move
-     * it twice: once for real, once again visually.
+     * Floating copy of the row(s) being dragged, drawn outside the LazyColumn so it
+     * survives the real row being recycled by auto-scroll. [fingerOffsetY] excludes
+     * auto-scroll's own contribution, since the overlay's position shouldn't move twice.
      */
     @Composable
     private fun BoxScope.DragOverlay(
@@ -502,8 +441,7 @@ class PlaylistDetailScreen(
      * the two can never disagree about where the drag will land.
      */
     private fun dropAnchor(list: List<PlaylistEntry>, from: Int, keys: Set<String>, target: Int): String? {
-        // Index arithmetic standing in for a soloRemaining = list-minus-`from` list:
-        // index i of that list is i in the real list when i < from, else i + 1.
+        // Index math avoids materializing a list-minus-`from` copy.
         val soloSize = list.size - 1
         val clampedTarget = target.coerceIn(0, soloSize)
         val anchorIndex = when {

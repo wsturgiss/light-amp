@@ -491,18 +491,8 @@ class LibraryRepository(
     private val syncMutex = Mutex()
     private var syncJob: Job? = null
 
-    // Serializes every playlist mutation (create/rename/delete/add/remove/
-    // reorder) against every other one. Playlist screens fire these through
-    // App.scope rather than a screen-scoped one, so a slow reorder or bulk
-    // delete from a drag the user has already navigated away from can still
-    // be running when an unrelated "add to playlist" lands moments later.
-    // Plex (and likely the other servers) has no compare-and-swap for a
-    // playlist's contents -- these calls read the current order, then write
-    // a new one back -- so two of them racing on the same playlist can each
-    // work from a view that's already stale by the time they write, and the
-    // loser's write can wipe out entries the winner just added. One playlist
-    // edit finishing before the next starts is worth the (rare, user-paced)
-    // serialization cost.
+    // Serializes playlist mutations: servers read-then-write full playlist state
+    // with no compare-and-swap, so concurrent edits can clobber each other.
     private val playlistMutex = Mutex()
 
     /**
