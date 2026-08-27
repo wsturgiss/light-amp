@@ -64,7 +64,10 @@ import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightThemeTokens
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+
+private const val SUCCESS_FLASH_MS = 1000L
 
 class PlaylistDetailScreen(
     sealed: SealedLightActivity,
@@ -80,6 +83,11 @@ class PlaylistDetailScreen(
     // what tells a row's own UI it's waiting on the server, not just the top-of-screen
     // SavingIndicator.
     private val pendingKeys = mutableStateOf<Set<String>>(emptySet())
+
+    // Rows whose write just landed, briefly -- a slow connection can leave a row
+    // spinning long enough that its success is worth confirming, not just inferring
+    // from the spinner going away.
+    private val successKeys = mutableStateOf<Set<String>>(emptySet())
 
     // Set once a drag-reorder lands, to the topmost row that moved, so TrackList can
     // scroll it into view -- the drop happened somewhere the finger was, not necessarily
@@ -299,6 +307,8 @@ class PlaylistDetailScreen(
                                         color = LightThemeTokens.colors.content,
                                     )
                                 }
+                            } else if (entry.key in successKeys.value) {
+                                AppIcon(AppIcons.Selected, size = px(51))
                             } else if (editing) {
                                 // Drag handle for reordering within the playlist.
                                 AppIcon(
@@ -435,6 +445,12 @@ class PlaylistDetailScreen(
                     entries.value = newList
                     scrollToKey.value = topmostKey
                     App.library.refreshPlaylists()
+                    // Cleared here, ahead of the general `finally`, so the row can show a
+                    // brief success check instead of jumping straight back to its handle.
+                    pendingKeys.value = pendingKeys.value - keys
+                    successKeys.value = successKeys.value + keys
+                    delay(SUCCESS_FLASH_MS)
+                    successKeys.value = successKeys.value - keys
                 }
             } finally {
                 pendingKeys.value = pendingKeys.value - keys
