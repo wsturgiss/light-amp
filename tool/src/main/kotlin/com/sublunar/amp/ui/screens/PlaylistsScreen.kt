@@ -1,10 +1,6 @@
 package com.sublunar.amp.ui.screens
 
 import android.view.KeyEvent
-import androidx.compose.foundation.background
-import androidx.compose.foundation.gestures.awaitEachGesture
-import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -26,22 +22,21 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.runtime.withFrameMillis
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import com.sublunar.amp.ui.components.LIST_EDGE_PX
 import com.sublunar.amp.ui.components.SCROLLBAR_LANE_PX
 import com.sublunar.amp.ui.components.rememberListAnchor
-import kotlinx.coroutines.isActive
+import com.sublunar.amp.ui.components.rememberDragReorderState
+import com.sublunar.amp.ui.components.dragReorderContainer
+import com.sublunar.amp.ui.components.dragRowTarget
+import com.sublunar.amp.ui.components.dropInsertIndex
+import com.sublunar.amp.ui.components.AutoScroll
+import com.sublunar.amp.ui.components.DropIndicatorLine
 import com.sublunar.amp.App
 import com.sublunar.amp.data.Track
 import com.sublunar.amp.data.shuffled
@@ -69,11 +64,7 @@ import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightThemeTokens
-import kotlin.math.roundToInt
 import kotlinx.coroutines.launch
-
-// Thicker than the Now Playing tab underline so it reads under a finger.
-private const val DROP_LINE_HEIGHT_PX = 9
 
 class PlaylistDetailScreen(
     sealed: SealedLightActivity,
@@ -182,120 +173,39 @@ class PlaylistDetailScreen(
     @Composable
     private fun TrackList(list: List<PlaylistEntry>, selection: SelectionState) {
         val editing = selection.active
-        var draggingIndex by remember { mutableStateOf<Int?>(null) }
-        var dragOffsetY by remember { mutableStateOf(0f) }
-        // Portion of dragOffsetY caused by auto-scroll, not the finger; needed to avoid
-        // feedback loops when computing edge proximity and the overlay's screen position.
-        var autoScrolledPx by remember { mutableStateOf(0f) }
-        // Grabbing a handle within a multi-row selection drags the whole selection.
-        var draggingKeys by remember { mutableStateOf<Set<String>>(emptySet()) }
-        // Each dragged row's on-screen top at drag start, relative to the list container.
-        var dragStartTops by remember { mutableStateOf<Map<String, Float>>(emptyMap()) }
-        var containerCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
-        val rowCoords = remember { mutableMapOf<String, LayoutCoordinates>() }
-        // Drag handle hit regions, checked by the container-level gesture below.
-        val iconCoords = remember { mutableMapOf<String, LayoutCoordinates>() }
+        val drag = rememberDragReorderState<String>()
         val rowPx = with(LocalDensity.current) { px(160).toPx() }
         val headerCount = if (editing) 0 else 2
         val listState = rememberListAnchor("playlist:$playlistId", headerCount)
+        val orderedKeys = remember(list) { list.map { it.key } }
         // Where the drag would land right now; null beforeKey means "at the very bottom".
-        val dropTarget: DropTarget? = draggingIndex?.let { from ->
-            val target = dragRowTarget(list, from, dragOffsetY, rowPx)
+        val dropTarget: DropTarget? = drag.draggingIndex?.let { from ->
+            val target = dragRowTarget(list.size, from, drag.dragOffsetY, rowPx)
+            val movingIndices = drag.draggingKeys.mapNotNull { orderedKeys.indexOf(it).takeIf { i -> i >= 0 } }.toSet()
             // Keyed on the row-granular target, not dragOffsetY, so it only recomputes
             // when the drag crosses into a new row.
-            remember(list, from, draggingKeys, target) { DropTarget(dropAnchor(list, from, draggingKeys, target)) }
-        }
-
-        // Auto-scroll while a drag is pinned against an edge; nudge dragOffsetY to match
-        // so the dragged row(s) stay glued under the finger.
-        LaunchedEffect(draggingIndex) {
-            val from = draggingIndex ?: return@LaunchedEffect
-            val anchorKey = list.getOrNull(from)?.key ?: return@LaunchedEffect
-            val startTop = dragStartTops[anchorKey] ?: return@LaunchedEffect
-            var lastFrameMs = 0L
-            while (isActive) {
-                val frameMs = withFrameMillis { it }
-                val dtMs = if (lastFrameMs == 0L) 0L else (frameMs - lastFrameMs).coerceAtMost(48L)
-                lastFrameMs = frameMs
-                if (dtMs == 0L) continue
-                val viewportHeight = containerCoords?.size?.height?.toFloat() ?: continue
-                val pointerY = startTop + rowPx / 2f + (dragOffsetY - autoScrolledPx)
-                val overTop = rowPx - pointerY
-                val overBottom = pointerY - (viewportHeight - rowPx)
-                val pull = when {
-                    overTop > 0f -> -(overTop / rowPx).coerceIn(0f, 1f)
-                    overBottom > 0f -> (overBottom / rowPx).coerceIn(0f, 1f)
-                    else -> 0f
-                }
-                if (pull != 0f) {
-                    val delta = pull * rowPx * 6f * dtMs / 1000f
-                    val consumed = listState.scrollBy(delta)
-                    dragOffsetY += consumed
-                    autoScrolledPx += consumed
-                }
+            remember(list, from, drag.draggingKeys, target) {
+                val insertAt = dropInsertIndex(list.size, from, movingIndices, target)
+                val remaining = list.filterIndexed { i, _ -> i !in movingIndices }
+                DropTarget(remaining.getOrNull(insertAt)?.key)
             }
         }
 
-        // Drag handling lives on this container rather than each row's icon, since
-        // LazyColumn can recycle the row (and cancel its pointerInput) mid-drag.
-        // Consuming Initial pass beats LazyColumn's scroll and the row's click handler.
+        drag.AutoScroll(listState, rowPx)
+
         Box(
             Modifier
                 .fillMaxSize()
-                .onGloballyPositioned { containerCoords = it }
-                .then(
-                    if (!editing) {
-                        Modifier
-                    } else {
-                        Modifier.pointerInput(list) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(pass = PointerEventPass.Initial)
-                                val container = containerCoords?.takeIf { it.isAttached } ?: return@awaitEachGesture
-                                val hitKey = iconCoords.entries.firstOrNull { (_, coords) ->
-                                    coords.isAttached && container.localBoundingBoxOf(coords).contains(down.position)
-                                }?.key ?: return@awaitEachGesture
-                                val hitIndex = list.indexOfFirst { it.key == hitKey }
-                                if (hitIndex < 0) return@awaitEachGesture
-                                down.consume()
-                                val keys = if (hitKey in selection.selected && selection.count > 1) {
-                                    selection.selected
-                                } else {
-                                    setOf(hitKey)
-                                }
-                                dragStartTops = keys.mapNotNull { k ->
-                                    rowCoords[k]?.takeIf { it.isAttached }
-                                        ?.let { k to container.localPositionOf(it, Offset.Zero).y }
-                                }.toMap()
-                                draggingIndex = hitIndex
-                                dragOffsetY = 0f
-                                autoScrolledPx = 0f
-                                draggingKeys = keys
-                                try {
-                                    val pointerId = down.id
-                                    while (true) {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                                        val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                                        if (!change.pressed) {
-                                            change.consume()
-                                            break
-                                        }
-                                        dragOffsetY += change.positionChange().y
-                                        change.consume()
-                                    }
-                                    val from = draggingIndex
-                                    if (from != null) {
-                                        val target = dragRowTarget(list, from, dragOffsetY, rowPx)
-                                        reorderGroup(dropAnchor(list, from, draggingKeys, target), draggingKeys)
-                                    }
-                                } finally {
-                                    draggingIndex = null
-                                    dragOffsetY = 0f
-                                    autoScrolledPx = 0f
-                                    draggingKeys = emptySet()
-                                }
-                            }
-                        }
+                .dragReorderContainer(
+                    state = drag,
+                    enabled = editing,
+                    restartKey = list,
+                    orderedKeys = orderedKeys,
+                    rowPx = rowPx,
+                    groupOf = { hitKey ->
+                        if (hitKey in selection.selected && selection.count > 1) selection.selected else setOf(hitKey)
                     },
+                    onDrop = { movingIndices, insertAt -> reorderGroup(movingIndices, insertAt) },
                 ),
         ) {
             LibraryList(
@@ -315,14 +225,11 @@ class PlaylistDetailScreen(
                 }
                 itemsIndexed(list, key = { _, e -> e.key }) { index, entry ->
                     val track = entry.track
-                    val isDragging = entry.key in draggingKeys
+                    val isDragging = entry.key in drag.draggingKeys
                     // Clear coords on dispose: LazyColumn recycles nodes, so a stale
                     // entry would silently report the next occupant's position.
                     DisposableEffect(entry.key) {
-                        onDispose {
-                            rowCoords.remove(entry.key)
-                            iconCoords.remove(entry.key)
-                        }
+                        onDispose { drag.clear(entry.key) }
                     }
                     Column(Modifier.fillMaxWidth()) {
                         if (dropTarget?.beforeKey == entry.key) DropIndicatorLine()
@@ -330,7 +237,7 @@ class PlaylistDetailScreen(
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .height(px(160))
-                                .onGloballyPositioned { rowCoords[entry.key] = it }
+                                .onGloballyPositioned { drag.rowCoords[entry.key] = it }
                                 // Real row goes invisible; DragOverlay draws the floating stand-in.
                                 .alpha(if (isDragging) 0f else 1f)
                                 .rowClickable(
@@ -369,7 +276,7 @@ class PlaylistDetailScreen(
                             if (editing) AppIcon(
                                 AppIcons.Dehaze,
                                 size = px(51),
-                                modifier = Modifier.onGloballyPositioned { iconCoords[entry.key] = it },
+                                modifier = Modifier.onGloballyPositioned { drag.iconCoords[entry.key] = it },
                             )
                         }
                     }
@@ -378,8 +285,8 @@ class PlaylistDetailScreen(
                     item { DropIndicatorLine() }
                 }
             }
-            if (draggingIndex != null) {
-                DragOverlay(list, draggingKeys, dragStartTops, dragOffsetY - autoScrolledPx, selection)
+            if (drag.draggingIndex != null) {
+                DragOverlay(list, drag.draggingKeys, drag.dragStartTops, drag.fingerOffsetY, selection)
             }
         }
     }
@@ -422,46 +329,6 @@ class PlaylistDetailScreen(
 
     private data class DropTarget(val beforeKey: String?)
 
-    /** Where row [from] would land right now, clamped to the list's bounds. */
-    private fun dragRowTarget(list: List<PlaylistEntry>, from: Int, dragOffsetY: Float, rowPx: Float): Int =
-        (from + (dragOffsetY / rowPx).roundToInt()).coerceIn(0, list.lastIndex)
-
-    /**
-     * The row the dragged block would land in front of right now, or null
-     * meaning "at the very end". [target] is worked out as if only the grabbed
-     * row ([from]) were moving — the same math a solo drag has always used —
-     * so a multi-row selection tracks the finger exactly like a single row
-     * would, instead of running out of room early because the rest of the
-     * selection shrinks the pool of remaining rows to land among. The other
-     * selected rows just ride along: from that anchor point we walk forward to
-     * the nearest row that isn't itself part of the drag, since the block
-     * can't be inserted in front of a row that's also about to move.
-     *
-     * Used for both the preview line and the actual drop ([reorderGroup]), so
-     * the two can never disagree about where the drag will land.
-     */
-    private fun dropAnchor(list: List<PlaylistEntry>, from: Int, keys: Set<String>, target: Int): String? {
-        // Index math avoids materializing a list-minus-`from` copy.
-        val soloSize = list.size - 1
-        val clampedTarget = target.coerceIn(0, soloSize)
-        val anchorIndex = when {
-            clampedTarget == soloSize -> list.size
-            clampedTarget < from -> clampedTarget
-            else -> clampedTarget + 1
-        }
-        return list.subList(anchorIndex, list.size).firstOrNull { it.key !in keys }?.key
-    }
-
-    @Composable
-    private fun DropIndicatorLine() {
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(px(DROP_LINE_HEIGHT_PX))
-                .background(LightThemeTokens.colors.content),
-        )
-    }
-
     @Composable
     private fun Centered(text: String) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -497,21 +364,18 @@ class PlaylistDetailScreen(
     }
 
     /**
-     * Move [keys] as a block to just in front of [beforeKey] (or the very end,
-     * when null): pull them out in their current relative order, then reinsert
-     * them there. For a lone dragged row this is the familiar single-row
-     * reorder; for a multi-row selection the whole set rides along together,
-     * so moving one selected row moves them all.
+     * Move the rows at [indices] as a block to position [insertAt] among the rest: pull
+     * them out in their current relative order, then reinsert them there. For a lone
+     * dragged row this is the familiar single-row reorder; for a multi-row selection the
+     * whole set rides along together, so moving one selected row moves them all.
      */
-    private fun reorderGroup(beforeKey: String?, keys: Set<String>) {
+    private fun reorderGroup(indices: Set<Int>, insertAt: Int) {
         val current = entries.value ?: return
-        if (keys.isEmpty()) return
-        val moving = current.filter { it.key in keys }
+        if (indices.isEmpty()) return
+        val moving = current.filterIndexed { i, _ -> i in indices }
         if (moving.isEmpty() || moving.size == current.size) return
-        val remaining = current.filterNot { it.key in keys }
-        val insertAt = beforeKey?.let { key -> remaining.indexOfFirst { it.key == key } }?.takeIf { it >= 0 }
-            ?: remaining.size
-        val newList = remaining.toMutableList().apply { addAll(insertAt, moving) }
+        val remaining = current.filterIndexed { i, _ -> i !in indices }
+        val newList = remaining.toMutableList().apply { addAll(insertAt.coerceIn(0, remaining.size), moving) }
         if (newList == current) return
         entries.value = newList
         App.scope.launch {

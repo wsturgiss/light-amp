@@ -4,7 +4,6 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
-import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,25 +35,19 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.runtime.withFrameMillis
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.input.pointer.positionChange
-import androidx.compose.ui.layout.LayoutCoordinates
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
-import kotlin.math.roundToInt
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
@@ -100,6 +93,12 @@ import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import com.sublunar.amp.ui.components.rowClickable
 import com.sublunar.amp.ui.components.slowLongPress
+import com.sublunar.amp.ui.components.rememberDragReorderState
+import com.sublunar.amp.ui.components.dragReorderContainer
+import com.sublunar.amp.ui.components.dragRowTarget
+import com.sublunar.amp.ui.components.dropInsertIndex
+import com.sublunar.amp.ui.components.AutoScroll
+import com.sublunar.amp.ui.components.DropIndicatorLine
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightThemeTokens
@@ -340,18 +339,20 @@ class NowPlayingScreen(
         horizontalPadding: Dp = px(41),
         listState: LazyListState = rememberLazyListState(),
     ) {
-        var draggingIndex by remember { mutableStateOf<Int?>(null) }
-        var dragOffsetY by remember { mutableStateOf(0f) }
-        // Portion of dragOffsetY caused by auto-scroll, not the finger; needed to avoid
-        // feedback loops when computing edge proximity and the overlay's screen position.
-        var autoScrolledPx by remember { mutableStateOf(0f) }
-        // Dragged row's on-screen top at drag start, relative to the list container.
-        var dragStartTop by remember { mutableStateOf(0f) }
-        var containerCoords by remember { mutableStateOf<LayoutCoordinates?>(null) }
-        val rowCoords = remember { mutableMapOf<String, LayoutCoordinates>() }
-        // Drag handle hit regions, checked by the container-level gesture below.
-        val iconCoords = remember { mutableMapOf<Int, LayoutCoordinates>() }
+        val drag = rememberDragReorderState<String>()
         val rowPx = with(LocalDensity.current) { px(160).toPx() }
+        // Only the upcoming portion of the queue (past current) can be dragged into.
+        val minIndex = index + 1
+        val orderedKeys = remember(queue) { queue.mapIndexed { i, t -> "$i-${t.id}" } }
+        val dropTarget: DropTarget? = drag.draggingIndex?.let { from ->
+            val target = dragRowTarget(queue.size, from, drag.dragOffsetY, rowPx, minIndex)
+            val movingIndices = drag.draggingKeys.mapNotNull { orderedKeys.indexOf(it).takeIf { i -> i >= 0 } }.toSet()
+            remember(queue, from, drag.draggingKeys, target) {
+                val insertAt = dropInsertIndex(queue.size, from, movingIndices, target)
+                val remaining = orderedKeys.filterIndexed { i, _ -> i !in movingIndices }
+                DropTarget(remaining.getOrNull(insertAt))
+            }
+        }
 
         // The playing track stays at the top: what's already gone is the least
         // interesting part of a queue. Opening the page jumps there outright,
@@ -364,86 +365,27 @@ class NowPlayingScreen(
             anchored = true
         }
 
-        // Auto-scroll while a drag is pinned against an edge; nudge dragOffsetY to match
-        // so the dragged row stays glued under the finger.
-        LaunchedEffect(draggingIndex) {
-            if (draggingIndex == null) return@LaunchedEffect
-            val startTop = dragStartTop
-            var lastFrameMs = 0L
-            while (isActive) {
-                val frameMs = withFrameMillis { it }
-                val dtMs = if (lastFrameMs == 0L) 0L else (frameMs - lastFrameMs).coerceAtMost(48L)
-                lastFrameMs = frameMs
-                if (dtMs == 0L) continue
-                val viewportHeight = containerCoords?.size?.height?.toFloat() ?: continue
-                val pointerY = startTop + rowPx / 2f + (dragOffsetY - autoScrolledPx)
-                val overTop = rowPx - pointerY
-                val overBottom = pointerY - (viewportHeight - rowPx)
-                val pull = when {
-                    overTop > 0f -> -(overTop / rowPx).coerceIn(0f, 1f)
-                    overBottom > 0f -> (overBottom / rowPx).coerceIn(0f, 1f)
-                    else -> 0f
-                }
-                if (pull != 0f) {
-                    val delta = pull * rowPx * 6f * dtMs / 1000f
-                    val consumed = listState.scrollBy(delta)
-                    dragOffsetY += consumed
-                    autoScrolledPx += consumed
-                }
-            }
-        }
+        drag.AutoScroll(listState, rowPx)
 
-        // Drag handling lives on this container rather than each row's icon, since
-        // LazyColumn can recycle the row (and cancel its pointerInput) mid-drag.
-        // Consuming Initial pass beats LazyColumn's scroll and the row's click handler.
         Box(
             modifier
-                .onGloballyPositioned { containerCoords = it }
-                .then(
-                    if (selection.active) {
-                        Modifier
-                    } else {
-                        Modifier.pointerInput(queue, index) {
-                            awaitEachGesture {
-                                val down = awaitFirstDown(pass = PointerEventPass.Initial)
-                                val container = containerCoords?.takeIf { it.isAttached } ?: return@awaitEachGesture
-                                val hitIndex = iconCoords.entries.firstOrNull { (_, coords) ->
-                                    coords.isAttached && container.localBoundingBoxOf(coords).contains(down.position)
-                                }?.key ?: return@awaitEachGesture
-                                if (hitIndex !in queue.indices) return@awaitEachGesture
-                                down.consume()
-                                val rowKey = "$hitIndex-${queue[hitIndex].id}"
-                                val row = rowCoords[rowKey]?.takeIf { it.isAttached }
-                                dragStartTop = row?.let { container.localPositionOf(it, Offset.Zero).y } ?: 0f
-                                draggingIndex = hitIndex
-                                dragOffsetY = 0f
-                                autoScrolledPx = 0f
-                                try {
-                                    val pointerId = down.id
-                                    while (true) {
-                                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                                        val change = event.changes.firstOrNull { it.id == pointerId } ?: break
-                                        if (!change.pressed) {
-                                            change.consume()
-                                            break
-                                        }
-                                        dragOffsetY += change.positionChange().y
-                                        change.consume()
-                                    }
-                                    val from = draggingIndex
-                                    if (from != null && queue.size > index + 1) {
-                                        val target = (from + (dragOffsetY / rowPx).roundToInt())
-                                            .coerceIn(index + 1, queue.lastIndex)
-                                        if (target != from) App.playback.moveInQueue(from, target)
-                                    }
-                                } finally {
-                                    draggingIndex = null
-                                    dragOffsetY = 0f
-                                    autoScrolledPx = 0f
-                                }
-                            }
+                .dragReorderContainer(
+                    state = drag,
+                    enabled = queue.size > minIndex,
+                    restartKey = queue to index,
+                    orderedKeys = orderedKeys,
+                    rowPx = rowPx,
+                    minIndex = minIndex,
+                    groupOf = { hitKey ->
+                        val hitId = queue.getOrNull(orderedKeys.indexOf(hitKey))?.id
+                        if (hitId != null && hitId in selection.selected && selection.count > 1) {
+                            orderedKeys.filterIndexed { i, _ -> i >= minIndex && queue[i].id in selection.selected }
+                                .toSet()
+                        } else {
+                            setOf(hitKey)
                         }
                     },
+                    onDrop = { movingIndices, insertAt -> App.playback.moveGroupInQueue(movingIndices, insertAt) },
                 ),
         ) {
             LazyColumn(
@@ -453,121 +395,126 @@ class NowPlayingScreen(
                 itemsIndexed(queue, key = { i, t -> "$i-${t.id}" }) { i, track ->
                     val isCurrent = i == index
                     val isPast = i < index
-                    val isDragging = i == draggingIndex
                     val rowKey = "$i-${track.id}"
+                    val isDragging = rowKey in drag.draggingKeys
                     // Clear coords on dispose: LazyColumn recycles nodes, so a stale
                     // entry would silently report the next occupant's position.
                     DisposableEffect(rowKey) {
-                        onDispose {
-                            rowCoords.remove(rowKey)
-                            iconCoords.remove(i)
-                        }
+                        onDispose { drag.clear(rowKey) }
                     }
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(px(160))
-                            .onGloballyPositioned { rowCoords[rowKey] = it }
-                            // Real row goes invisible; DragOverlay draws the floating stand-in.
-                            .alpha(if (isDragging) 0f else if (isPast) 0.5f else 1f)
-                            .rowClickable(
-                                onClick = {
-                                    when {
-                                        selection.active -> selection.toggle(track.id)
-                                        isCurrent -> App.playback.togglePlayPause()
-                                        else -> App.playback.jumpTo(i)
+                    Column(Modifier.fillMaxWidth()) {
+                        if (dropTarget?.beforeKey == rowKey) DropIndicatorLine()
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(px(160))
+                                .onGloballyPositioned { drag.rowCoords[rowKey] = it }
+                                // Real row goes invisible; DragOverlay draws the floating stand-in.
+                                .alpha(if (isDragging) 0f else if (isPast) 0.5f else 1f)
+                                .rowClickable(
+                                    onClick = {
+                                        when {
+                                            selection.active -> selection.toggle(track.id)
+                                            isCurrent -> App.playback.togglePlayPause()
+                                            else -> App.playback.jumpTo(i)
+                                        }
+                                    },
+                                    onLongClick = { if (!selection.active) openQueueOptions(i, selection) },
+                                ),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            if (selection.active) {
+                                SelectionArtwork(track.coverArtId, track.id in selection.selected, size = px(ROW_ART_PX))
+                            } else {
+                                AppArtwork(track.coverArtId, size = px(ROW_ART_PX))
+                            }
+                            Spacer(Modifier.width(px(ROW_GAP_PX)))
+                            Column(Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (isCurrent) {
+                                        AppIcon(AppIcons.Waveform, size = px(46))
+                                        Spacer(Modifier.width(px(15)))
                                     }
-                                },
-                                onLongClick = { if (!selection.active) openQueueOptions(i, selection) },
-                            ),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        if (selection.active) {
-                            SelectionArtwork(track.coverArtId, track.id in selection.selected, size = px(ROW_ART_PX))
-                        } else {
-                            AppArtwork(track.coverArtId, size = px(ROW_ART_PX))
-                        }
-                        Spacer(Modifier.width(px(ROW_GAP_PX)))
-                        Column(Modifier.weight(1f)) {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                if (isCurrent) {
-                                    AppIcon(AppIcons.Waveform, size = px(46))
-                                    Spacer(Modifier.width(px(15)))
+                                    AppText(
+                                        track.title,
+                                        pxSp(ROW_TITLE_PX),
+                                        lineHeight = pxSp(ROW_TITLE_LINE_PX),
+                                        maxLines = 1,
+                                    )
                                 }
                                 AppText(
-                                    track.title,
-                                    pxSp(ROW_TITLE_PX),
-                                    lineHeight = pxSp(ROW_TITLE_LINE_PX),
+                                    track.artist,
+                                    pxSp(ROW_SUB_PX),
+                                    lineHeight = pxSp(ROW_SUB_LINE_PX),
+                                    dim = true,
                                     maxLines = 1,
                                 )
                             }
-                            AppText(
-                                track.artist,
-                                pxSp(ROW_SUB_PX),
-                                lineHeight = pxSp(ROW_SUB_LINE_PX),
-                                dim = true,
-                                maxLines = 1,
-                            )
-                        }
-                        // Drag handle for reordering within the upcoming portion of the queue.
-                        if (!isPast && !isCurrent && !selection.active) {
-                            AppIcon(
-                                AppIcons.Dehaze,
-                                size = px(51),
-                                modifier = Modifier
-                                    .width(px(QUEUE_TRAILING_SLOT_PX))
-                                    .onGloballyPositioned { iconCoords[i] = it },
-                            )
+                            // Drag handle for reordering within the upcoming portion of the queue.
+                            if (!isPast && !isCurrent) {
+                                AppIcon(
+                                    AppIcons.Dehaze,
+                                    size = px(51),
+                                    modifier = Modifier
+                                        .width(px(QUEUE_TRAILING_SLOT_PX))
+                                        .onGloballyPositioned { drag.iconCoords[rowKey] = it },
+                                )
+                            }
                         }
                     }
                 }
+                if (dropTarget != null && dropTarget.beforeKey == null) {
+                    item { DropIndicatorLine() }
+                }
             }
-            val draggedTrack = draggingIndex?.let { queue.getOrNull(it) }
-            if (draggedTrack != null) {
-                DragOverlay(draggedTrack, dragStartTop, dragOffsetY - autoScrolledPx, horizontalPadding)
+            if (drag.draggingIndex != null) {
+                DragOverlay(queue, drag.draggingKeys, drag.dragStartTops, drag.fingerOffsetY, horizontalPadding)
             }
         }
     }
 
+    private data class DropTarget(val beforeKey: String?)
+
     /**
-     * The floating copy of the row being dragged, drawn above the list instead
-     * of translated in place. A row translated in place stops being drawn the
-     * moment the LazyColumn decides its untransformed slot is off screen and
-     * recycles it -- exactly what auto-scroll does as it carries a long drag
-     * toward the top or bottom. This overlay lives outside the LazyColumn
-     * entirely, so it keeps drawing at dragStartTop + fingerOffsetY regardless
-     * of how the list underneath has scrolled.
-     *
-     * [fingerOffsetY] is the finger's own movement with any auto-scroll
-     * compensation subtracted back out -- the overlay's position on screen
-     * never shifts just because the list under it scrolled, unlike a row
-     * translated in place, so folding auto-scroll into this offset would move
-     * it twice: once for real, once again visually.
+     * Floating copy of the row(s) being dragged, drawn outside the LazyColumn so it
+     * survives the real row being recycled by auto-scroll. [fingerOffsetY] excludes
+     * auto-scroll's own contribution, since the overlay's position shouldn't move twice.
      */
     @Composable
-    private fun BoxScope.DragOverlay(track: Track, dragStartTop: Float, fingerOffsetY: Float, horizontalPadding: Dp) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .height(px(160))
-                .align(Alignment.TopStart)
-                .graphicsLayer { translationY = dragStartTop + fingerOffsetY }
-                .padding(horizontal = horizontalPadding),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            AppArtwork(track.coverArtId, size = px(ROW_ART_PX))
-            Spacer(Modifier.width(px(ROW_GAP_PX)))
-            Column(Modifier.weight(1f)) {
-                AppText(track.title, pxSp(ROW_TITLE_PX), lineHeight = pxSp(ROW_TITLE_LINE_PX), maxLines = 1)
-                AppText(
-                    track.artist,
-                    pxSp(ROW_SUB_PX),
-                    lineHeight = pxSp(ROW_SUB_LINE_PX),
-                    dim = true,
-                    maxLines = 1,
-                )
+    private fun BoxScope.DragOverlay(
+        queue: List<Track>,
+        draggingKeys: Set<String>,
+        dragStartTops: Map<String, Float>,
+        fingerOffsetY: Float,
+        horizontalPadding: Dp,
+    ) {
+        queue.forEachIndexed { i, track ->
+            val rowKey = "$i-${track.id}"
+            if (rowKey !in draggingKeys) return@forEachIndexed
+            val top = dragStartTops[rowKey] ?: return@forEachIndexed
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(px(160))
+                    .align(Alignment.TopStart)
+                    .graphicsLayer { translationY = top + fingerOffsetY }
+                    .padding(horizontal = horizontalPadding),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                AppArtwork(track.coverArtId, size = px(ROW_ART_PX))
+                Spacer(Modifier.width(px(ROW_GAP_PX)))
+                Column(Modifier.weight(1f)) {
+                    AppText(track.title, pxSp(ROW_TITLE_PX), lineHeight = pxSp(ROW_TITLE_LINE_PX), maxLines = 1)
+                    AppText(
+                        track.artist,
+                        pxSp(ROW_SUB_PX),
+                        lineHeight = pxSp(ROW_SUB_LINE_PX),
+                        dim = true,
+                        maxLines = 1,
+                    )
+                }
+                Spacer(Modifier.width(px(QUEUE_TRAILING_SLOT_PX)))
             }
-            Spacer(Modifier.width(px(QUEUE_TRAILING_SLOT_PX)))
         }
     }
 

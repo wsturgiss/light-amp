@@ -1074,6 +1074,33 @@ class PlaybackController(
         _index.value = p.currentMediaItemIndex.value.coerceIn(0, _queue.value.lastIndex)
     }
 
+    /**
+     * Move several tracks (by index) as a block to position [insertAt] among the rest of
+     * the queue. Reconciled against the player one single-item move at a time, since it
+     * has no batch API.
+     */
+    fun moveGroupInQueue(fromIndices: Set<Int>, insertAt: Int) {
+        val p = player ?: return
+        if (fromIndices.isEmpty()) return
+        val q = _queue.value
+        if (fromIndices.any { it !in q.indices }) return
+        val moving = q.filterIndexed { i, _ -> i in fromIndices }
+        if (moving.size == q.size) return
+        val remaining = q.filterIndexed { i, _ -> i !in fromIndices }
+        val newQueue = remaining.toMutableList().apply { addAll(insertAt.coerceIn(0, remaining.size), moving) }
+        if (newQueue == q) return
+        val working = q.toMutableList()
+        newQueue.forEachIndexed { target, track ->
+            val current = working.indexOfFirst { it === track }
+            if (current != target) {
+                p.moveItem(current, target)
+                working.add(target, working.removeAt(current))
+            }
+        }
+        _queue.value = newQueue
+        _index.value = p.currentMediaItemIndex.value.coerceIn(0, newQueue.lastIndex)
+    }
+
     // --- Modes ---------------------------------------------------------------
 
     fun cycleRepeat() {
