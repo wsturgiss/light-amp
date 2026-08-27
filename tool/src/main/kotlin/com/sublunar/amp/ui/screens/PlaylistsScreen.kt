@@ -81,6 +81,11 @@ class PlaylistDetailScreen(
     // SavingIndicator.
     private val pendingKeys = mutableStateOf<Set<String>>(emptySet())
 
+    // Set once a drag-reorder lands, to the topmost row that moved, so TrackList can
+    // scroll it into view -- the drop happened somewhere the finger was, not necessarily
+    // where the block actually landed once the list re-settles.
+    private val scrollToKey = mutableStateOf<String?>(null)
+
     // Duplicate songs can appear in a playlist, so rows use a synthetic key, not track.id.
     private var nextEntryKey = 0
     private fun newEntryKey(): String = "e${nextEntryKey++}"
@@ -197,6 +202,15 @@ class PlaylistDetailScreen(
         }
 
         drag.AutoScroll(listState, rowPx)
+
+        // Scroll to where a just-confirmed reorder actually landed once the list has
+        // settled into its new order.
+        LaunchedEffect(list, scrollToKey.value) {
+            val key = scrollToKey.value ?: return@LaunchedEffect
+            val target = list.indexOfFirst { it.key == key }
+            if (target >= 0) listState.animateScrollToItem(target)
+            scrollToKey.value = null
+        }
 
         Box(
             Modifier
@@ -411,11 +425,15 @@ class PlaylistDetailScreen(
         val newList = remaining.toMutableList().apply { addAll(insertAt.coerceIn(0, remaining.size), moving) }
         if (newList == current) return
         val keys = moving.map { it.key }.toSet()
+        // The block moves as a unit, so its relative order (and hence which row is
+        // topmost) survives the move -- moving.first() is still the one to scroll to.
+        val topmostKey = moving.first().key
         pendingKeys.value = pendingKeys.value + keys
         App.scope.launch {
             try {
                 if (App.library.reorderPlaylist(playlistId, newList.map { it.track.id })) {
                     entries.value = newList
+                    scrollToKey.value = topmostKey
                     App.library.refreshPlaylists()
                 }
             } finally {
