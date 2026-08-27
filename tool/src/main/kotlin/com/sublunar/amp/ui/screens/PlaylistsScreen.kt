@@ -2,6 +2,7 @@ package com.sublunar.amp.ui.screens
 
 import android.view.KeyEvent
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
@@ -183,7 +184,11 @@ class PlaylistDetailScreen(
             modifier = Modifier
                 .align(Alignment.Center)
                 .clip(RoundedCornerShape(px(24)))
-                .background(LightThemeTokens.colors.content)
+                // Same page background/content pair as everything else, so this follows
+                // the phone's normal theme (and its invertColors setting) instead of
+                // assuming most people are on dark mode.
+                .background(LightThemeTokens.colors.background)
+                .border(px(3), LightThemeTokens.colors.content, RoundedCornerShape(px(24)))
                 .padding(horizontal = px(32), vertical = px(20)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -191,14 +196,14 @@ class PlaylistDetailScreen(
                 CircularProgressIndicator(
                     modifier = Modifier.size(px(34)),
                     strokeWidth = px(4),
-                    color = LightThemeTokens.colors.background,
+                    color = LightThemeTokens.colors.content,
                 )
                 Spacer(Modifier.width(px(16)))
-                AppText("Saving…", pxSp(36), color = LightThemeTokens.colors.background)
+                AppText("Saving…", pxSp(36))
             } else {
-                AppIcon(AppIcons.Selected, size = px(41), tint = LightThemeTokens.colors.background)
+                AppIcon(AppIcons.Selected, size = px(41))
                 Spacer(Modifier.width(px(16)))
-                AppText("Done", pxSp(36), color = LightThemeTokens.colors.background)
+                AppText("Done", pxSp(36))
             }
         }
     }
