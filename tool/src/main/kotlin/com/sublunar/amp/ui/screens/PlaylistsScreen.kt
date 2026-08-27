@@ -76,6 +76,11 @@ class PlaylistDetailScreen(
     // push/pop of the track-options sheet without a fresh server round-trip.
     private val entries = mutableStateOf<List<PlaylistEntry>?>(null)
 
+    // Rows with a write in flight -- edits are pessimistic (see removeSong), so this is
+    // what tells a row's own UI it's waiting on the server, not just the top-of-screen
+    // SavingIndicator.
+    private val pendingKeys = mutableStateOf<Set<String>>(emptySet())
+
     // Duplicate songs can appear in a playlist, so rows use a synthetic key, not track.id.
     private var nextEntryKey = 0
     private fun newEntryKey(): String = "e${nextEntryKey++}"
@@ -272,12 +277,22 @@ class PlaylistDetailScreen(
                                 AppText(track.title, pxSp(ROW_TITLE_PX), lineHeight = pxSp(ROW_TITLE_LINE_PX), maxLines = 1)
                                 AppText(track.artist, pxSp(ROW_SUB_PX), lineHeight = pxSp(ROW_SUB_LINE_PX), dim = true, maxLines = 1)
                             }
-                            // Drag handle for reordering within the playlist.
-                            if (editing) AppIcon(
-                                AppIcons.Dehaze,
-                                size = px(51),
-                                modifier = Modifier.onGloballyPositioned { drag.iconCoords[entry.key] = it },
-                            )
+                            if (entry.key in pendingKeys.value) {
+                                Box(Modifier.size(px(51)), contentAlignment = Alignment.Center) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(px(34)),
+                                        strokeWidth = px(4),
+                                        color = LightThemeTokens.colors.content,
+                                    )
+                                }
+                            } else if (editing) {
+                                // Drag handle for reordering within the playlist.
+                                AppIcon(
+                                    AppIcons.Dehaze,
+                                    size = px(51),
+                                    modifier = Modifier.onGloballyPositioned { drag.iconCoords[entry.key] = it },
+                                )
+                            }
                         }
                     }
                 }
@@ -343,10 +358,15 @@ class PlaylistDetailScreen(
      */
     private fun removeSong(index: Int) {
         val entry = entries.value?.getOrNull(index) ?: return
+        pendingKeys.value = pendingKeys.value + entry.key
         App.scope.launch {
-            if (App.library.removeFromPlaylistAt(playlistId, index)) {
-                entries.value = entries.value?.filterNot { it.key == entry.key }
-                App.library.refreshPlaylists()
+            try {
+                if (App.library.removeFromPlaylistAt(playlistId, index)) {
+                    entries.value = entries.value?.filterNot { it.key == entry.key }
+                    App.library.refreshPlaylists()
+                }
+            } finally {
+                pendingKeys.value = pendingKeys.value - entry.key
             }
         }
     }
@@ -361,10 +381,15 @@ class PlaylistDetailScreen(
         if (keys.isEmpty()) return
         val remaining = current.filterNot { it.key in keys }
         if (remaining.size == current.size) return
+        pendingKeys.value = pendingKeys.value + keys
         App.scope.launch {
-            if (App.library.reorderPlaylist(playlistId, remaining.map { it.track.id })) {
-                entries.value = remaining
-                App.library.refreshPlaylists()
+            try {
+                if (App.library.reorderPlaylist(playlistId, remaining.map { it.track.id })) {
+                    entries.value = remaining
+                    App.library.refreshPlaylists()
+                }
+            } finally {
+                pendingKeys.value = pendingKeys.value - keys
             }
         }
     }
@@ -385,10 +410,16 @@ class PlaylistDetailScreen(
         val remaining = current.filterIndexed { i, _ -> i !in indices }
         val newList = remaining.toMutableList().apply { addAll(insertAt.coerceIn(0, remaining.size), moving) }
         if (newList == current) return
+        val keys = moving.map { it.key }.toSet()
+        pendingKeys.value = pendingKeys.value + keys
         App.scope.launch {
-            if (App.library.reorderPlaylist(playlistId, newList.map { it.track.id })) {
-                entries.value = newList
-                App.library.refreshPlaylists()
+            try {
+                if (App.library.reorderPlaylist(playlistId, newList.map { it.track.id })) {
+                    entries.value = newList
+                    App.library.refreshPlaylists()
+                }
+            } finally {
+                pendingKeys.value = pendingKeys.value - keys
             }
         }
     }
