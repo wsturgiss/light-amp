@@ -270,12 +270,26 @@ class PlaybackController(
     private fun rewindIfQueueFinished(p: LightAudioPlayer) {
         if (isCasting) return
         if (!hasPlayed) return
+        // AmpDbg: temporary regression instrumentation (2026-08-31)
+        android.util.Log.i("AmpDbg", "rewind? repeat=${_repeatMode.value} idx=${_index.value}/${_queue.value.lastIndex} pDur=${p.durationMs.value} pPos=${p.positionMs.value}")
         if (_repeatMode.value != RepeatMode.OFF) return
         val last = _queue.value.lastIndex
         if (last < 0 || _index.value != last) return
-        val duration = p.durationMs.value
-        if (duration <= 0L) return
-        if (p.positionMs.value < duration - QUEUE_END_SLACK_MS) return
+        // The player's own duration when it has one — but a chunked transcode
+        // may never report any (it stays 0 for the whole track), which silently
+        // disabled this for streamed queues: the queue stopped at the end of
+        // the last track and just sat there. The library's number is the
+        // fallback, compared in the track's own timeline the way the readouts
+        // are.
+        val reported = p.durationMs.value
+        val endReached = if (reported > 0L) {
+            p.positionMs.value >= reported - QUEUE_END_SLACK_MS
+        } else {
+            val known = _durationMs.value
+            known > 0L && _positionMs.value >= known - QUEUE_END_SLACK_MS
+        }
+        if (!endReached) return
+        android.util.Log.i("AmpDbg", "rewind fires: pausing + seekToIndex(0)")
         // Paused first: a seek out of the ended state with playWhenReady still
         // true starts the queue over from the top instead of waiting there.
         //
@@ -301,6 +315,7 @@ class PlaybackController(
         val p = audio.newPlayer(LightAudioUsage.Music)
         player = p
         p.onPlaybackError = { error ->
+            android.util.Log.i("AmpDbg", "playbackError ${error.errorCodeName} idx=${_index.value} pos=${_positionMs.value}")
             // A bad HTTP status is proof the server is *there*: it answered, it
             // just didn't like the request. Treating that as "unreachable" takes
             // the whole library down to downloads-only over one bad URL, and it
@@ -315,6 +330,7 @@ class PlaybackController(
         scope.launch {
             p.isPlaying.collect { playing ->
                 if (isCasting) return@collect
+                android.util.Log.i("AmpDbg", "playing=$playing pIdx=${p.currentMediaItemIndex.value} idx=${_index.value} pPos=${p.positionMs.value} pDur=${p.durationMs.value} off=$streamOffsetMs")
                 _isPlaying.value = playing
                 if (playing) {
                     hasPlayed = true
@@ -365,11 +381,13 @@ class PlaybackController(
                     streamOffsetMs > 0 -> known.takeIf { it > 0L } ?: (reported + streamOffsetMs)
                     else -> reported
                 }
+                android.util.Log.i("AmpDbg", "duration: reported=$reported known=$known off=$streamOffsetMs -> ${_durationMs.value}")
             }
         }
         scope.launch {
             p.currentMediaItemIndex.collect { idx ->
                 if (isCasting) return@collect
+                android.util.Log.i("AmpDbg", "pIdx=$idx (ui idx=${_index.value})")
                 if (idx >= 0 && idx != _index.value) {
                     _index.value = idx
                     // A new track is a fresh stream from its own beginning.
@@ -862,6 +880,13 @@ class PlaybackController(
             track,
             effectiveFormat(),
             timeOffsetSeconds = (target / 1000).toInt(),
+            // Same as toAudioItem, and it matters even more here: an estimated
+            // length makes ExoPlayer believe the transcode is bounded and
+            // range-seekable, and its end-of-file probe then asks for bytes the
+            // stream doesn't have — Navidrome answers 416 and playback errors.
+            // That was the restored queue "acting weird", and every repeat wrap
+            // of an offset item dying.
+            estimateContentLength = false,
             sessionId = sessionIdFor(track.id),
         )
         streamOffsetMs = target
@@ -878,7 +903,10 @@ class PlaybackController(
             ),
         )
         scope.launch(Dispatchers.Main.immediate) {
-            val wasPlaying = p.isPlaying.value
+            // Intent, not the instantaneous state: isPlaying is false during a
+            // rebuffer, and a seek issued in that window read it as "paused"
+            // and left the replacement stream parked.
+            val wasPlaying = p.playWhenReady
             val at = _index.value
             // Replaced in place rather than removed and re-added. Taking the
             // playing item out moves the player's idea of the current index —
@@ -941,7 +969,19 @@ class PlaybackController(
             return
         }
         val p = player ?: return
-        if (_positionMs.value > PREVIOUS_RESTART_MS) p.seekTo(0) else p.skipToPrevious()
+        android.util.Log.i("AmpDbg", "previous: uiPos=${_positionMs.value} pPos=${p.positionMs.value} off=$streamOffsetMs -> ${if (_positionMs.value > PREVIOUS_RESTART_MS) "restart" else "skipToPrevious"}")
+        if (_positionMs.value > PREVIOUS_RESTART_MS) {
+            // The controller's seek, not the player's. A restored or
+            // server-seeked stream is a shorter file that begins mid-track, so
+            // the player's 0 is that offset: the clock snapped back to the
+            // offset instead of 0:00, and since that reads as >3s, every later
+            // press restarted again — Previous could never reach the previous
+            // track. seekTo(0) rebuilds such a stream at the track's real
+            // beginning and clears the offset.
+            seekTo(0)
+        } else {
+            p.skipToPrevious()
+        }
     }
 
     /** Jump to an arbitrary queue position (tapping a queue row). */
@@ -1093,6 +1133,7 @@ class PlaybackController(
             RepeatMode.TRACK -> Player.REPEAT_MODE_ONE
             RepeatMode.QUEUE -> Player.REPEAT_MODE_ALL
         }
+        android.util.Log.i("AmpDbg", "setRepeat $mode -> player reads back ${player?.repeatMode}")
     }
 
     /**
@@ -2116,6 +2157,12 @@ class PlaybackController(
         // new track and would clear the offset this is about to set.
         _index.value = index
         _positionMs.value = at
+        // Seeded from the library the way the index collector seeds a track
+        // change — which this path deliberately suppresses by pre-setting
+        // _index. A chunked stream may never report a duration at all, and its
+        // 0 never re-emits, so a restored queue was left with a position and
+        // no end: a full bar and a total of 0:00.
+        track.durationMs.takeIf { it > 0L }?.let { _durationMs.value = it }
         val client = serverClient.value
         if (at > 1_000L && client != null && needsServerSeek(track, askPlayer = false)) {
             android.util.Log.i("AmpCast", "rebuild idx=$index at=$at via server offset")
@@ -2123,6 +2170,9 @@ class PlaybackController(
                 track,
                 effectiveFormat(),
                 timeOffsetSeconds = (at / 1000).toInt(),
+                // See serverSeek: an estimated length invites range probes the
+                // transcode can't answer (416), which errored the restore.
+                estimateContentLength = false,
                 sessionId = sessionIdFor(track.id),
             )
             streamOffsetMs = at

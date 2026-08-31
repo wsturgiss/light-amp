@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Fixed
+
+- Streamed tracks behave like downloaded ones again around the edges.
+  A reopened app showed the restored track with a full bar and a total of
+  0:00; Previous could only ever restart the song — from the wrong place —
+  and never reach the previous track; the end of a streamed queue didn't
+  park back at the start; and repeat modes could stop playback or wrap to
+  the first track paused. One family of causes: the seeked/restored stream
+  (a shorter file starting mid-track) was advertised with a guessed length
+  that invited range requests the server answers with 416, the player's own
+  duration never arrives for a live transcode, a queue edit could land
+  after the seek that should follow it, and a seek during rebuffering read
+  "paused" and never resumed. All are fixed and were verified against a
+  real Navidrome on the emulator; none of this touched downloads, which is
+  why it went unseen so long.
+
 ### Changed
 
 - Light's SDK now comes in as the `light-sdk` submodule, pinned to upstream

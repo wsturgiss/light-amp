@@ -1,5 +1,5 @@
 diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
-index 74f1e76..5294880 100644
+index 74f1e76..3a92e25 100644
 --- a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 +++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 @@ -1,9 +1,12 @@
@@ -211,10 +211,18 @@ index 74f1e76..5294880 100644
      /**
       * Start or resume playback if audio focus is available.
       *
-@@ -225,6 +368,18 @@ class LightAudioPlayer internal constructor(
+@@ -225,6 +368,26 @@ class LightAudioPlayer internal constructor(
          }
      }
  
++    /**
++     * SDK PATCH (additive, upstreamable): the caller's intent, as distinct
++     * from [isPlaying]. True while buffering toward playback: a seek handler
++     * that reads [isPlaying] mid-rebuffer concludes "paused" and never
++     * resumes, which strands a slow stream silently.
++     */
++    val playWhenReady: Boolean get() = player?.playWhenReady == true
++
 +    /**
 +     * SDK PATCH (additive, upstreamable): whether the current stream can be
 +     * seeked within.
@@ -230,7 +238,7 @@ index 74f1e76..5294880 100644
      /** Seeks to [ms], clamped to the resolved duration. Unknown duration clamps to zero. */
      fun seekTo(ms: Long) {
          commands.dispatch { player ->
-@@ -253,6 +408,87 @@ class LightAudioPlayer internal constructor(
+@@ -253,6 +416,91 @@ class LightAudioPlayer internal constructor(
          commands.dispatch(Player::seekToPreviousMediaItem)
      }
  
@@ -268,11 +276,15 @@ index 74f1e76..5294880 100644
 +     * range playing untouched.
 +     */
 +    fun replaceRange(fromIndex: Int, toIndex: Int, items: List<LightAudioItem>) {
-+        scope.launch {
-+            commands.dispatch { player ->
-+                val mediaItems = items.mapIndexed { index, item -> item.toMediaItem(fromIndex + index) }
-+                player.replaceMediaItems(fromIndex, toIndex, mediaItems)
-+            }
++        // Synchronous like every other op — callers hop to Main themselves.
++        // This used to launch into the player scope, and a nested Main.immediate
++        // coroutine queues behind the one running: a caller that replaced the
++        // playing item and then seeked/played saw those run *first*, so the
++        // late replace yanked the current item out from under an armed repeat
++        // mode and playback hopped to the wrong index, paused.
++        commands.dispatch { player ->
++            val mediaItems = items.mapIndexed { index, item -> item.toMediaItem(fromIndex + index) }
++            player.replaceMediaItems(fromIndex, toIndex, mediaItems)
 +        }
 +    }
 +
@@ -318,7 +330,7 @@ index 74f1e76..5294880 100644
      /** Waits for connection, returning `false` if this player is released first. */
      suspend fun awaitReady(): Boolean = awaitPlayerReady(availability)
  
-@@ -268,6 +504,15 @@ class LightAudioPlayer internal constructor(
+@@ -268,6 +516,15 @@ class LightAudioPlayer internal constructor(
          try {
              cancelPendingConnection?.invoke()
              cancelPendingConnection = null
