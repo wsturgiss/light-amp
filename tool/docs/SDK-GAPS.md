@@ -2,7 +2,8 @@
 
 Amp ships today, but parts of it are built around the SDK because there is no
 supported route. Each item below is a workaround we would delete the day an API
-exists. Checked against `upstream/main` at `c86e40a`, 19 Aug 2026.
+exists. Checked against `upstream/main` at `3df3c24` (SDK 0.1.1, 30 Aug 2026) —
+which is also the commit the `light-sdk` submodule is pinned to.
 
 ## Workarounds we would drop
 
@@ -88,45 +89,51 @@ exists. Checked against `upstream/main` at `c86e40a`, 19 Aug 2026.
 
 ## Answered upstream, not yet adopted
 
-### Detached audio — PR #148, merged 5 Aug 2026
+### Detached audio — PR #148, merged 5 Aug 2026, in our pinned SDK since 0.1.1
 
 The supported route for background audio: `newPlayer(playback = Detached)` plus
-`capabilities = ["detached-audio"]` in `lighttool.toml`.
+`capabilities = ["detached-audio"]` in `lighttool.toml`. One detached session
+per process, a 15-minute idle stop, and the Gradle plugin emits the service
+into the tool's own manifest.
 
-Not adopted yet because it rewrote `LightAudioPlayer.kt`, which is where most of
-our additions live:
+The hard half is already done. What blocked adoption was that #148 rewrote
+`LightAudioPlayer.kt`, where most of our additions live; the 0.1.1 update
+(30 Aug 2026) rebased every one of them onto the rewritten player, and the
+media-session spike is now explicitly gated to Attached playback. What remains:
 
-- Our copy 528 lines, upstream 360, differing 456.
-- `onPlaybackError`, `replaceRange`, `setHandleAudioBecomingNoisy` and
-  `isCurrentItemSeekable` are ours, none upstream.
-- `replaceRange` and `isCurrentItemSeekable` reach into player internals that may
-  not survive a controller boundary. `PlaybackController` uses the first for the
-  gapless cast hand-off and the second for the seek fallback.
+- Declare the capability, create the player Detached, revert the
+  background-audio spike (`spike-background-services.patch` and the session
+  half of `audio-player.patch`).
+- `replaceRange` and `isCurrentItemSeekable` both ride the `Player` interface,
+  which a detached `MediaController` implements — they should survive the
+  boundary, but "should" is a word for the emulator. Re-test on the phone:
+  background playback, keep-alive through pause, gapless cast hand-off, the
+  seek fallback.
+- Open question: whether hardware volume keys work through the SDK's own
+  service, or the volume-key half of the spike outlives the rest.
 
-Worth doing deliberately, with background playback, cast hand-off and download
-throttling re-tested on the device.
+### Connectivity — PR #166: adopted, gap closed
 
-### Connectivity — PR #166, merged 17 Aug 2026
-
-`LightConnectivity` gives `isConnected`, `isWifi`, `isMetered` and an observer.
-That replaces our `Connectivity.kt`, which polls network interfaces every five
-seconds because `getSystemService` is blocked. We will drop it when we take a
-newer SDK.
+`LightConnectivity` gives connected/Wi-Fi/metered and an observer. Amp took it
+in 0.5.0 (as a verbatim backport, replacing an interface-polling heuristic);
+since the 0.1.1 pin it is plain upstream code and the backport patch is gone.
+The tool's `Connectivity.kt` remains only as a thin metered-ness wrapper for
+the data-mode gates.
 
 ## Smaller additions
 
 Already written as patches; see [SDK-PATCHES.md](SDK-PATCHES.md), which is the
-authority. None were upstream as of `c86e40a`.
+authority. None were upstream as of `3df3c24` (0.1.1).
 
 | Gap | Why |
 |---|---|
 | `popToRoot()` | A tab bar visible on nested screens has to unwind to the root. Without it, tapping a tab three levels deep only goes back one. |
-| `onPlaybackError` | Media3 reports failures; the SDK swallowed them. A player that cannot report a failure cannot fall back to a downloaded copy. |
+| `onPlaybackError` | Media3 reports failures; the SDK swallowed them. A player that cannot report a failure cannot fall back to a downloaded copy. 0.1.1 grew an `error: StateFlow<LightAudioError?>` — real progress, but it maps the exception away and the fallback logic reads the raw `errorCode` (a bad HTTP status proves the server is *there*). The callback stays until the flow carries the code. |
 | Room migrations | `buildDatabase` exposes no builder, so a tool cannot register a migration. We patched in `fallbackToDestructiveMigration`, which means every schema change wipes the user's cache and download index. |
 | `replaceRange()` | Reordering by repeated `moveItem` rebuilds the session queue per move; a few hundred moves exhausts memory. |
 | `isCurrentItemSeekable` | Whether the stream that arrived can be seeked. Guessing from the requested format is wrong when a server declines to transcode, and it fails silently. |
 | `setHandleAudioBecomingNoisy(true)` | One line on the builder. Without it, unplugging headphones leaves music playing out of the speaker. Doing it by hand needs a `BroadcastReceiver`, which the sandbox blocks. |
-| Playback state | The player exposes position, duration and `isPlaying`, but not the state behind them. A tool cannot tell a finished queue from a pause, so we infer it from position against duration. |
+| Playback state | The player exposes position, duration and `isPlaying`, but not the state behind them. A tool cannot tell a finished queue from a pause, so we infer it from position against duration. 0.1.1 added `availability` (connection lifecycle) and the `error` flow, but `STATE_ENDED` is still not surfaced. |
 | `TextInputKeyboardCallback` | `LightEmbeddedLp3Keyboard` is public and usable on a tool's own screen, but the callback that turns keys into edits is `internal`. We copied ~60 lines of it, including surrogate-aware backspace, to put a keyboard under our search results. |
 | Splash icon centring | The loading glyph sits ~88px above centre on a 1240px panel; the artwork is off-centre inside its own viewport. |
 
