@@ -26,6 +26,10 @@ minutes, where the spike held on indefinitely.
 - **Measured:** without it, a backgrounded tool is throttled about 9x on the LP3.
 - **Would replace it:** an SDK transfer primitive — fetch this URL to this file,
   keep going in the background. A podcast or photo tool would want the same.
+- **Requested upstream:**
+  [lightphone/light-sdk#187](https://github.com/lightphone/light-sdk/issues/187)
+  (31 Aug 2026) proposes a `background-transfer` capability in detached audio's
+  shape, with the throttle measurements attached.
 - **Revert:** delete `LightTransferService.kt`, its calls in `Downloader.kt`, and
   the service and permission from the SDK manifest.
 

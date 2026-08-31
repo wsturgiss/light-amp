@@ -25,7 +25,7 @@ Two kinds of change live here, and the distinction is the whole point:
 | `loading-icon-centering.patch` | Centres the splash word in its 240-unit viewport (it sat 87.5px high on the panel, measured). |
 | `pop-to-root-screen.patch` | The public `LightScreen.popToRoot()` for the unwind in `light-activity.patch`. |
 | `runtime-permission.patch` | `hasRuntimePermission()` — asks the process about a grant directly; the server answers from policy, not the grant, and can say Blocked for access the phone already allows. |
-| `spike-background-transfer.patch` | `LightTransferService` (`dataSync` foreground service so long downloads aren't throttled 9× in the cached bucket) + its manifest entry and permissions. The background-*audio* half of this spike was retired when Amp adopted `capabilities = ["detached-audio"]`; transfers still have no official answer — the feature request to Light is the ask. |
+| `spike-background-transfer.patch` | `LightTransferService` (`dataSync` foreground service so long downloads aren't throttled 9× in the cached bucket) + its manifest entry and permissions. The background-*audio* half of this spike was retired when Amp adopted `capabilities = ["detached-audio"]`; the official answer for transfers is requested upstream as [light-sdk#187](https://github.com/lightphone/light-sdk/issues/187). |
 | `spike-display-color.patch` | `LightDisplayColor` — lifts LightOS's global greyscale daltonizer while Amp is foreground, via `WRITE_SECURE_SETTINGS` (a `pm grant` the user runs; a clean no-op without it). |
 | `spike-dlna-cast.patch` | `DlnaCast`, a dependency-free UPnP-AV control point (SSDP + SOAP over `java.net`), and its 14 parser tests. |
 
