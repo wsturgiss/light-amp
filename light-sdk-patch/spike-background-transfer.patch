@@ -1,37 +1,25 @@
 diff --git a/sdk/client/src/main/AndroidManifest.xml b/sdk/client/src/main/AndroidManifest.xml
-index f680fc8..7e10d72 100644
+index f680fc8..f429e96 100644
 --- a/sdk/client/src/main/AndroidManifest.xml
 +++ b/sdk/client/src/main/AndroidManifest.xml
-@@ -3,6 +3,16 @@
+@@ -3,6 +3,13 @@
      <!-- Lets tools talk to USB security keys / hardware tokens. required=false
           so it never filters out devices without USB host support. -->
      <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 +
-+    <!-- SPIKE (background audio): keep-alive foreground service. Revert when
-+         LightOS ships official background audio for side-loaded tools. -->
-+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
 +    <!-- SPIKE (background downloads): keeps a long transfer off the cached bucket.
 +         Revert with LightTransferService. -->
++    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
 +    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 +    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 +
      <application>
          <provider
              android:name="com.thelightphone.sdk.LightFileProvider"
-@@ -17,5 +27,19 @@
+@@ -17,5 +24,10 @@
          <!-- LightAudioService is not declared here. The Gradle plugin emits it
               into the manifests of tools that declare the detached-audio
               capability, so no other tool carries a mediaPlayback claim. -->
-+        <!-- SPIKE (background audio + media notification): revert with the rest. -->
-+        <service
-+            android:name="com.thelightphone.sdk.audio.LightMediaService"
-+            android:exported="true"
-+            android:foregroundServiceType="mediaPlayback">
-+            <intent-filter>
-+                <action android:name="androidx.media3.session.MediaSessionService" />
-+            </intent-filter>
-+        </service>
 +        <!-- SPIKE (background downloads): revert with LightTransferService. -->
 +        <service
 +            android:name="com.thelightphone.sdk.transfer.LightTransferService"
@@ -39,43 +27,6 @@ index f680fc8..7e10d72 100644
 +            android:foregroundServiceType="dataSync" />
      </application>
  </manifest>
-diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightMediaService.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightMediaService.kt
-new file mode 100644
-index 0000000..84db9a3
---- /dev/null
-+++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightMediaService.kt
-@@ -0,0 +1,31 @@
-+package com.thelightphone.sdk.audio
-+
-+import androidx.media3.session.MediaSession
-+import androidx.media3.session.MediaSessionService
-+
-+/**
-+ * SPIKE — background-audio + media-notification service. Revert with the rest of
-+ * the background-audio spike when LightOS ships official support.
-+ *
-+ * A Media3 [MediaSessionService] that surfaces the app's [MediaSession] (created
-+ * and owned by [LightAudioPlayer]) so the OS renders the standard media
-+ * notification + lock-screen transport, and keeps the process alive for
-+ * background playback. It does NOT own the player — [LightAudioPlayer] does, so
-+ * this never creates or releases it.
-+ */
-+class LightMediaService : MediaSessionService() {
-+
-+    override fun onGetSession(controllerInfo: MediaSession.ControllerInfo): MediaSession? = activeSession
-+
-+    // Force the service to stay foreground even while paused, so a backgrounded,
-+    // paused app isn't reclaimed and resume from the lock screen stays instant.
-+    override fun onUpdateNotification(session: MediaSession, startInForegroundRequired: Boolean) {
-+        super.onUpdateNotification(session, true)
-+    }
-+
-+    companion object {
-+        /** The app's live session, published by [LightAudioPlayer] while it exists. */
-+        @Volatile
-+        var activeSession: MediaSession? = null
-+    }
-+}
 diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/transfer/LightTransferService.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/transfer/LightTransferService.kt
 new file mode 100644
 index 0000000..710ab24

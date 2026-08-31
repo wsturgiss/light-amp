@@ -1,42 +1,24 @@
 diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
-index 74f1e76..885d522 100644
+index 74f1e76..fc0ae8b 100644
 --- a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 +++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
-@@ -1,9 +1,12 @@
- package com.thelightphone.sdk.audio
- 
-+import android.app.PendingIntent
- import android.content.ComponentName
+@@ -4,6 +4,7 @@ import android.content.ComponentName
  import android.content.Context
  import android.net.Uri
-+import androidx.core.content.ContextCompat
  import androidx.media3.common.C
 +import androidx.media3.common.DeviceInfo
  import androidx.media3.common.MediaItem
  import androidx.media3.common.MediaMetadata
  import androidx.media3.common.PlaybackParameters
-@@ -11,8 +14,11 @@ import androidx.media3.common.PlaybackException
- import androidx.media3.common.Player
- import androidx.media3.exoplayer.ExoPlayer
+@@ -13,6 +14,7 @@ import androidx.media3.exoplayer.ExoPlayer
  import androidx.media3.session.MediaController
-+import androidx.media3.session.MediaSession
  import androidx.media3.session.SessionToken
-+import com.google.common.util.concurrent.ListenableFuture
  import java.io.File
 +import kotlin.math.roundToInt
  import kotlinx.coroutines.CoroutineScope
  import kotlinx.coroutines.Dispatchers
  import kotlinx.coroutines.Job
-@@ -48,6 +54,8 @@ class LightAudioPlayer internal constructor(
- ) {
-     private val scopeJob = SupervisorJob()
-     private val scope = CoroutineScope(scopeJob + Dispatchers.Main.immediate)
-+    // SPIKE (background audio): retained app context to start the keep-alive service.
-+    private val appContext = context.applicationContext
-     private val _positionMs = MutableStateFlow(0L)
-     private val _durationMs = MutableStateFlow(0L)
-     private val _isPlaying = MutableStateFlow(false)
-@@ -72,12 +80,44 @@ class LightAudioPlayer internal constructor(
+@@ -72,12 +74,39 @@ class LightAudioPlayer internal constructor(
      /** Connection and command-acceptance lifecycle of this player. */
      val availability: StateFlow<LightAudioPlayerAvailability> = commands.availability
  
@@ -55,11 +37,6 @@ index 74f1e76..885d522 100644
 +     * See the transition listener for why a tool needs to hear about it.
 +     */
 +    var onItemRepeated: (() -> Unit)? = null
-+
-+    // SPIKE (background audio + hardware volume keys): see [startForegroundSession].
-+    private var mediaSession: MediaSession? = null
-+    private var controllerFuture: ListenableFuture<MediaController>? = null
-+    private var mediaController: MediaController? = null
 +
      init {
          when (playback) {
@@ -84,7 +61,7 @@ index 74f1e76..885d522 100644
              )
              LightAudioPlayback.Detached -> connectDetachedPlayer(context, usage)
          }
-@@ -96,6 +136,15 @@ class LightAudioPlayer internal constructor(
+@@ -96,6 +125,15 @@ class LightAudioPlayer internal constructor(
                  } else {
                      connectedPlayer.currentMediaItemIndex
                  }
@@ -100,7 +77,7 @@ index 74f1e76..885d522 100644
              }
  
              override fun onIsPlayingChanged(isPlaying: Boolean) {
-@@ -119,6 +168,32 @@ class LightAudioPlayer internal constructor(
+@@ -119,6 +157,32 @@ class LightAudioPlayer internal constructor(
              override fun onPlayerErrorChanged(error: PlaybackException?) {
                  _error.value = error?.toLightAudioError(connectedPlayer.currentMediaItemIndex)
              }
@@ -133,47 +110,14 @@ index 74f1e76..885d522 100644
          })
          val state = connectedPlayer.snapshotState()
          _currentMediaItemIndex.value = state.currentMediaItemIndex
-@@ -132,9 +207,66 @@ class LightAudioPlayer internal constructor(
+@@ -132,9 +196,33 @@ class LightAudioPlayer internal constructor(
          } else {
              stopPositionUpdates()
          }
-+        if (playback == LightAudioPlayback.Attached) {
-+            startForegroundSession(connectedPlayer)
-+        }
 +        updateDeviceVolume(connectedPlayer)
          commands.ready(connectedPlayer)
      }
  
-+    // SPIKE (background audio + hardware volume keys): a MediaSession wrapping
-+    // the player gives the OS a session to route hardware volume keys to, and
-+    // connecting a controller to LightMediaService makes that service register
-+    // the session and manage the media notification + foreground lifecycle
-+    // (background audio + lock-screen controls). A MediaSessionService only
-+    // foregrounds once a controller connects — starting it directly would time
-+    // out. Attached playback only: a Detached player already *is* a controller
-+    // into the SDK's own LightAudioService, which owns its session. Revert when
-+    // LightOS ships background audio + device-key trust for side-loaded tools.
-+    private fun startForegroundSession(connectedPlayer: Player) {
-+        val session = MediaSession.Builder(appContext, connectedPlayer)
-+            .apply {
-+                appContext.packageManager.getLaunchIntentForPackage(appContext.packageName)?.let { launch ->
-+                    setSessionActivity(
-+                        PendingIntent.getActivity(appContext, 0, launch, PendingIntent.FLAG_IMMUTABLE)
-+                    )
-+                }
-+            }
-+            .build()
-+        mediaSession = session
-+        LightMediaService.activeSession = session
-+        val token = SessionToken(appContext, ComponentName(appContext, LightMediaService::class.java))
-+        controllerFuture = MediaController.Builder(appContext, token).buildAsync().also { future ->
-+            future.addListener(
-+                { mediaController = runCatching { future.get() }.getOrNull() },
-+                ContextCompat.getMainExecutor(appContext),
-+            )
-+        }
-+    }
-+
 +    /** Set the system media volume from a 0..1 fraction. */
 +    fun setSystemVolume(fraction: Float) {
 +        commands.dispatch { player ->
@@ -200,7 +144,7 @@ index 74f1e76..885d522 100644
      private fun connectDetachedPlayer(context: Context, usage: LightAudioUsage) {
          val token = SessionToken(context, ComponentName(context, LightAudioService::class.java))
          val future = MediaController.Builder(context, token)
-@@ -202,6 +334,32 @@ class LightAudioPlayer internal constructor(
+@@ -202,6 +290,32 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -233,7 +177,7 @@ index 74f1e76..885d522 100644
      /**
       * Start or resume playback if audio focus is available.
       *
-@@ -225,6 +383,26 @@ class LightAudioPlayer internal constructor(
+@@ -225,6 +339,26 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -260,7 +204,7 @@ index 74f1e76..885d522 100644
      /** Seeks to [ms], clamped to the resolved duration. Unknown duration clamps to zero. */
      fun seekTo(ms: Long) {
          commands.dispatch { player ->
-@@ -253,6 +431,91 @@ class LightAudioPlayer internal constructor(
+@@ -253,6 +387,91 @@ class LightAudioPlayer internal constructor(
          commands.dispatch(Player::seekToPreviousMediaItem)
      }
  
@@ -352,19 +296,3 @@ index 74f1e76..885d522 100644
      /** Waits for connection, returning `false` if this player is released first. */
      suspend fun awaitReady(): Boolean = awaitPlayerReady(availability)
  
-@@ -268,6 +531,15 @@ class LightAudioPlayer internal constructor(
-         try {
-             cancelPendingConnection?.invoke()
-             cancelPendingConnection = null
-+            // SPIKE (background audio): tear the session down before the player
-+            // it wraps, and clear the service's reference so it stops itself.
-+            mediaController?.release()
-+            mediaController = null
-+            controllerFuture?.let { MediaController.releaseFuture(it) }
-+            controllerFuture = null
-+            LightMediaService.activeSession = null
-+            mediaSession?.release()
-+            mediaSession = null
-             player?.release()
-             player = null
-             scope.cancel()

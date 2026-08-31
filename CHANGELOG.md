@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Changed
+
+- Background audio is official. Playback now runs in the SDK's own detached
+  audio service (`capabilities = ["detached-audio"]`, new in SDK 0.1.1)
+  instead of the keep-alive spike this app carried since July — the largest
+  off-SDK workaround, deleted in full. Two trades ship with it: a paused
+  queue left alone for 15 minutes now winds down (the spike held on for
+  ever), and tapping the media surface opens Amp.
+
 ### Fixed
 
 - Streamed tracks behave like downloaded ones again around the edges.

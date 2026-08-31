@@ -12,6 +12,9 @@ permissions = [
     # SDK's allowed list, and requested through LightOS the first time it is used.
     "android.permission.READ_MEDIA_AUDIO",
 ]
+# Official background audio (SDK 0.1.1+): the plugin wires LightAudioService
+# and its foreground permissions into this tool's manifest.
+capabilities = ["detached-audio"]
 # Real LP3 hardware binds to the LightOS system app.
 # Use "com.thelightphone.sdk.emulator" for the LightOS emulator instead.
 serverPackage = "com.lightos"

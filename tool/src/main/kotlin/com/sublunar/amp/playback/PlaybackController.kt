@@ -24,6 +24,7 @@ import com.thelightphone.sdk.audio.LightAudio
 import com.thelightphone.sdk.audio.LightAudioItem
 import com.thelightphone.sdk.audio.LightAudioPlayer
 import com.thelightphone.sdk.audio.LightAudioSource
+import com.thelightphone.sdk.audio.LightAudioPlayback
 import com.thelightphone.sdk.audio.LightAudioUsage
 import com.thelightphone.sdk.audio.LightMediaMetadata
 import kotlin.coroutines.coroutineContext
@@ -324,7 +325,9 @@ class PlaybackController(
     /** Attach the audio stack from the current activity. Idempotent per process. */
     fun bind(audio: LightAudio) {
         if (player != null) return
-        val p = audio.newPlayer(LightAudioUsage.Music)
+        // Detached: playback lives in the SDK's own service, so it survives the
+        // screen going off — and the activity going away — officially.
+        val p = audio.newPlayer(LightAudioUsage.Music, LightAudioPlayback.Detached)
         player = p
         p.onItemRepeated = {
             // Repeat-one wrapped the current item. A full track wraps to its

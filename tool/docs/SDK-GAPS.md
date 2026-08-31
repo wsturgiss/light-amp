@@ -7,17 +7,16 @@ which is also the commit the `light-sdk` submodule is pinned to.
 
 ## Workarounds we would drop
 
-### Background audio
+### Background audio — CLOSED, adopted 31 Aug 2026
 
-- **Need:** keep playing when the screen goes off or another tool opens.
-- **Now:** a foreground `MediaSessionService` (`LightMediaService`) in
-  `sdk/client`, started by `LightAudioPlayer`.
-- **Why not in the tool:** the sandbox blocks `android.app.*` and
-  `android.content.*`, so a tool cannot declare or start a service.
-- **Answered upstream** by detached audio (PR #148). See below.
-- **Revert:** delete `LightMediaService.kt`, the `mediaSession` and `appContext`
-  fields in `LightAudioPlayer`, and the service and two permissions from the SDK
-  manifest.
+The gap that started the spikes is gone: Amp declares
+`capabilities = ["detached-audio"]` and plays through the SDK's own
+`LightAudioService`. The `LightMediaService` spike was deleted in full.
+What remains ours: the service's player needed `setDeviceVolumeControlEnabled`
+and `setHandleAudioBecomingNoisy`, and its session a `sessionActivity` — three
+additive lines, in `audio-service.patch`, written to be upstreamed. One
+behavioural trade accepted: the SDK stops a paused, unheld session after 15
+minutes, where the spike held on indefinitely.
 
 ### Background downloads
 
@@ -89,28 +88,15 @@ which is also the commit the `light-sdk` submodule is pinned to.
 
 ## Answered upstream, not yet adopted
 
-### Detached audio — PR #148, merged 5 Aug 2026, in our pinned SDK since 0.1.1
+### Detached audio — PR #148: ADOPTED, 31 Aug 2026
 
-The supported route for background audio: `newPlayer(playback = Detached)` plus
-`capabilities = ["detached-audio"]` in `lighttool.toml`. One detached session
-per process, a 15-minute idle stop, and the Gradle plugin emits the service
-into the tool's own manifest.
-
-The hard half is already done. What blocked adoption was that #148 rewrote
-`LightAudioPlayer.kt`, where most of our additions live; the 0.1.1 update
-(30 Aug 2026) rebased every one of them onto the rewritten player, and the
-media-session spike is now explicitly gated to Attached playback. What remains:
-
-- Declare the capability, create the player Detached, revert the
-  background-audio spike (`spike-background-services.patch` and the session
-  half of `audio-player.patch`).
-- `replaceRange` and `isCurrentItemSeekable` both ride the `Player` interface,
-  which a detached `MediaController` implements — they should survive the
-  boundary, but "should" is a word for the emulator. Re-test on the phone:
-  background playback, keep-alive through pause, gapless cast hand-off, the
-  seek fallback.
-- Open question: whether hardware volume keys work through the SDK's own
-  service, or the volume-key half of the spike outlives the rest.
+`newPlayer(playback = Detached)` + `capabilities = ["detached-audio"]`; the
+plugin emits the service and its permissions into the tool manifest. Every one
+of our player additions rides the `Player` interface, which the detached
+`MediaController` implements. The background-audio section above has what
+little remains ours. Still open: whether hardware volume keys route through
+the SDK's session (the `LightActivity` pass-through spike stays until the
+phone answers).
 
 ### Connectivity — PR #166: adopted, gap closed
 

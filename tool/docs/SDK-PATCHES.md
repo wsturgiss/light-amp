@@ -103,10 +103,11 @@ listener reads as a track change.
 
 ### 4. The rest of `LightAudioPlayer`
 
-Nine more members, all additive, none present on any upstream branch. They are
-grouped here rather than given a section each because they are one thing: the
-player the SDK ships can start a queue and move through it, and a music tool also
-has to *edit* that queue, restore it, and be driven by the phone's own controls.
+Eleven more members, all additive, none present on any upstream branch. They
+are grouped here rather than given a section each because they are one thing:
+the player the SDK ships can start a queue and move through it, and a music tool
+also has to *edit* that queue, restore it, and be driven by the phone's own
+controls.
 
 | Member | Why a music tool needs it |
 |---|---|
@@ -116,6 +117,8 @@ has to *edit* that queue, restore it, and be driven by the phone's own controls.
 | `setMediaQueueAt(items, index, positionMs)` | Restoring a saved queue mid-track. The position has to go in at prepare time: `seekTo` clamps to a duration that isn't known yet, so it lands on 0. |
 | `deviceVolume`, `setSystemVolume` | The hardware rocker, which a tool has to service itself while casting — see `PlaybackController.handleVolumeKey`. |
 | `repeatMode` | Repeat off / all / one. |
+| `playWhenReady` | The caller's intent, distinct from `isPlaying`, which is false mid-rebuffer — a seek issued in that window read "paused" and never resumed. |
+| `onItemRepeated` | The repeat-one wrap. The index flow can't carry it (the index doesn't change), and a server-seeked stream needs rebuilding at the track's start or it loops its own tail. |
 
 None of them is novel — every one is a `Player` method or property that media3
 already exposes and the SDK does not forward. That is also why they would survive
@@ -179,12 +182,13 @@ change. Exposes `LightServiceConnection.applicationContext` (internal) to ask.
 Each of these is described in full — what it's standing in for, and how to
 remove it — in [SDK-GAPS.md](SDK-GAPS.md). In brief:
 
-### 10. `audio/LightMediaService.kt` + manifest
+### 10. ~~`audio/LightMediaService.kt`~~ — retired 31 Aug 2026
 
-Foreground `MediaSessionService` so audio survives the screen going off.
-Also declares `FOREGROUND_SERVICE` and `FOREGROUND_SERVICE_MEDIA_PLAYBACK`.
-SDK 0.1.1 ships the official replacement (`capabilities = ["detached-audio"]`);
-this spike goes as soon as that path is verified on the phone — see SDK-GAPS.md.
+The background-audio spike is gone: Amp adopted the SDK's official
+`detached-audio` capability. What replaced it in the patch set is
+`audio-service.patch` — three *additive* lines on the SDK's own service
+(device-volume control and becoming-noisy on its player, a `sessionActivity`
+on its session), which belong with the additions above, not the workarounds.
 
 ### 11. `transfer/LightTransferService.kt` + manifest
 
