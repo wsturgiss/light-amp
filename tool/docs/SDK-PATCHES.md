@@ -12,10 +12,16 @@ is marked `SPIKE` or `TEMPORARY`, carries revert instructions in its own comment
 and must come out before a tool is submitted. What each is standing in for is
 explained in [SDK-GAPS.md](SDK-GAPS.md).
 
+Since the submodule restructure, every change here also exists as a literal
+patch file in [`light-sdk-patch/`](../../light-sdk-patch/) at the repo root;
+the build applies the set to the pristine `light-sdk` submodule automatically.
+The patch files are the mechanical truth — this document is the narrative:
+what each change is for, and how to revert it.
+
 To find them all in a checkout:
 
 ```bash
-grep -rn "SDK PATCH\|SPIKE\|TEMPORARY" sdk/ tool/src
+grep -rn "SDK PATCH\|SPIKE\|TEMPORARY" light-sdk/sdk tool/src
 ```
 
 ### Counted, not remembered

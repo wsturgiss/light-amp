@@ -72,18 +72,22 @@ switching the phone's greyscale filter needs a one-time grant:
 adb shell pm grant com.sublunar.amp android.permission.WRITE_SECURE_SETTINGS
 ```
 
-Then turn off **Settings → Monochrome Artwork**.
+Colour then simply follows the artwork setting — artwork on means colour on.
 
 ## Building
 
-This repo is [lightphone/light-sdk](https://github.com/lightphone/light-sdk) with
-the app in its `tool/` module, which is the shape a LightOS tool takes.
+Light's SDK comes in as the `light-sdk` submodule; Amp is the `tool/` module
+built against it, which is the shape a LightOS tool takes. Every change Amp
+makes to the SDK itself is a patch file in [`light-sdk-patch/`](light-sdk-patch/),
+and the build applies the set to the pristine submodule for you.
 
 ```bash
+git submodule update --init
 ./gradlew :tool:assembleRelease
 ```
 
 ## Licence
 
-MIT. The app is © Amp contributors; the rest is Light's SDK, © The Light Phone,
-carried here with our changes on top. See [LICENSE](LICENSE).
+MIT. The app is © Amp contributors; Light's SDK, © The Light Phone, comes in
+as a submodule, with our changes carried as patches on top. See
+[LICENSE](LICENSE).

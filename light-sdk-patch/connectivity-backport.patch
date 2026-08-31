@@ -1,0 +1,105 @@
+diff --git a/sdk/client/README.md b/sdk/client/README.md
+index 5d5e093..3eb561e 100644
+--- a/sdk/client/README.md
++++ b/sdk/client/README.md
+@@ -186,6 +186,19 @@ capture.asFlow().collect { pcm ->
+ - A capture startup failure throws `LightAudioCaptureException` from collection.
+ - Set `CaptureConfig.source` to `Unprocessed` to request raw input when supported; `Mic` uses the standard processed microphone path.
+ 
++### Connectivity
++
++`LightConnectivity` lets you query or monitor your device's network connection state. Use `currentStatus`
++for a single shot query, or `observeNetworkStatus` to get a `Flow` that will update any time the status changes.
++
++```kotlin
++lightConnectivity.observeNetworkStatus().collect {
++    // it.hasWifi
++    // it.isMetered (metered generally means a cellular network that charges for data I/O)
++    // it.isConnected
++}
++```
++
+ ### Talking to LightOS
+ 
+ `callRemoteServiceMethod(method, payload)` sends a typed request to the LightOS server (or to `:sdk:emulator` in dev) and returns a `LightResult<Response>`. The set of available methods lives in `:sdk:shared`'s `LightServiceMethod`. Example:
+diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/LightConnectivity.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/LightConnectivity.kt
+new file mode 100644
+index 0000000..d9a5b86
+--- /dev/null
++++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/LightConnectivity.kt
+@@ -0,0 +1,74 @@
++package com.thelightphone.sdk
++
++import android.Manifest
++import android.content.Context
++import android.net.ConnectivityManager
++import android.net.Network
++import android.net.NetworkCapabilities
++import android.net.NetworkRequest
++import androidx.annotation.RequiresPermission
++import kotlinx.coroutines.channels.awaitClose
++import kotlinx.coroutines.flow.Flow
++import kotlinx.coroutines.flow.callbackFlow
++import kotlinx.coroutines.flow.conflate
++import kotlinx.coroutines.flow.distinctUntilChanged
++
++data class NetworkStatus(
++    val isConnected: Boolean,
++    val isWifi: Boolean,
++    val isMetered: Boolean
++)
++
++class LightConnectivity(androidContext: Context) {
++    private val connectivityManager by lazy { androidContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager }
++
++    val currentStatus: NetworkStatus
++        @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
++        get() {
++            val network = connectivityManager.activeNetwork
++            val capabilities = connectivityManager.getNetworkCapabilities(network)
++
++            return NetworkStatus(
++                isConnected = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true,
++                isWifi = capabilities?.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) == true,
++                isMetered = capabilities?.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED) != true
++            )
++        }
++
++
++    @RequiresPermission(Manifest.permission.ACCESS_NETWORK_STATE)
++    fun observeNetworkStatus(): Flow<NetworkStatus> {
++        return callbackFlow {
++            val request = NetworkRequest.Builder()
++                .addCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)
++                .build()
++
++            val callback = object : ConnectivityManager.NetworkCallback() {
++                override fun onAvailable(network: Network) {
++                    trySend(currentStatus)
++                }
++
++                override fun onLost(network: Network) {
++                    trySend(currentStatus)
++                }
++
++                override fun onCapabilitiesChanged(
++                    network: Network,
++                    capabilities: NetworkCapabilities
++                ) {
++                    trySend(currentStatus)
++                }
++            }
++
++            trySend(currentStatus)
++
++            connectivityManager.registerNetworkCallback(request, callback)
++
++            awaitClose {
++                connectivityManager.unregisterNetworkCallback(callback)
++            }
++        }
++            .distinctUntilChanged()
++            .conflate()
++    }
++}
+\ No newline at end of file
