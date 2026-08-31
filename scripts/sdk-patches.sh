@@ -65,12 +65,15 @@ regen)
     p="$PATCH_DIR/${name%.patch}.patch"
     [ -f "$p" ] || { echo "no such patch: $p" >&2; exit 1; }
     files=$(files_of "$p")
+    [ -n "$files" ] || { echo "$p lists no files — restore it from git before regenerating" >&2; exit 1; }
     # Intent-to-add so files the patch creates show up in git diff
     echo "$files" | while read -r f; do
         [ -f "$SDK/$f" ] && git -C "$SDK" add -N "$f" 2>/dev/null || true
     done
+    # Diff against HEAD, not the index, so a stray staged state (e.g. from a
+    # three-way apply during a rebase) can't produce an empty patch.
     # shellcheck disable=SC2086 — the paths are repo-relative and space-free
-    git -C "$SDK" diff -- $files > "$p"
+    git -C "$SDK" diff HEAD -- $files > "$p"
     echo "$files" | while read -r f; do
         git -C "$SDK" reset -q -- "$f" 2>/dev/null || true
     done

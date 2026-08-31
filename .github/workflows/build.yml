@@ -30,12 +30,5 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      # The light-keyboard dependency comes from GitHub Packages, which needs
-      # any authenticated token to read. The workflow token usually suffices;
-      # if it ever stops resolving, add a classic PAT with read:packages as
-      # the GH_PACKAGES_TOKEN repo secret.
       - name: Build and test
-        env:
-          GH_PACKAGES_USER: ${{ github.actor }}
-          GH_PACKAGES_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
         run: ./gradlew :tool:assembleDebug :tool:test :sdk:client:test

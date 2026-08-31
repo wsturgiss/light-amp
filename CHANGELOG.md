@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Light's SDK now comes in as the `light-sdk` submodule, pinned to upstream
+  and pulled pristine; every change Amp makes to it travels as a patch file in
+  `light-sdk-patch/` that the build applies by itself. Same code, honest
+  shape — and an SDK update becomes a checkout instead of archaeology.
+- SDK updated 0.0.12 → 0.1.1. Nothing here uses the new pieces yet, but they
+  are the ones the next releases will build on: official background audio
+  (`detached-audio`), an NFC reader API, `openDialer`. One behavioural edge
+  moved: audio-focus handling now rides ExoPlayer's built-in path (upstream's
+  change), so ducking and transient-loss resume come from Media3 rather than
+  the SDK's old helper — worth an ear during phone-call and navigation-prompt
+  interruptions.
+
 ## 0.5.0
 
 ### Fixed

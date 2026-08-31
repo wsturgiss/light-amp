@@ -1,17 +1,5 @@
-diff --git a/sdk/client/build.gradle.kts b/sdk/client/build.gradle.kts
-index df4774c..034afa1 100644
---- a/sdk/client/build.gradle.kts
-+++ b/sdk/client/build.gradle.kts
-@@ -64,6 +64,7 @@ dependencies {
-     implementation(libs.androidx.work.runtime)
-     implementation(libs.androidx.media3.common)
-     implementation(libs.androidx.media3.exoplayer)
-+    implementation(libs.androidx.media3.session)
-     lintChecks(project(":lint-rules"))
- 
-     testImplementation(libs.kotlin.test)
 diff --git a/sdk/client/src/main/AndroidManifest.xml b/sdk/client/src/main/AndroidManifest.xml
-index d99d556..ae23ccd 100644
+index f680fc8..7e10d72 100644
 --- a/sdk/client/src/main/AndroidManifest.xml
 +++ b/sdk/client/src/main/AndroidManifest.xml
 @@ -3,6 +3,16 @@
@@ -31,10 +19,10 @@ index d99d556..ae23ccd 100644
      <application>
          <provider
              android:name="com.thelightphone.sdk.LightFileProvider"
-@@ -14,5 +24,19 @@
-                 <action android:name="org.unifiedpush.android.connector.PUSH_EVENT"/>
-             </intent-filter>
-         </service>
+@@ -17,5 +27,19 @@
+         <!-- LightAudioService is not declared here. The Gradle plugin emits it
+              into the manifests of tools that declare the detached-audio
+              capability, so no other tool carries a mediaPlayback claim. -->
 +        <!-- SPIKE (background audio + media notification): revert with the rest. -->
 +        <service
 +            android:name="com.thelightphone.sdk.audio.LightMediaService"

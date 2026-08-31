@@ -1,5 +1,5 @@
 diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/LightActivity.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/LightActivity.kt
-index f46ece9..3ddd72f 100644
+index 07f9a40..aa85bef 100644
 --- a/sdk/client/src/main/kotlin/com/thelightphone/sdk/LightActivity.kt
 +++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/LightActivity.kt
 @@ -1,5 +1,6 @@
@@ -9,7 +9,7 @@ index f46ece9..3ddd72f 100644
  import android.content.Context
  import android.os.Bundle
  import android.view.KeyEvent
-@@ -69,6 +70,34 @@ class LightActivity internal constructor() : ComponentActivity() {
+@@ -70,6 +71,34 @@ class LightActivity internal constructor() : ComponentActivity() {
          currentScreen.value = entry
      }
  
@@ -44,7 +44,7 @@ index f46ece9..3ddd72f 100644
      internal fun goBack() {
          val current = currentScreen.value ?: return
          val popped = current.screen
-@@ -143,6 +172,13 @@ class LightActivity internal constructor() : ComponentActivity() {
+@@ -149,6 +178,13 @@ class LightActivity internal constructor() : ComponentActivity() {
      private val Int.isSystemKeyCode: Boolean
          get() = (this == KeyEvent.KEYCODE_BACK || this == KeyEvent.KEYCODE_HOME)
  
@@ -58,7 +58,7 @@ index f46ece9..3ddd72f 100644
      override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
          // don't do anything with android keys
          // back button override handled elsewhere and home button won't get dispatched to external tools
-@@ -151,7 +187,7 @@ class LightActivity internal constructor() : ComponentActivity() {
+@@ -157,7 +193,7 @@ class LightActivity internal constructor() : ComponentActivity() {
          } else if (currentScreen.value?.screen?.onKeyDown(keyCode, event) == true) {
              // let the active screen handle the button if it wants to
              true
@@ -67,7 +67,7 @@ index f46ece9..3ddd72f 100644
              // otherwise see if the server wants to use it
              forwardKeyEventToServer(keyCode, event)
              true
-@@ -169,7 +205,7 @@ class LightActivity internal constructor() : ComponentActivity() {
+@@ -175,7 +211,7 @@ class LightActivity internal constructor() : ComponentActivity() {
              super.onKeyMultiple(keyCode, repeatCount, event)
          } else if (currentScreen.value?.screen?.onKeyMultiple(keyCode, repeatCount, event) == true) {
              true
@@ -76,7 +76,7 @@ index f46ece9..3ddd72f 100644
              forwardKeyEventToServer(keyCode, event)
              true
          } else {
-@@ -182,7 +218,7 @@ class LightActivity internal constructor() : ComponentActivity() {
+@@ -188,7 +224,7 @@ class LightActivity internal constructor() : ComponentActivity() {
              super.onKeyUp(keyCode, event)
          } else if (currentScreen.value?.screen?.onKeyUp(keyCode, event) == true) {
              true
@@ -85,7 +85,7 @@ index f46ece9..3ddd72f 100644
              forwardKeyEventToServer(keyCode, event)
              true
          } else {
-@@ -211,11 +247,16 @@ class LightActivity internal constructor() : ComponentActivity() {
+@@ -217,11 +253,16 @@ class LightActivity internal constructor() : ComponentActivity() {
  
      override fun onPause() {
          super.onPause()
@@ -102,11 +102,3 @@ index f46ece9..3ddd72f 100644
          currentScreen.value?.screen?.notifyWillShow()
      }
  }
-@@ -224,6 +265,7 @@ class SealedLightContext(internal val androidContext: Context) {
-     val dataStore: DataStore<Preferences> by lazy{ androidContext.dataStore }
-     val filesDir: File by lazy{ androidContext.filesDir }
-     val fileShare: LightFileShare by lazy { LightFileShare(androidContext) }
-+    val connectivity: LightConnectivity by lazy { LightConnectivity(androidContext) }
-     fun readAsset(path: String): ByteArray = androidContext.assets.open(path).use { it.readBytes() }
- }
- /**
