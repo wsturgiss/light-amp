@@ -1,16 +1,19 @@
 diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
-index 74f1e76..fc0ae8b 100644
+index 74f1e76..48b1a79 100644
 --- a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 +++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
-@@ -4,6 +4,7 @@ import android.content.ComponentName
+@@ -2,8 +2,10 @@ package com.thelightphone.sdk.audio
+ 
+ import android.content.ComponentName
  import android.content.Context
++import android.media.AudioManager
  import android.net.Uri
  import androidx.media3.common.C
 +import androidx.media3.common.DeviceInfo
  import androidx.media3.common.MediaItem
  import androidx.media3.common.MediaMetadata
  import androidx.media3.common.PlaybackParameters
-@@ -13,6 +14,7 @@ import androidx.media3.exoplayer.ExoPlayer
+@@ -13,6 +15,7 @@ import androidx.media3.exoplayer.ExoPlayer
  import androidx.media3.session.MediaController
  import androidx.media3.session.SessionToken
  import java.io.File
@@ -18,12 +21,17 @@ index 74f1e76..fc0ae8b 100644
  import kotlinx.coroutines.CoroutineScope
  import kotlinx.coroutines.Dispatchers
  import kotlinx.coroutines.Job
-@@ -72,12 +74,39 @@ class LightAudioPlayer internal constructor(
+@@ -72,12 +75,45 @@ class LightAudioPlayer internal constructor(
      /** Connection and command-acceptance lifecycle of this player. */
      val availability: StateFlow<LightAudioPlayerAvailability> = commands.availability
  
 +    // System media (STREAM_MUSIC) volume as a 0..1 fraction. Also reflects the
 +    // hardware volume keys, so a UI fader stays in sync with button presses.
++    // Read and written through AudioManager rather than the player: a detached
++    // player is a MediaController, and device-volume commands don't reliably
++    // cross the session boundary — the stream volume is the same fact either
++    // way, and this way needs no player at all.
++    private val audioManager = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
 +    private val _deviceVolume = MutableStateFlow(1f)
 +    val deviceVolume: StateFlow<Float> = _deviceVolume.asStateFlow()
 +
@@ -39,6 +47,7 @@ index 74f1e76..fc0ae8b 100644
 +    var onItemRepeated: (() -> Unit)? = null
 +
      init {
++        updateDeviceVolume()
          when (playback) {
              LightAudioPlayback.Attached -> connectPlayer(
 -                ExoPlayer.Builder(context).build().apply {
@@ -61,7 +70,7 @@ index 74f1e76..fc0ae8b 100644
              )
              LightAudioPlayback.Detached -> connectDetachedPlayer(context, usage)
          }
-@@ -96,6 +125,15 @@ class LightAudioPlayer internal constructor(
+@@ -96,6 +132,15 @@ class LightAudioPlayer internal constructor(
                  } else {
                      connectedPlayer.currentMediaItemIndex
                  }
@@ -77,7 +86,7 @@ index 74f1e76..fc0ae8b 100644
              }
  
              override fun onIsPlayingChanged(isPlaying: Boolean) {
-@@ -119,6 +157,32 @@ class LightAudioPlayer internal constructor(
+@@ -119,6 +164,32 @@ class LightAudioPlayer internal constructor(
              override fun onPlayerErrorChanged(error: PlaybackException?) {
                  _error.value = error?.toLightAudioError(connectedPlayer.currentMediaItemIndex)
              }
@@ -99,52 +108,50 @@ index 74f1e76..fc0ae8b 100644
 +            }
 +
 +            override fun onDeviceVolumeChanged(volume: Int, muted: Boolean) {
-+                updateDeviceVolume(connectedPlayer)
++                updateDeviceVolume()
 +            }
 +
 +            // Fires once the volume range is actually known — the first moment
 +            // the fader can show a truthful level.
 +            override fun onDeviceInfoChanged(deviceInfo: DeviceInfo) {
-+                updateDeviceVolume(connectedPlayer)
++                updateDeviceVolume()
 +            }
          })
          val state = connectedPlayer.snapshotState()
          _currentMediaItemIndex.value = state.currentMediaItemIndex
-@@ -132,9 +196,33 @@ class LightAudioPlayer internal constructor(
+@@ -132,9 +203,31 @@ class LightAudioPlayer internal constructor(
          } else {
              stopPositionUpdates()
          }
-+        updateDeviceVolume(connectedPlayer)
++        updateDeviceVolume()
          commands.ready(connectedPlayer)
      }
  
 +    /** Set the system media volume from a 0..1 fraction. */
 +    fun setSystemVolume(fraction: Float) {
-+        commands.dispatch { player ->
-+            val info = player.deviceInfo
-+            val range = info.maxVolume - info.minVolume
-+            if (range <= 0) return@dispatch
-+            val target = info.minVolume + (fraction.coerceIn(0f, 1f) * range).roundToInt()
-+            player.setDeviceVolume(target.coerceIn(info.minVolume, info.maxVolume), 0)
-+        }
++        val min = audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
++        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
++        val range = max - min
++        if (range <= 0) return
++        val target = min + (fraction.coerceIn(0f, 1f) * range).roundToInt()
++        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, target.coerceIn(min, max), 0)
++        updateDeviceVolume()
 +    }
 +
-+    private fun updateDeviceVolume(player: Player) {
-+        val info = player.deviceInfo
-+        val range = info.maxVolume - info.minVolume
-+        // A zero range means the player hasn't resolved its device info yet (it
-+        // starts out as DeviceInfo.UNKNOWN). Publishing 0f there would claim the
-+        // phone is silent — and it would stick, because the only other trigger is
-+        // a volume *change*. Leave the value be and wait for onDeviceInfoChanged.
++    private fun updateDeviceVolume() {
++        val min = audioManager.getStreamMinVolume(AudioManager.STREAM_MUSIC)
++        val max = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC)
++        val range = max - min
 +        if (range <= 0) return
 +        _deviceVolume.value =
-+            ((player.deviceVolume - info.minVolume).toFloat() / range).coerceIn(0f, 1f)
++            ((audioManager.getStreamVolume(AudioManager.STREAM_MUSIC) - min).toFloat() / range)
++                .coerceIn(0f, 1f)
 +    }
 +
      private fun connectDetachedPlayer(context: Context, usage: LightAudioUsage) {
          val token = SessionToken(context, ComponentName(context, LightAudioService::class.java))
          val future = MediaController.Builder(context, token)
-@@ -202,6 +290,32 @@ class LightAudioPlayer internal constructor(
+@@ -202,6 +295,32 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -177,7 +184,7 @@ index 74f1e76..fc0ae8b 100644
      /**
       * Start or resume playback if audio focus is available.
       *
-@@ -225,6 +339,26 @@ class LightAudioPlayer internal constructor(
+@@ -225,6 +344,26 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -204,7 +211,7 @@ index 74f1e76..fc0ae8b 100644
      /** Seeks to [ms], clamped to the resolved duration. Unknown duration clamps to zero. */
      fun seekTo(ms: Long) {
          commands.dispatch { player ->
-@@ -253,6 +387,91 @@ class LightAudioPlayer internal constructor(
+@@ -253,6 +392,91 @@ class LightAudioPlayer internal constructor(
          commands.dispatch(Player::seekToPreviousMediaItem)
      }
  
@@ -296,3 +303,14 @@ index 74f1e76..fc0ae8b 100644
      /** Waits for connection, returning `false` if this player is released first. */
      suspend fun awaitReady(): Boolean = awaitPlayerReady(availability)
  
+@@ -284,6 +508,10 @@ class LightAudioPlayer internal constructor(
+                     updatePosition(it)
+                     updateDuration(it)
+                 }
++                // Hardware volume keys change the stream with no callback that
++                // reliably crosses the session boundary; two int reads per tick
++                // keep the fader honest while anything plays.
++                updateDeviceVolume()
+                 delay(POSITION_POLL_MS)
+             }
+         }
