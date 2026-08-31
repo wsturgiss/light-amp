@@ -1,5 +1,5 @@
 diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
-index 74f1e76..3a92e25 100644
+index 74f1e76..885d522 100644
 --- a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 +++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 @@ -1,9 +1,12 @@
@@ -36,7 +36,7 @@ index 74f1e76..3a92e25 100644
      private val _positionMs = MutableStateFlow(0L)
      private val _durationMs = MutableStateFlow(0L)
      private val _isPlaying = MutableStateFlow(false)
-@@ -72,12 +80,38 @@ class LightAudioPlayer internal constructor(
+@@ -72,12 +80,44 @@ class LightAudioPlayer internal constructor(
      /** Connection and command-acceptance lifecycle of this player. */
      val availability: StateFlow<LightAudioPlayerAvailability> = commands.availability
  
@@ -49,6 +49,12 @@ index 74f1e76..3a92e25 100644
 +     * Called when playback fails. Set by the tool; see [Player.Listener.onPlayerError].
 +     */
 +    var onPlaybackError: ((PlaybackException) -> Unit)? = null
++
++    /**
++     * Called when repeat-one wraps the current item, on the player's thread.
++     * See the transition listener for why a tool needs to hear about it.
++     */
++    var onItemRepeated: (() -> Unit)? = null
 +
 +    // SPIKE (background audio + hardware volume keys): see [startForegroundSession].
 +    private var mediaSession: MediaSession? = null
@@ -78,7 +84,23 @@ index 74f1e76..3a92e25 100644
              )
              LightAudioPlayback.Detached -> connectDetachedPlayer(context, usage)
          }
-@@ -119,6 +153,32 @@ class LightAudioPlayer internal constructor(
+@@ -96,6 +136,15 @@ class LightAudioPlayer internal constructor(
+                 } else {
+                     connectedPlayer.currentMediaItemIndex
+                 }
++                // SDK PATCH (additive, upstreamable): surface the repeat wrap.
++                // [currentMediaItemIndex] can't carry it — the index doesn't
++                // change — yet a tool playing server-seeked streams needs it:
++                // the media item is a remainder starting mid-track, so a
++                // repeat-one wrap replays the remainder instead of the track
++                // unless the tool gets a chance to rebuild it.
++                if (reason == Player.MEDIA_ITEM_TRANSITION_REASON_REPEAT) {
++                    onItemRepeated?.invoke()
++                }
+             }
+ 
+             override fun onIsPlayingChanged(isPlaying: Boolean) {
+@@ -119,6 +168,32 @@ class LightAudioPlayer internal constructor(
              override fun onPlayerErrorChanged(error: PlaybackException?) {
                  _error.value = error?.toLightAudioError(connectedPlayer.currentMediaItemIndex)
              }
@@ -111,7 +133,7 @@ index 74f1e76..3a92e25 100644
          })
          val state = connectedPlayer.snapshotState()
          _currentMediaItemIndex.value = state.currentMediaItemIndex
-@@ -132,9 +192,66 @@ class LightAudioPlayer internal constructor(
+@@ -132,9 +207,66 @@ class LightAudioPlayer internal constructor(
          } else {
              stopPositionUpdates()
          }
@@ -178,7 +200,7 @@ index 74f1e76..3a92e25 100644
      private fun connectDetachedPlayer(context: Context, usage: LightAudioUsage) {
          val token = SessionToken(context, ComponentName(context, LightAudioService::class.java))
          val future = MediaController.Builder(context, token)
-@@ -202,6 +319,32 @@ class LightAudioPlayer internal constructor(
+@@ -202,6 +334,32 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -211,7 +233,7 @@ index 74f1e76..3a92e25 100644
      /**
       * Start or resume playback if audio focus is available.
       *
-@@ -225,6 +368,26 @@ class LightAudioPlayer internal constructor(
+@@ -225,6 +383,26 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -238,7 +260,7 @@ index 74f1e76..3a92e25 100644
      /** Seeks to [ms], clamped to the resolved duration. Unknown duration clamps to zero. */
      fun seekTo(ms: Long) {
          commands.dispatch { player ->
-@@ -253,6 +416,91 @@ class LightAudioPlayer internal constructor(
+@@ -253,6 +431,91 @@ class LightAudioPlayer internal constructor(
          commands.dispatch(Player::seekToPreviousMediaItem)
      }
  
@@ -330,7 +352,7 @@ index 74f1e76..3a92e25 100644
      /** Waits for connection, returning `false` if this player is released first. */
      suspend fun awaitReady(): Boolean = awaitPlayerReady(availability)
  
-@@ -268,6 +516,15 @@ class LightAudioPlayer internal constructor(
+@@ -268,6 +531,15 @@ class LightAudioPlayer internal constructor(
          try {
              cancelPendingConnection?.invoke()
              cancelPendingConnection = null

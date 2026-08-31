@@ -158,6 +158,18 @@ class PlaybackController(
     private var streamOffsetMs = 0L
 
     /**
+     * The track whose queue slot currently holds a server-seeked *remainder*
+     * instead of the whole song. The replacement is real: it lives in the
+     * player's queue, so it would be what plays on every later visit — a
+     * repeat wrap or a tap on the row would play the tail the last seek left
+     * behind. The index collector puts the original item back the moment
+     * playback leaves the slot; [LightAudioPlayer.onItemRepeated] handles the
+     * one return path with no index change.
+     */
+    @Volatile
+    private var offsetItemTrackId: String? = null
+
+    /**
      * The same trick for the renderer: how far into the track its stream starts.
      *
      * A UPnP Seek is a byte-range request, and a Navidrome transcode is a live
@@ -314,6 +326,15 @@ class PlaybackController(
         if (player != null) return
         val p = audio.newPlayer(LightAudioUsage.Music)
         player = p
+        p.onItemRepeated = {
+            // Repeat-one wrapped the current item. A full track wraps to its
+            // own beginning and needs nothing; a server-seeked remainder would
+            // loop its last few seconds forever, so it is rebuilt from the
+            // track's real start. On Main: the player invokes this on its own
+            // thread, which is Main by the looper rule.
+            android.util.Log.i("AmpDbg", "repeat wrap, off=$streamOffsetMs")
+            if (streamOffsetMs > 0L) seekTo(0)
+        }
         p.onPlaybackError = { error ->
             android.util.Log.i("AmpDbg", "playbackError ${error.errorCodeName} idx=${_index.value} pos=${_positionMs.value}")
             // A bad HTTP status is proof the server is *there*: it answered, it
@@ -392,6 +413,29 @@ class PlaybackController(
                     _index.value = idx
                     // A new track is a fresh stream from its own beginning.
                     streamOffsetMs = 0
+                    // Leaving a server-seeked remainder is the moment to put
+                    // the whole song back in its slot, so any later visit —
+                    // a repeat-all wrap, a tap on the queue row — plays the
+                    // track and not the tail the last seek left behind.
+                    offsetItemTrackId?.let { staleId ->
+                        offsetItemTrackId = null
+                        val q = _queue.value
+                        if (q.getOrNull(idx)?.id == staleId) {
+                            // Arrived *onto* a stale remainder (a wrap over a
+                            // slot that never got restored): rebuild it live.
+                            android.util.Log.i("AmpDbg", "landed on stale remainder, rebuilding at 0")
+                            scope.launch(Dispatchers.Main.immediate) { seekTo(0) }
+                        } else {
+                            val stubIdx = q.indexOfFirst { it.id == staleId }
+                            val original = q.getOrNull(stubIdx)
+                            if (stubIdx >= 0 && original != null) {
+                                android.util.Log.i("AmpDbg", "restoring full item at $stubIdx")
+                                scope.launch(Dispatchers.Main.immediate) {
+                                    p.replaceRange(stubIdx, stubIdx + 1, listOf(original.toAudioItem()))
+                                }
+                            }
+                        }
+                    }
                     // A new track is a new session too, or Plex sees the same
                     // one just keep changing what it's playing rather than one
                     // track ending and the next beginning. The one it replaces
@@ -890,6 +934,7 @@ class PlaybackController(
             sessionId = sessionIdFor(track.id),
         )
         streamOffsetMs = target
+        offsetItemTrackId = track.id.takeIf { target > 0L }
         // Only the playing item is replaced; the queue either side of it is
         // untouched, so a seek doesn't disturb what plays next.
         _positionMs.value = target
@@ -947,6 +992,7 @@ class PlaybackController(
             _queueName.value = null
             _index.value = -1
             streamOffsetMs = 0
+            offsetItemTrackId = null
             _positionMs.value = 0
             _durationMs.value = 0
         }
@@ -1893,6 +1939,8 @@ class PlaybackController(
         // collector can't be relied on to clear it: it only fires when the index
         // *changes*, and a new queue often starts on the same one.
         streamOffsetMs = 0
+        // Every slot of a new queue is a full item; nothing is left to restore.
+        offsetItemTrackId = null
         // Picking something new to play is reason enough to try the server again.
         streamFailed.clear()
         // Right from the first frame, rather than whenever the stream gets round
@@ -2176,6 +2224,7 @@ class PlaybackController(
                 sessionId = sessionIdFor(track.id),
             )
             streamOffsetMs = at
+            offsetItemTrackId = track.id
             p.setMediaQueue(
                 tracks.mapIndexed { i, it ->
                     if (i == index) it.toAudioItem(LightAudioSource.UrlSource(url)) else it.toAudioItem()
@@ -2185,6 +2234,7 @@ class PlaybackController(
         } else {
             android.util.Log.i("AmpCast", "rebuild idx=$index at=$at natively")
             streamOffsetMs = 0
+            offsetItemTrackId = null
             p.setMediaQueueAt(tracks.map { it.toAudioItem() }, index, at)
             if (at > 0L) verifyNativeSeek(p, track, at, awaitStream = true)
         }
