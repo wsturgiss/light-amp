@@ -39,6 +39,7 @@ import com.sublunar.amp.ui.components.TextRow
 import com.sublunar.amp.ui.LightType
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
+import com.sublunar.amp.data.PlexPlayer
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.cast.DlnaRenderer
@@ -53,7 +54,9 @@ import kotlin.math.roundToInt
  * The volume fader drives the phone's own media volume. Speaker-vs-Bluetooth
  * routing is LightOS's job (a tool has no access to the audio-routing APIs), so
  * that part of the list is informational. Network speakers found over DLNA *can*
- * be switched to — see the temporary cast support in `DlnaCast`.
+ * be switched to — see the temporary cast support in `DlnaCast` — and so can
+ * other Plex players (an Apple TV's Plex app, say) when the active source is
+ * Plex, over Plex's own Companion protocol.
  */
 class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) {
 
@@ -65,29 +68,47 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
     override fun Content() {
         val volume by App.playback.volume.collectAsState()
         val casting by App.playback.castRenderer.collectAsState()
+        val plexCasting by App.playback.plexPlayer.collectAsState()
+        val plexVolumeKnown by App.playback.plexVolumeKnown.collectAsState()
         var renderers by remember { mutableStateOf<List<DlnaRenderer>>(emptyList()) }
+        var plexPlayers by remember { mutableStateOf<List<PlexPlayer>>(emptyList()) }
         var scanning by remember { mutableStateOf(true) }
 
         // Discovery is a few seconds of UDP waiting, so it runs once on open and
         // is repeatable from the Scan row rather than on every recomposition.
+        // The Plex ask is one HTTP round trip, so it goes first and its players
+        // appear while the UDP wait is still on.
         var scanToken by remember { mutableStateOf(0) }
         LaunchedEffect(scanToken) {
             scanning = true
+            plexPlayers = App.playback.findPlexPlayers()
             renderers = App.playback.findCastDevices()
             scanning = false
         }
+
+        // A fader with nothing to move: an Apple TV's volume usually belongs to
+        // the television. Dimmed rather than hidden, so the page doesn't jump.
+        val faderLive = plexCasting == null || plexVolumeKnown
 
         PlayerTheme {
             Column(modifier = Modifier.fillMaxSize()) {
                 AppHeader(onBack = { goBack() }, title = "Output")
 
-                Column(modifier = Modifier.padding(horizontal = px(80), vertical = px(32))) {
+                Column(
+                    modifier = Modifier
+                        .padding(horizontal = px(80), vertical = px(32))
+                        .alpha(if (faderLive) 1f else 0.35f),
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         AppText("Volume", pxSp(LightType.DETAIL_PX))
-                        AppText("${(volume * 100).roundToInt()}%", pxSp(LightType.DETAIL_PX), dim = true)
+                        AppText(
+                            if (faderLive) "${(volume * 100).roundToInt()}%" else "on the player",
+                            pxSp(LightType.DETAIL_PX),
+                            dim = true,
+                        )
                     }
                     Spacer(Modifier.height(px(26)))
                     VolumeFader(volume)
@@ -97,8 +118,13 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     item { SectionLabel("Playing on") }
                     item {
-                        OutputRow(AppIcons.Smartphone, "This device", selected = casting == null) {
+                        OutputRow(
+                            AppIcons.Smartphone,
+                            "This device",
+                            selected = casting == null && plexCasting == null,
+                        ) {
                             if (casting != null) App.playback.stopCasting()
+                            if (plexCasting != null) App.playback.stopPlexCasting()
                         }
                     }
                     item {
@@ -119,7 +145,20 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                             }
                         }
                     }
-                    if (!scanning && renderers.isEmpty()) {
+                    items(plexPlayers, key = { "plex-" + it.id }) { p ->
+                        OutputRow(
+                            icon = AppIcons.Cast,
+                            label = p.name,
+                            selected = plexCasting?.id == p.id,
+                        ) {
+                            if (plexCasting?.id == p.id) {
+                                App.playback.stopPlexCasting()
+                            } else {
+                                App.playback.castToPlex(p)
+                            }
+                        }
+                    }
+                    if (!scanning && renderers.isEmpty() && plexPlayers.isEmpty()) {
                         item {
                             AppText(
                                 "No network speakers found. They need to be on the same Wi-Fi.",

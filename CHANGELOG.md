@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Added
+
+- Cast to other Plex players. When the active source is Plex, the Output page
+  lists every player signed into the server — the Apple TV app among them —
+  next to the DLNA speakers, over Plex's own Companion protocol. The player
+  takes the whole queue and plays it itself (gapless, skippable from its own
+  remote, scrobbling its own plays); Amp steers, mirrors, and takes playback
+  back at the position the player reached. Closing Amp deliberately leaves
+  the player playing. The volume fader dims when the player's volume isn't
+  its to control — an Apple TV's usually belongs to the television.
+
 ### Changed
 
 - Background audio is official. Playback now runs in the SDK's own detached

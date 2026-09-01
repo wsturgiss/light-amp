@@ -16,6 +16,9 @@ import com.sublunar.amp.data.PendingAction
 import com.sublunar.amp.data.SavedQueue
 import com.sublunar.amp.data.StreamFormat
 import com.sublunar.amp.data.MusicServer
+import com.sublunar.amp.data.PlexClient
+import com.sublunar.amp.data.PlexPlayer
+import com.sublunar.amp.data.PlexQueue
 import com.sublunar.amp.data.TimelineState
 import com.sublunar.amp.data.Track
 import com.sublunar.amp.data.db.LibraryDao
@@ -42,6 +45,9 @@ import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
@@ -213,10 +219,30 @@ class PlaybackController(
     private val _castRenderer = MutableStateFlow<DlnaRenderer?>(null)
     val castRenderer: StateFlow<DlnaRenderer?> = _castRenderer
 
-    /** True while audio is going to a renderer instead of this device. */
-    val isCasting: Boolean get() = _castRenderer.value != null
+    /** True while audio is going somewhere else instead of this device. */
+    val isCasting: Boolean get() = _castRenderer.value != null || _plexPlayer.value != null
 
     private var castJob: Job? = null
+
+    // --- Plex Companion casting (permanent — plain HTTP, all in tool code) ----
+
+    private val _plexPlayer = MutableStateFlow<PlexPlayer?>(null)
+    val plexPlayer: StateFlow<PlexPlayer?> = _plexPlayer
+
+    /**
+     * Whether the player has told us its volume. The fader only drives a
+     * Companion player once it has — a fader that moves nothing is the
+     * misleading control this app doesn't do.
+     */
+    private val _plexVolumeKnown = MutableStateFlow(false)
+    val plexVolumeKnown: StateFlow<Boolean> = _plexVolumeKnown
+
+    private var plexJob: Job? = null
+    private var plexQueue: PlexQueue? = null
+    private var plexPushedIds: List<String> = emptyList()
+
+    /** Companion wants a fresh command id per request, per controller. */
+    private var plexCommandId = 0
 
     // "rendererId|format" -> stream format actually sent + its MIME type.
     private val castFormats = mutableMapOf<String, Pair<StreamFormat, String>>()
@@ -456,6 +482,30 @@ class PlaybackController(
                 announceNowPlaying()
             }
         }
+        // A Companion player owns a *snapshot* of the queue (the server-side
+        // play queue we created), so edits made here have to be pushed as a
+        // fresh one. Only edits: the index changing is the player advancing,
+        // which is its business, not a reason to interrupt it.
+        @OptIn(kotlinx.coroutines.FlowPreview::class)
+        scope.launch {
+            _queue.map { q -> q.map { it.id } }
+                .distinctUntilChanged()
+                .debounce(CAST_REQUEUE_DEBOUNCE_MS)
+                .collect { ids ->
+                    val target = _plexPlayer.value ?: return@collect
+                    if (ids.isEmpty() || ids == plexPushedIds) return@collect
+                    val client = plexClient() ?: return@collect
+                    val idx = _index.value.coerceIn(0, ids.lastIndex)
+                    val queue = client.createPlayQueue(
+                        ids, ids[idx],
+                        repeatAll = _repeatMode.value == RepeatMode.QUEUE,
+                    ) ?: return@collect
+                    plexQueue = queue
+                    plexPushedIds = ids
+                    client.companionPlay(target, queue, ids[idx], _positionMs.value, ++plexCommandId)
+                    android.util.Log.i("AmpPlex", "queue changed — repushed ${ids.size} tracks")
+                }
+        }
         // Anything that changes what plays next — an edit, a jump, a repeat mode —
         // has to be pushed to the renderer, which is holding a URI we chose
         // earlier. Debounced because a single edit moves several of these at once.
@@ -646,6 +696,17 @@ class PlaybackController(
     }
 
     fun release() {
+        // A Companion player is deliberately left playing: it walks its own
+        // queue and answers to the server, so closing the app that steered it
+        // is no reason to silence the room — that's how every Plex remote
+        // behaves. Only the steering stops.
+        if (_plexPlayer.value != null) {
+            android.util.Log.i("AmpPlex", "leaving the player playing")
+            plexJob?.cancel()
+            plexJob = null
+            _plexPlayer.value = null
+            plexQueue = null
+        }
         // A renderer keeps playing whatever URI it was handed, so leaving without
         // telling it to stop strands audio on the speaker while the app shows
         // "This device". Bounded so teardown can't hang on an unreachable device.
@@ -726,6 +787,14 @@ class PlaybackController(
     }
 
     fun togglePlayPause() {
+        _plexPlayer.value?.let { target ->
+            val wasPlaying = _isPlaying.value
+            _isPlaying.value = !wasPlaying
+            scope.launch {
+                plexClient()?.companionCommand(target, if (wasPlaying) "pause" else "play", ++plexCommandId)
+            }
+            return
+        }
         val renderer = _castRenderer.value
         if (renderer != null) {
             val wasPlaying = _isPlaying.value
@@ -745,6 +814,11 @@ class PlaybackController(
     }
 
     fun play() {
+        _plexPlayer.value?.let { target ->
+            _isPlaying.value = true
+            scope.launch { plexClient()?.companionCommand(target, "play", ++plexCommandId) }
+            return
+        }
         val renderer = _castRenderer.value
         if (renderer != null) {
             _isPlaying.value = true
@@ -786,6 +860,11 @@ class PlaybackController(
     }
 
     fun pause() {
+        _plexPlayer.value?.let { target ->
+            _isPlaying.value = false
+            scope.launch { plexClient()?.companionCommand(target, "pause", ++plexCommandId) }
+            return
+        }
         val renderer = _castRenderer.value
         if (renderer != null) {
             _isPlaying.value = false
@@ -812,6 +891,11 @@ class PlaybackController(
      * own timeline.
      */
     fun seekTo(ms: Long) {
+        _plexPlayer.value?.let { target ->
+            _positionMs.value = ms
+            scope.launch { plexClient()?.companionSeek(target, ms, ++plexCommandId) }
+            return
+        }
         val renderer = _castRenderer.value
         if (renderer != null) {
             // The last moments of a track are not worth a seek. Seeking means
@@ -976,6 +1060,13 @@ class PlaybackController(
     fun stop() {
         reportTimeline(TimelineState.STOPPED)
         sessionTrackId = null
+        _plexPlayer.value?.let { target ->
+            plexJob?.cancel()
+            plexJob = null
+            _plexPlayer.value = null
+            plexQueue = null
+            scope.launch { plexClient()?.companionCommand(target, "stop", ++plexCommandId) }
+        }
         _castRenderer.value?.let { renderer ->
             castJob?.cancel()
             castJob = null
@@ -1004,6 +1095,10 @@ class PlaybackController(
     fun skipBack() = player?.skipBack()
 
     fun next() {
+        _plexPlayer.value?.let { target ->
+            scope.launch { plexClient()?.companionCommand(target, "skipNext", ++plexCommandId) }
+            return
+        }
         if (isCasting) {
             jumpTo(_index.value + 1)
             return
@@ -1013,6 +1108,16 @@ class PlaybackController(
 
     /** Restart the current track if we're past the intro, otherwise go to the previous one. */
     fun previous() {
+        _plexPlayer.value?.let { target ->
+            scope.launch {
+                if (_positionMs.value > PREVIOUS_RESTART_MS) {
+                    plexClient()?.companionSeek(target, 0, ++plexCommandId)
+                } else {
+                    plexClient()?.companionCommand(target, "skipPrevious", ++plexCommandId)
+                }
+            }
+            return
+        }
         if (isCasting) {
             if (_positionMs.value > PREVIOUS_RESTART_MS) seekTo(0) else jumpTo(_index.value - 1)
             return
@@ -1036,6 +1141,18 @@ class PlaybackController(
     /** Jump to an arbitrary queue position (tapping a queue row). */
     fun jumpTo(index: Int) {
         if (index !in _queue.value.indices) return
+        _plexPlayer.value?.let { target ->
+            val track = _queue.value[index]
+            _index.value = index
+            _positionMs.value = 0
+            scope.launch {
+                val queue = plexQueue ?: return@launch
+                // The queue is already on the server; playMedia with another of
+                // its keys is Companion's way of saying "this one now".
+                plexClient()?.companionPlay(target, queue, track.id, 0L, ++plexCommandId)
+            }
+            return
+        }
         val renderer = _castRenderer.value
         if (renderer != null) {
             _index.value = index
@@ -1183,6 +1300,17 @@ class PlaybackController(
             RepeatMode.QUEUE -> Player.REPEAT_MODE_ALL
         }
         android.util.Log.i("AmpDbg", "setRepeat $mode -> player reads back ${player?.repeatMode}")
+        _plexPlayer.value?.let { target ->
+            // Companion's values: 0 off, 1 the track, 2 the whole queue.
+            val plexRepeat = when (mode) {
+                RepeatMode.OFF -> "0"
+                RepeatMode.TRACK -> "1"
+                RepeatMode.QUEUE -> "2"
+            }
+            scope.launch {
+                plexClient()?.companionSetParameters(target, listOf("repeat" to plexRepeat), ++plexCommandId)
+            }
+        }
     }
 
     /**
@@ -1218,6 +1346,23 @@ class PlaybackController(
      */
     fun setVolume(fraction: Float) {
         val v = fraction.coerceIn(0f, 1f)
+        _plexPlayer.value?.let { target ->
+            // Only once the player has admitted to having a volume — an Apple
+            // TV's usually belongs to the television, and a fader that moves
+            // nothing would be a lie. The phone's own level is left alone: it
+            // has no business changing while the sound is elsewhere.
+            if (_plexVolumeKnown.value) {
+                _volume.value = v
+                scope.launch {
+                    plexClient()?.companionSetParameters(
+                        target,
+                        listOf("volume" to (v * 100).roundToInt().toString()),
+                        ++plexCommandId,
+                    )
+                }
+            }
+            return
+        }
         _volume.value = v
         val renderer = _castRenderer.value
         if (renderer != null) {
@@ -1260,6 +1405,143 @@ class PlaybackController(
         player?.replaceRange(head.size, q.size, newTail.map { it.toAudioItem() })
     }
 
+    // --- Plex Companion casting ----------------------------------------------
+    //
+    // The other way sound leaves the phone, and a different animal from DLNA:
+    // a Plex player (the Apple TV app, another Plexamp…) is handed a
+    // *server-side play queue* and walks it itself — gapless, and skippable
+    // from its own remote. So this side mirrors rather than drives: the poll
+    // adopts whatever the player reports, including track changes and pauses
+    // made on the TV. Commands are relayed through the server the same way the
+    // official controllers do it, so nothing here ever connects to the player.
+    // Only a Plex source can do this, so only a Plex source shows it.
+
+    private fun plexClient(): PlexClient? = serverClient.value as? PlexClient
+
+    /** Companion players on the active Plex server. Empty on any other source. */
+    suspend fun findPlexPlayers(): List<PlexPlayer> = plexClient()?.companionPlayers().orEmpty()
+
+    /**
+     * Move playback to [target]: push the queue to the server, point the player
+     * at it from the position we'd reached, and start mirroring its reports.
+     */
+    fun castToPlex(target: PlexPlayer) {
+        val client = plexClient() ?: return
+        // One route at a time; a DLNA renderer in progress is stopped quietly.
+        if (_castRenderer.value != null) stopCasting(resumeLocally = false)
+        player?.pause()
+        _plexPlayer.value = target
+        _plexVolumeKnown.value = false
+        val from = _positionMs.value
+        plexJob?.cancel()
+        plexJob = scope.launch {
+            val tracks = _queue.value
+            if (tracks.isEmpty()) { _plexPlayer.value = null; return@launch }
+            val index = _index.value.coerceIn(0, tracks.lastIndex)
+            val start = tracks[index]
+            val queue = client.createPlayQueue(
+                tracks.map { it.id },
+                start.id,
+                repeatAll = _repeatMode.value == RepeatMode.QUEUE,
+            )
+            if (queue == null) {
+                android.util.Log.i("AmpPlex", "play queue refused — staying on this device")
+                _plexPlayer.value = null
+                return@launch
+            }
+            plexQueue = queue
+            plexPushedIds = tracks.map { it.id }
+            val ok = client.companionPlay(target, queue, start.id, from, ++plexCommandId)
+            android.util.Log.i("AmpPlex", "playMedia → ${target.name}: ok=$ok idx=$index at=$from queue=${queue.id}")
+            if (!ok) { _plexPlayer.value = null; return@launch }
+            if (_repeatMode.value == RepeatMode.TRACK) {
+                client.companionSetParameters(target, listOf("repeat" to "1"), ++plexCommandId)
+            }
+            pollPlexPlayer(client, target)
+        }
+    }
+
+    /** Stop steering [target] and pick playback back up here from where it got to. */
+    fun stopPlexCasting(resumeLocally: Boolean = true) {
+        val target = _plexPlayer.value ?: return
+        val client = plexClient()
+        val at = _positionMs.value
+        val wasPlaying = _isPlaying.value
+        plexJob?.cancel()
+        plexJob = null
+        _plexPlayer.value = null
+        plexQueue = null
+        scope.launch { client?.companionCommand(target, "stop", ++plexCommandId) }
+        val p = player ?: return
+        _volume.value = p.deviceVolume.value
+        if (resumeLocally) {
+            // Same rebuild-not-seek hand-back as the DLNA route, and for the
+            // same reason — see stopCasting. The player's last reported state
+            // decides whether sound starts here or waits.
+            scope.launch(Dispatchers.Main.immediate) {
+                val tracks = _queue.value
+                if (tracks.isEmpty()) return@launch
+                val index = _index.value.coerceIn(0, tracks.lastIndex)
+                android.util.Log.i("AmpPlex", "hand-back idx=$index at=$at playing=$wasPlaying")
+                rebuildQueueAt(p, tracks, index, at)
+                if (wasPlaying) p.play() else p.pause()
+            }
+        }
+    }
+
+    /** Mirror the player's timeline until it stops being one. */
+    private suspend fun pollPlexPlayer(client: PlexClient, target: PlexPlayer) {
+        var misses = 0
+        while (coroutineContext.isActive && _plexPlayer.value?.id == target.id) {
+            val t = client.companionTimeline(target, ++plexCommandId)
+            if (t == null || t.state == "stopped") {
+                // A player that stops answering, or reports stopped, was ended
+                // from its own side — someone pressed stop on the TV, or the
+                // app there quit. After a few beats that is the truth, not a
+                // blip: keep the phone's place, paused.
+                if (++misses >= PLEX_GONE_POLLS) {
+                    plexCastEnded()
+                    return
+                }
+            } else {
+                misses = 0
+                _isPlaying.value = t.state == "playing"
+                _positionMs.value = t.timeMs
+                if (t.durationMs > 0) _durationMs.value = t.durationMs
+                t.volume?.let {
+                    _plexVolumeKnown.value = true
+                    _volume.value = (it / 100f).coerceIn(0f, 1f)
+                }
+                val rk = t.ratingKey
+                if (rk != null && _queue.value.getOrNull(_index.value)?.id != rk) {
+                    // The player moved on its own — its remote skipped, or a
+                    // track simply ended. Follow it; don't fight it.
+                    val idx = _queue.value.indexOfFirst { it.id == rk }
+                    if (idx >= 0) {
+                        _index.value = idx
+                        android.util.Log.i("AmpPlex", "player moved to idx=$idx")
+                    }
+                }
+            }
+            delay(CAST_POLL_MS)
+        }
+    }
+
+    private fun plexCastEnded() {
+        android.util.Log.i("AmpPlex", "player gone — keeping the place, paused")
+        _plexPlayer.value = null
+        plexQueue = null
+        _isPlaying.value = false
+        val p = player ?: return
+        _volume.value = p.deviceVolume.value
+        scope.launch(Dispatchers.Main.immediate) {
+            val tracks = _queue.value
+            if (tracks.isEmpty()) return@launch
+            rebuildQueueAt(p, tracks, _index.value.coerceIn(0, tracks.lastIndex), _positionMs.value)
+            p.pause()
+        }
+    }
+
     // --- DLNA casting --------------------------------------------------------
 
     /** Find renderers on the network. Blocking on the network for a few seconds. */
@@ -1271,6 +1553,8 @@ class PlaybackController(
      * it for progress.
      */
     fun castTo(renderer: DlnaRenderer) {
+        // One route at a time — a Companion cast in progress hands over quietly.
+        if (_plexPlayer.value != null) stopPlexCasting(resumeLocally = false)
         player?.pause()
         _castRenderer.value = renderer
         val from = _positionMs.value
@@ -2011,6 +2295,9 @@ class PlaybackController(
      * means the dashboard is stale until the next one, not a broken stream.
      */
     private fun reportTimeline(state: TimelineState) {
+        // A Companion player reports its own timeline to the server — that is
+        // its scrobble, and this phone adding another would double every play.
+        if (_plexPlayer.value != null) return
         val track = _queue.value.getOrNull(_index.value) ?: return
         // Nothing playing on the server's behalf to report on.
         if (LocalLibrary.isLocal(track.id)) return
@@ -2061,6 +2348,8 @@ class PlaybackController(
      * is simply false, where a play is still true whenever it arrives.
      */
     private fun announceNowPlaying() {
+        // The Companion player is the one playing; the server hears it from them.
+        if (_plexPlayer.value != null) return
         val track = _queue.value.getOrNull(_index.value) ?: return
         // Nothing to tell, and nowhere to keep a play count: a local file's
         // history would be invented by this app and restorable by nothing.
@@ -2291,6 +2580,9 @@ class PlaybackController(
         const val CAST_START_WINDOW_MS = 15_000L
 
         private const val CAST_POLL_MS = 1_000L
+
+        /** Consecutive silent/stopped polls before a Companion player counts as gone. */
+        private const val PLEX_GONE_POLLS = 5
 
         /**
          * The most tracks the player is ever given at once, and how many already

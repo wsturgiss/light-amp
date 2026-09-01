@@ -9,6 +9,7 @@ import io.ktor.client.request.post
 import io.ktor.client.request.put
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
+import java.net.URI
 import java.net.URLEncoder
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -777,6 +778,152 @@ class PlexClient(
         genre = genres.firstOrNull()?.tag.orEmpty(),
     )
 
+    // --- Plex Companion — casting to another Plex player ---------------------
+    //
+    // Companion is Plex's own remote-control protocol: any signed-in player
+    // that stays connected to the server (the Apple TV app among them) accepts
+    // `/player/...` commands relayed *through the server* — the same proxy
+    // route the official controllers use, so this phone never needs to reach
+    // the player directly. The player then pulls the audio from the server
+    // itself; Amp only steers. Unlike a DLNA renderer, a Plex player holds the
+    // whole play queue and advances through it on its own.
+    //
+    // These endpoints answer XML even where the rest of the server speaks
+    // JSON — the proxied replies come from the player — so they go through
+    // [companionXml] and the attribute parser at the bottom of this file.
+
+    /** Companion-capable players the server currently knows about. */
+    suspend fun companionPlayers(): List<PlexPlayer> = runCatching {
+        plexXmlElements(companionXml("/clients"), "Server").mapNotNull { attrs ->
+            val id = attrs["machineIdentifier"] ?: return@mapNotNull null
+            // Entries that can't take playback commands are controllers or
+            // servers — not somewhere sound can go.
+            if (!(attrs["protocolCapabilities"] ?: "").contains("playback")) return@mapNotNull null
+            PlexPlayer(
+                id = id,
+                name = attrs["name"] ?: attrs["product"] ?: "Plex player",
+                product = attrs["product"].orEmpty(),
+            )
+        }
+    }.getOrDefault(emptyList())
+
+    /**
+     * Create a server-side play queue over [trackIds], cued on [startId].
+     * The queue belongs to the server; whoever plays it walks it themselves.
+     */
+    suspend fun createPlayQueue(trackIds: List<String>, startId: String, repeatAll: Boolean): PlexQueue? = runCatching {
+        val mid = machineIdentifier.ifBlank { identity() ?: return@runCatching null }
+        val uri = "server://$mid/com.plexapp.plugins.library/library/metadata/" +
+            trackIds.joinToString(",")
+        val body = companionXml(
+            "/playQueues",
+            listOf(
+                "type" to "audio",
+                "uri" to uri,
+                "key" to "/library/metadata/$startId",
+                "shuffle" to "0",
+                "repeat" to if (repeatAll) "1" else "0",
+                "own" to "1",
+            ),
+            post = true,
+        )
+        val container = plexXmlElements(body, "MediaContainer").firstOrNull() ?: return@runCatching null
+        container["playQueueID"]?.let { PlexQueue(it) }
+    }.getOrNull()
+
+    /** Start [queue] on [target] at [startId]/[offsetMs]. True when the player took it. */
+    suspend fun companionPlay(
+        target: PlexPlayer,
+        queue: PlexQueue,
+        startId: String,
+        offsetMs: Long,
+        commandId: Int,
+    ): Boolean = runCatching {
+        val u = URI(baseUrl)
+        val mid = machineIdentifier.ifBlank { identity().orEmpty() }
+        companionXml(
+            "/player/playback/playMedia",
+            listOf(
+                "key" to "/library/metadata/$startId",
+                "offset" to offsetMs.coerceAtLeast(0L).toString(),
+                "machineIdentifier" to mid,
+                "protocol" to (u.scheme ?: "http"),
+                "address" to u.host.orEmpty(),
+                "port" to (if (u.port > 0) u.port else if (u.scheme == "https") 443 else 32400).toString(),
+                "containerKey" to "/playQueues/${queue.id}?window=100&own=1",
+                "token" to token,
+                "commandID" to commandId.toString(),
+            ),
+            target = target,
+        )
+        true
+    }.getOrDefault(false)
+
+    /** A plain transport command: `play`, `pause`, `stop`, `skipNext`, `skipPrevious`. */
+    suspend fun companionCommand(target: PlexPlayer, command: String, commandId: Int): Boolean = runCatching {
+        companionXml(
+            "/player/playback/$command",
+            listOf("type" to "music", "commandID" to commandId.toString()),
+            target = target,
+        )
+        true
+    }.getOrDefault(false)
+
+    suspend fun companionSeek(target: PlexPlayer, ms: Long, commandId: Int): Boolean = runCatching {
+        companionXml(
+            "/player/playback/seekTo",
+            listOf("offset" to ms.coerceAtLeast(0L).toString(), "type" to "music", "commandID" to commandId.toString()),
+            target = target,
+        )
+        true
+    }.getOrDefault(false)
+
+    /** `volume` 0–100 and/or `repeat` 0 off / 1 track / 2 queue — the player keeps what it understands. */
+    suspend fun companionSetParameters(target: PlexPlayer, params: List<Pair<String, String>>, commandId: Int): Boolean =
+        runCatching {
+            companionXml(
+                "/player/playback/setParameters",
+                params + listOf("type" to "music", "commandID" to commandId.toString()),
+                target = target,
+            )
+            true
+        }.getOrDefault(false)
+
+    /** The player's music timeline, or null when it can't be asked. */
+    suspend fun companionTimeline(target: PlexPlayer, commandId: Int): PlexPlayerTimeline? = runCatching {
+        plexTimelineFrom(
+            companionXml(
+                "/player/timeline/poll",
+                listOf("wait" to "0", "commandID" to commandId.toString()),
+                target = target,
+            )
+        )
+    }.getOrNull()
+
+    private suspend fun companionXml(
+        path: String,
+        params: List<Pair<String, String>> = emptyList(),
+        target: PlexPlayer? = null,
+        post: Boolean = false,
+    ): String {
+        val query = params.joinToString("&") { (k, v) -> "$k=${enc(v)}" }
+        val url = baseUrl.trimEnd('/') + path + if (query.isEmpty()) "" else "?$query"
+        val response = if (post) http.post(url) { companionHeaders(target) } else http.get(url) { companionHeaders(target) }
+        if (!response.status.isSuccess()) {
+            throw PlexException("Plex says ${response.status.value} for $path")
+        }
+        return response.bodyAsText()
+    }
+
+    private fun io.ktor.client.request.HttpRequestBuilder.companionHeaders(target: PlexPlayer?) {
+        header("X-Plex-Token", token)
+        // XML on purpose: proxied player replies are XML whatever we ask for,
+        // so asking for it everywhere keeps one parser.
+        header("Accept", "application/xml")
+        identityHeaders.forEach { (k, v) -> header(k, v) }
+        if (target != null) header("X-Plex-Target-Client-Identifier", target.id)
+    }
+
     private fun PlexMetadata.toTrack(): Track = Track(
         id = ratingKey,
         // The track's own artist first: on a compilation grandparentTitle is
@@ -870,3 +1017,71 @@ class PlexClient(
 }
 
 class PlexException(message: String) : Exception(message)
+
+/** A Companion-capable player, as `/clients` lists it. */
+data class PlexPlayer(
+    /** The player's own client identifier — the command target. */
+    val id: String,
+    val name: String,
+    val product: String,
+)
+
+/** A server-side play queue; the id is all a player needs. */
+data class PlexQueue(val id: String)
+
+/** What a player reports about its music playback. */
+data class PlexPlayerTimeline(
+    /** `playing`, `paused`, `stopped` or `buffering`. */
+    val state: String,
+    val timeMs: Long,
+    val durationMs: Long,
+    /** The playing track, in the server's terms — Amp's Plex track id. */
+    val ratingKey: String?,
+    /** 0–100 where the player reports one; null where volume isn't its to control. */
+    val volume: Int?,
+)
+
+/**
+ * The attributes of every `<tag …>` in [xml], in document order.
+ *
+ * Companion bodies are flat attribute lists — the shape DlnaCast already
+ * parses by hand for UPnP — so a full XML parser buys nothing here.
+ */
+internal fun plexXmlElements(xml: String, tag: String): List<Map<String, String>> {
+    val out = mutableListOf<Map<String, String>>()
+    var from = 0
+    while (true) {
+        val at = xml.indexOf("<$tag", from).takeIf { it >= 0 } ?: break
+        // The character after the tag name has to end it, or "Timeline"
+        // would also match "TimelineEntry".
+        val after = xml.getOrNull(at + tag.length + 1)
+        val end = xml.indexOf('>', at).takeIf { it >= 0 } ?: break
+        if (after == null || after == ' ' || after == '>' || after == '/' || after == '\n' || after == '\t') {
+            val attrs = ATTR.findAll(xml.substring(at, end)).associate {
+                it.groupValues[1] to unescapeXml(it.groupValues[2])
+            }
+            out += attrs
+        }
+        from = end + 1
+    }
+    return out
+}
+
+private val ATTR = Regex("""([A-Za-z0-9_:-]+)="([^"]*)"""")
+
+private fun unescapeXml(s: String): String = s
+    .replace("&lt;", "<").replace("&gt;", ">")
+    .replace("&quot;", "\"").replace("&#39;", "'").replace("&apos;", "'")
+    .replace("&amp;", "&")
+
+/** The music `<Timeline>` out of a `/player/timeline/poll` body, if any. */
+internal fun plexTimelineFrom(body: String): PlexPlayerTimeline? {
+    val music = plexXmlElements(body, "Timeline").firstOrNull { it["type"] == "music" } ?: return null
+    return PlexPlayerTimeline(
+        state = music["state"] ?: "stopped",
+        timeMs = music["time"]?.toLongOrNull() ?: 0L,
+        durationMs = music["duration"]?.toLongOrNull() ?: 0L,
+        ratingKey = music["ratingKey"]?.takeIf { it.isNotBlank() },
+        volume = music["volume"]?.toIntOrNull(),
+    )
+}
