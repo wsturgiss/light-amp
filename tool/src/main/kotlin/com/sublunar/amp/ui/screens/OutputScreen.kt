@@ -40,6 +40,7 @@ import com.sublunar.amp.ui.LightType
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import com.sublunar.amp.data.PlexPlayer
+import com.sublunar.amp.playback.PlaybackController
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.cast.DlnaRenderer
@@ -69,7 +70,7 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
         val volume by App.playback.volume.collectAsState()
         val casting by App.playback.castRenderer.collectAsState()
         val plexCasting by App.playback.plexPlayer.collectAsState()
-        val plexVolumeKnown by App.playback.plexVolumeKnown.collectAsState()
+        val plexVolume by App.playback.plexVolume.collectAsState()
         var renderers by remember { mutableStateOf<List<DlnaRenderer>>(emptyList()) }
         var plexPlayers by remember { mutableStateOf<List<PlexPlayer>>(emptyList()) }
         var scanning by remember { mutableStateOf(true) }
@@ -86,9 +87,12 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
             scanning = false
         }
 
-        // A fader with nothing to move: an Apple TV's volume usually belongs to
-        // the television. Dimmed rather than hidden, so the page doesn't jump.
-        val faderLive = plexCasting == null || plexVolumeKnown
+        // A fader with nothing to move: an Apple TV feeding a receiver reports
+        // a volume it doesn't own, takes the command and changes nothing. Once
+        // that is established the control is disabled rather than left to lie.
+        // Dimmed rather than hidden, so the page doesn't jump.
+        val faderLive = plexCasting == null ||
+            plexVolume != PlaybackController.PlexVolume.NotOurs
 
         PlayerTheme {
             Column(modifier = Modifier.fillMaxSize()) {
@@ -105,13 +109,13 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                     ) {
                         AppText("Volume", pxSp(LightType.DETAIL_PX))
                         AppText(
-                            if (faderLive) "${(volume * 100).roundToInt()}%" else "on the player",
+                            if (faderLive) "${(volume * 100).roundToInt()}%" else "on the TV",
                             pxSp(LightType.DETAIL_PX),
                             dim = true,
                         )
                     }
                     Spacer(Modifier.height(px(26)))
-                    VolumeFader(volume)
+                    VolumeFader(volume, enabled = faderLive)
                 }
 
                 Spacer(Modifier.height(px(20)))
@@ -191,7 +195,7 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
     }
 
     @Composable
-    private fun VolumeFader(volume: Float) {
+    private fun VolumeFader(volume: Float, enabled: Boolean = true) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -202,7 +206,10 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                 modifier = Modifier
                     .weight(1f)
                     .height(px(71))
-                    .pointerInput(Unit) {
+                    // Not merely dimmed: a control that can't do anything
+                    // shouldn't move under the thumb either.
+                    .pointerInput(enabled) {
+                        if (!enabled) return@pointerInput
                         awaitEachGesture {
                             val down = awaitFirstDown()
                             fun ratioAt(x: Float) = (x / size.width).coerceIn(0f, 1f)

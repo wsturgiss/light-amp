@@ -230,12 +230,25 @@ class PlaybackController(
     val plexPlayer: StateFlow<PlexPlayer?> = _plexPlayer
 
     /**
-     * Whether the player has told us its volume. The fader only drives a
-     * Companion player once it has — a fader that moves nothing is the
-     * misleading control this app doesn't do.
+     * Whether the fader can move a Companion player's volume — decided by
+     * evidence, not by the player's word.
+     *
+     * A player that reports a level it doesn't own is the awkward case, and
+     * the common one: an Apple TV feeding a receiver over optical says
+     * `volume="0"` for ever, takes the command, and changes nothing — the
+     * amplifier owns the sound. So [Unknown] is where every player starts,
+     * a drag is allowed as a *probe*, and the answer comes from what the
+     * player reports afterwards. Once [NotOurs], the fader is disabled rather
+     * than left to lie.
      */
-    private val _plexVolumeKnown = MutableStateFlow(false)
-    val plexVolumeKnown: StateFlow<Boolean> = _plexVolumeKnown
+    enum class PlexVolume { Unknown, Controllable, NotOurs }
+
+    private val _plexVolume = MutableStateFlow(PlexVolume.Unknown)
+    val plexVolume: StateFlow<PlexVolume> = _plexVolume
+
+    /** The level last asked for (0–100) while proving control, if any. */
+    private var plexVolumeAsked: Int? = null
+    private var plexVolumeProbes = 0
 
     private var plexJob: Job? = null
     private var plexQueue: PlexQueue? = null
@@ -1347,19 +1360,21 @@ class PlaybackController(
     fun setVolume(fraction: Float) {
         val v = fraction.coerceIn(0f, 1f)
         _plexPlayer.value?.let { target ->
-            // Only once the player has admitted to having a volume — an Apple
-            // TV's usually belongs to the television, and a fader that moves
-            // nothing would be a lie. The phone's own level is left alone: it
-            // has no business changing while the sound is elsewhere.
-            if (_plexVolumeKnown.value) {
-                _volume.value = v
-                scope.launch {
-                    plexClient()?.companionSetParameters(
-                        target,
-                        listOf("volume" to (v * 100).roundToInt().toString()),
-                        ++plexCommandId,
-                    )
-                }
+            // A player whose volume isn't its own to move takes no orders —
+            // see judgePlexVolume. Until that is settled, a drag is the probe:
+            // it goes out, and the next polls say whether it landed. The
+            // phone's own level is left alone either way — it has no business
+            // changing while the sound is elsewhere.
+            if (_plexVolume.value == PlexVolume.NotOurs) return
+            val asked = (v * 100).roundToInt()
+            plexVolumeAsked = asked
+            _volume.value = v
+            scope.launch {
+                plexClient()?.companionSetParameters(
+                    target,
+                    listOf("volume" to asked.toString()),
+                    ++plexCommandId,
+                )
             }
             return
         }
@@ -1431,7 +1446,9 @@ class PlaybackController(
         if (_castRenderer.value != null) stopCasting(resumeLocally = false)
         player?.pause()
         _plexPlayer.value = target
-        _plexVolumeKnown.value = false
+        _plexVolume.value = PlexVolume.Unknown
+        plexVolumeAsked = null
+        plexVolumeProbes = 0
         val from = _positionMs.value
         plexJob?.cancel()
         plexJob = scope.launch {
@@ -1508,10 +1525,7 @@ class PlaybackController(
                 _isPlaying.value = t.state == "playing"
                 _positionMs.value = t.timeMs
                 if (t.durationMs > 0) _durationMs.value = t.durationMs
-                t.volume?.let {
-                    _plexVolumeKnown.value = true
-                    _volume.value = (it / 100f).coerceIn(0f, 1f)
-                }
+                t.volume?.let { reported -> judgePlexVolume(reported) }
                 val rk = t.ratingKey
                 if (rk != null && _queue.value.getOrNull(_index.value)?.id != rk) {
                     // The player moved on its own — its remote skipped, or a
@@ -1524,6 +1538,39 @@ class PlaybackController(
                 }
             }
             delay(CAST_POLL_MS)
+        }
+    }
+
+    /**
+     * Decide from [reported] whether the fader owns this player's volume.
+     *
+     * Proof is a level that moves: either one the player shows without being
+     * asked, or one that follows where we put it. A player stuck at zero while
+     * plainly audible is reporting someone else's volume, and after a few polls
+     * of asking and being ignored, that is settled — the fader goes quiet
+     * rather than snapping back to a number that means nothing.
+     */
+    private fun judgePlexVolume(reported: Int) {
+        when (_plexVolume.value) {
+            PlexVolume.Controllable -> _volume.value = (reported / 100f).coerceIn(0f, 1f)
+            PlexVolume.NotOurs -> Unit
+            PlexVolume.Unknown -> {
+                val asked = plexVolumeAsked
+                val followed = asked != null && kotlin.math.abs(reported - asked) <= PLEX_VOLUME_SLACK
+                if (reported > 0 || followed) {
+                    _plexVolume.value = PlexVolume.Controllable
+                    plexVolumeAsked = null
+                    _volume.value = (reported / 100f).coerceIn(0f, 1f)
+                    android.util.Log.i("AmpPlex", "volume is ours (reported=$reported)")
+                } else if (asked != null && ++plexVolumeProbes >= PLEX_VOLUME_PROBES) {
+                    _plexVolume.value = PlexVolume.NotOurs
+                    plexVolumeAsked = null
+                    // Back to the phone's own level: the number on screen
+                    // should mean something, and the player's zero doesn't.
+                    player?.let { _volume.value = it.deviceVolume.value }
+                    android.util.Log.i("AmpPlex", "volume belongs to the player's own output — fader disabled")
+                }
+            }
         }
     }
 
@@ -2583,6 +2630,12 @@ class PlaybackController(
 
         /** Consecutive silent/stopped polls before a Companion player counts as gone. */
         private const val PLEX_GONE_POLLS = 5
+
+        /** How near the asked-for level counts as the player having taken it. */
+        private const val PLEX_VOLUME_SLACK = 5
+
+        /** Polls a player gets to follow a volume before the fader gives up on it. */
+        private const val PLEX_VOLUME_PROBES = 3
 
         /**
          * The most tracks the player is ever given at once, and how many already

@@ -807,10 +807,15 @@ class PlexClient(
                 // Entries that can't take playback commands are controllers or
                 // servers — not somewhere sound can go.
                 if (!(attrs["protocolCapabilities"] ?: "").contains("playback")) return@mapNotNull null
+                // The server's list names the player's own address and
+                // Companion port; commands go there, not back through here.
+                val host = attrs["address"] ?: attrs["host"] ?: return@mapNotNull null
+                val port = attrs["port"]?.toIntOrNull() ?: COMPANION_PORT
                 PlexPlayer(
                     id = id,
                     name = attrs["name"] ?: attrs["product"] ?: "Plex player",
                     product = attrs["product"].orEmpty(),
+                    directUrl = "http://$host:$port",
                 )
             }
         }.getOrDefault(emptyList())
@@ -818,11 +823,22 @@ class PlexClient(
             val body = http.get("$PLEX_TV_RESOURCES") { plexHeaders() }.bodyAsText()
             json.decodeFromString<List<PlexResource>>(body)
                 .filter { it.provides.contains("player") && it.presence && it.clientIdentifier.isNotBlank() }
-                .map {
+                .mapNotNull { resource ->
+                    // The local address first: this Wi-Fi, plain http, no
+                    // round trip through Plex's relay. A player with no
+                    // address is one nothing here can command, so it is not
+                    // offered.
+                    val direct = resource.connections
+                        .filter { it.address.isNotBlank() && it.port > 0 }
+                        .sortedByDescending { it.local }
+                        .firstOrNull()
+                        ?.let { "http://${it.address}:${it.port}" }
+                        ?: return@mapNotNull null
                     PlexPlayer(
-                        id = it.clientIdentifier,
-                        name = it.name.ifBlank { it.product.ifBlank { "Plex player" } },
-                        product = it.product,
+                        id = resource.clientIdentifier,
+                        name = resource.name.ifBlank { resource.product.ifBlank { "Plex player" } },
+                        product = resource.product,
+                        directUrl = direct,
                     )
                 }
         }.getOrDefault(emptyList())
@@ -830,7 +846,8 @@ class PlexClient(
         val merged = fromServer + fromAccount.filter { it.id !in seen }
         android.util.Log.i(
             "AmpPlex",
-            "players: server=${fromServer.map { it.name }} account=${fromAccount.map { it.name }}",
+            "players: server=${fromServer.map { it.name }} " +
+                "account=${fromAccount.map { "${it.name}@${it.directUrl ?: "no-address"}" }}",
         )
         return merged
     }
@@ -885,7 +902,10 @@ class PlexClient(
             target = target,
         )
         true
-    }.getOrDefault(false)
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "playMedia refused: ${it.message}")
+        false
+    }
 
     /** A plain transport command: `play`, `pause`, `stop`, `skipNext`, `skipPrevious`. */
     suspend fun companionCommand(target: PlexPlayer, command: String, commandId: Int): Boolean = runCatching {
@@ -895,7 +915,10 @@ class PlexClient(
             target = target,
         )
         true
-    }.getOrDefault(false)
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "$command refused: ${it.message}")
+        false
+    }
 
     suspend fun companionSeek(target: PlexPlayer, ms: Long, commandId: Int): Boolean = runCatching {
         companionXml(
@@ -928,17 +951,22 @@ class PlexClient(
         )
     }.getOrNull()
 
+    /**
+     * A Companion request: to the player itself when one is named, to the
+     * server otherwise (the client list and play queues are the server's).
+     */
     private suspend fun companionXml(
         path: String,
         params: List<Pair<String, String>> = emptyList(),
         target: PlexPlayer? = null,
         post: Boolean = false,
     ): String {
+        val host = target?.directUrl ?: baseUrl
         val query = params.joinToString("&") { (k, v) -> "$k=${enc(v)}" }
-        val url = baseUrl.trimEnd('/') + path + if (query.isEmpty()) "" else "?$query"
+        val url = host.trimEnd('/') + path + if (query.isEmpty()) "" else "?$query"
         val response = if (post) http.post(url) { companionHeaders(target) } else http.get(url) { companionHeaders(target) }
         if (!response.status.isSuccess()) {
-            throw PlexException("Plex says ${response.status.value} for $path")
+            throw PlexException("Plex says ${response.status.value} for $path at $host")
         }
         return response.bodyAsText()
     }
@@ -949,7 +977,13 @@ class PlexClient(
         // so asking for it everywhere keeps one parser.
         header("Accept", "application/xml")
         identityHeaders.forEach { (k, v) -> header(k, v) }
-        if (target != null) header("X-Plex-Target-Client-Identifier", target.id)
+        if (target != null) {
+            header("X-Plex-Target-Client-Identifier", target.id)
+            // A player answering for itself checks who is asking: an unknown
+            // controller with no provides header is refused before the command
+            // is read.
+            header("X-Plex-Provides", "controller")
+        }
     }
 
     private fun PlexMetadata.toTrack(): Track = Track(
@@ -1031,6 +1065,9 @@ class PlexClient(
          */
         private const val PLEX_TV_RESOURCES = "https://plex.tv/api/v2/resources?includeHttps=1"
 
+        /** Where a Plex player listens for Companion commands. */
+        private const val COMPANION_PORT = 32500
+
         fun plexIdentity(product: String? = null): List<Pair<String, String>> = listOf(
             "X-Plex-Client-Identifier" to "com.sublunar.amp",
             "X-Plex-Product" to (product ?: "Amp"),
@@ -1048,12 +1085,24 @@ class PlexClient(
 
 class PlexException(message: String) : Exception(message)
 
-/** A Companion-capable player, as `/clients` lists it. */
+/**
+ * A Companion-capable player, from the server's list or the account's.
+ *
+ * Commands go to [directUrl] — the player's own Companion port — and never
+ * through the server. Relaying was tried first, because that is what the
+ * official controllers appear to do, and the server answers **404** for a
+ * player it has not discovered itself: the Apple TV app registers with plex.tv
+ * rather than announcing itself on the server's LAN, so the server has no such
+ * player to relay to. Rather than keep a fallback that has never worked, a
+ * player is listed only when it can be reached directly.
+ */
 data class PlexPlayer(
     /** The player's own client identifier — the command target. */
     val id: String,
     val name: String,
     val product: String,
+    /** `http://host:32500` — the player's own door. */
+    val directUrl: String,
 )
 
 /** A server-side play queue; the id is all a player needs. */
