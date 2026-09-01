@@ -2,7 +2,7 @@
 
 **A music player** for the Light Phone III.
 
-Plays your own library — a Subsonic server, Plex, or files on the phone — and is
+Plays your own library — a Subsonic server, Plex, Jellyfin or files on the phone — and is
 built on Light's SDK, so it looks like it belongs there.
 
 <p align="center">
