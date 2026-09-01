@@ -1118,6 +1118,12 @@ data class PlexPlayerTimeline(
     val ratingKey: String?,
     /** 0–100 where the player reports one; null where volume isn't its to control. */
     val volume: Int?,
+    /**
+     * What the player says it accepts — `playPause,stop,volume,seekTo,…` —
+     * or null where it doesn't say. The player's own word on its capabilities,
+     * which beats guessing from what a number does after we push it.
+     */
+    val controllable: String?,
 )
 
 /**
@@ -1162,5 +1168,6 @@ internal fun plexTimelineFrom(body: String): PlexPlayerTimeline? {
         durationMs = music["duration"]?.toLongOrNull() ?: 0L,
         ratingKey = music["ratingKey"]?.takeIf { it.isNotBlank() },
         volume = music["volume"]?.toIntOrNull(),
+        controllable = music["controllable"]?.takeIf { it.isNotBlank() },
     )
 }

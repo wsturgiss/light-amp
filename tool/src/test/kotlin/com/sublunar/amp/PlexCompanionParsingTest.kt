@@ -64,7 +64,27 @@ class PlexCompanionParsingTest {
         assertEquals("paused", t.state)
         assertNull(t.volume)
         assertNull(t.ratingKey)
+        assertNull(t.controllable)
         assertEquals(0L, t.durationMs)
+    }
+
+    @Test
+    fun `controllable carries what the player accepts`() {
+        // The Apple TV over optical: it reports a level it does not own, and
+        // says as much by leaving volume out of the list.
+        val atv = """
+            <MediaContainer><Timeline type="music" state="playing" time="1000" volume="0"
+              controllable="playPause,stop,seekTo,skipPrevious,skipNext,shuffle,repeat"/></MediaContainer>
+        """.trimIndent()
+        val t = plexTimelineFrom(atv)!!
+        assertEquals(0, t.volume)
+        assertEquals(false, t.controllable!!.split(",").any { it.trim() == "volume" })
+
+        val speaker = """
+            <MediaContainer><Timeline type="music" state="playing" volume="35"
+              controllable="playPause,stop,volume,seekTo"/></MediaContainer>
+        """.trimIndent()
+        assertEquals(true, plexTimelineFrom(speaker)!!.controllable!!.contains("volume"))
     }
 
     @Test

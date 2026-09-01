@@ -1525,7 +1525,7 @@ class PlaybackController(
                 _isPlaying.value = t.state == "playing"
                 _positionMs.value = t.timeMs
                 if (t.durationMs > 0) _durationMs.value = t.durationMs
-                t.volume?.let { reported -> judgePlexVolume(reported) }
+                judgePlexVolume(t.volume, t.controllable)
                 val rk = t.ratingKey
                 if (rk != null && _queue.value.getOrNull(_index.value)?.id != rk) {
                     // The player moved on its own — its remote skipped, or a
@@ -1542,15 +1542,25 @@ class PlaybackController(
     }
 
     /**
-     * Decide from [reported] whether the fader owns this player's volume.
+     * Decide whether the fader owns this player's volume.
      *
-     * Proof is a level that moves: either one the player shows without being
-     * asked, or one that follows where we put it. A player stuck at zero while
-     * plainly audible is reporting someone else's volume, and after a few polls
-     * of asking and being ignored, that is settled — the fader goes quiet
-     * rather than snapping back to a number that means nothing.
+     * The player's own word comes first: a timeline lists what it accepts, and
+     * one that doesn't name `volume` is saying so plainly — an Apple TV feeding
+     * a receiver over optical is passing a full-scale digital stream on and the
+     * amplifier does the attenuating. Where a player says nothing, evidence
+     * decides: a level that moves on its own or follows where we put it means
+     * the fader is real; a level that ignores us for a few polls means it
+     * isn't.
      */
-    private fun judgePlexVolume(reported: Int) {
+    private fun judgePlexVolume(reported: Int?, controllable: String?) {
+        if (_plexVolume.value != PlexVolume.NotOurs &&
+            controllable != null &&
+            !controllable.split(',').any { it.trim().equals("volume", ignoreCase = true) }
+        ) {
+            plexVolumeNotOurs("player's timeline doesn't list volume")
+            return
+        }
+        if (reported == null) return
         when (_plexVolume.value) {
             PlexVolume.Controllable -> _volume.value = (reported / 100f).coerceIn(0f, 1f)
             PlexVolume.NotOurs -> Unit
@@ -1563,15 +1573,20 @@ class PlaybackController(
                     _volume.value = (reported / 100f).coerceIn(0f, 1f)
                     android.util.Log.i("AmpPlex", "volume is ours (reported=$reported)")
                 } else if (asked != null && ++plexVolumeProbes >= PLEX_VOLUME_PROBES) {
-                    _plexVolume.value = PlexVolume.NotOurs
-                    plexVolumeAsked = null
-                    // Back to the phone's own level: the number on screen
-                    // should mean something, and the player's zero doesn't.
-                    player?.let { _volume.value = it.deviceVolume.value }
-                    android.util.Log.i("AmpPlex", "volume belongs to the player's own output — fader disabled")
+                    plexVolumeNotOurs("asked for $asked, player stayed at $reported")
                 }
             }
         }
+    }
+
+    private fun plexVolumeNotOurs(why: String) {
+        _plexVolume.value = PlexVolume.NotOurs
+        plexVolumeAsked = null
+        // Full, not the phone's last level: what leaves here is a digital
+        // stream at unity gain, and the far end does the attenuating. A bar
+        // showing anything less would be describing a knob nobody is turning.
+        _volume.value = 1f
+        android.util.Log.i("AmpPlex", "volume isn't ours — $why; fader disabled at unity")
     }
 
     private fun plexCastEnded() {
