@@ -792,20 +792,48 @@ class PlexClient(
     // JSON — the proxied replies come from the player — so they go through
     // [companionXml] and the attribute parser at the bottom of this file.
 
-    /** Companion-capable players the server currently knows about. */
-    suspend fun companionPlayers(): List<PlexPlayer> = runCatching {
-        plexXmlElements(companionXml("/clients"), "Server").mapNotNull { attrs ->
-            val id = attrs["machineIdentifier"] ?: return@mapNotNull null
-            // Entries that can't take playback commands are controllers or
-            // servers — not somewhere sound can go.
-            if (!(attrs["protocolCapabilities"] ?: "").contains("playback")) return@mapNotNull null
-            PlexPlayer(
-                id = id,
-                name = attrs["name"] ?: attrs["product"] ?: "Plex player",
-                product = attrs["product"].orEmpty(),
-            )
-        }
-    }.getOrDefault(emptyList())
+    /**
+     * Companion-capable players, from two lists because no one list has
+     * everyone: the server's `/clients` only knows players it discovered on
+     * its own LAN, and the Apple TV app is famously not among them — it
+     * announces itself to plex.tv instead. The account's resources cover
+     * those; the token here is the account's, so both are ours to ask. The
+     * server relays commands to either kind the same way.
+     */
+    suspend fun companionPlayers(): List<PlexPlayer> {
+        val fromServer = runCatching {
+            plexXmlElements(companionXml("/clients"), "Server").mapNotNull { attrs ->
+                val id = attrs["machineIdentifier"] ?: return@mapNotNull null
+                // Entries that can't take playback commands are controllers or
+                // servers — not somewhere sound can go.
+                if (!(attrs["protocolCapabilities"] ?: "").contains("playback")) return@mapNotNull null
+                PlexPlayer(
+                    id = id,
+                    name = attrs["name"] ?: attrs["product"] ?: "Plex player",
+                    product = attrs["product"].orEmpty(),
+                )
+            }
+        }.getOrDefault(emptyList())
+        val fromAccount = runCatching {
+            val body = http.get("$PLEX_TV_RESOURCES") { plexHeaders() }.bodyAsText()
+            json.decodeFromString<List<PlexResource>>(body)
+                .filter { it.provides.contains("player") && it.presence && it.clientIdentifier.isNotBlank() }
+                .map {
+                    PlexPlayer(
+                        id = it.clientIdentifier,
+                        name = it.name.ifBlank { it.product.ifBlank { "Plex player" } },
+                        product = it.product,
+                    )
+                }
+        }.getOrDefault(emptyList())
+        val seen = fromServer.map { it.id }.toSet()
+        val merged = fromServer + fromAccount.filter { it.id !in seen }
+        android.util.Log.i(
+            "AmpPlex",
+            "players: server=${fromServer.map { it.name }} account=${fromAccount.map { it.name }}",
+        )
+        return merged
+    }
 
     /**
      * Create a server-side play queue over [trackIds], cued on [startId].
@@ -1001,6 +1029,8 @@ class PlexClient(
          * device after one of them would make Plex read "Kitchen on Kitchen"
          * and lose which machine it was talking to.
          */
+        private const val PLEX_TV_RESOURCES = "https://plex.tv/api/v2/resources?includeHttps=1"
+
         fun plexIdentity(product: String? = null): List<Pair<String, String>> = listOf(
             "X-Plex-Client-Identifier" to "com.sublunar.amp",
             "X-Plex-Product" to (product ?: "Amp"),

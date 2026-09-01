@@ -154,6 +154,10 @@ data class PlexResource(
     val provides: String = "",
     val accessToken: String? = null,
     val owned: Boolean = false,
+    /** "Plex for Apple TV", "Plexamp", … — which app the device is. */
+    val product: String = "",
+    /** Whether plex.tv believes the device is currently reachable. */
+    val presence: Boolean = false,
     val connections: List<PlexConnection> = emptyList(),
 )
 
