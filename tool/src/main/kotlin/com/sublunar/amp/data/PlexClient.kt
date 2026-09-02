@@ -7,8 +7,11 @@ import io.ktor.client.request.header
 import io.ktor.client.request.delete
 import io.ktor.client.request.post
 import io.ktor.client.request.put
+import io.ktor.client.request.setBody
 import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.contentType
 import java.net.URI
 import java.net.URLEncoder
 import kotlinx.coroutines.sync.Mutex
@@ -857,7 +860,22 @@ class PlexClient(
      * The queue belongs to the server; whoever plays it walks it themselves.
      */
     suspend fun createPlayQueue(trackIds: List<String>, startId: String, repeatAll: Boolean): PlexQueue? = runCatching {
-        val mid = machineIdentifier.ifBlank { identity() ?: return@runCatching null }
+        val mid = machineIdentifier.ifBlank { identity().orEmpty() }
+        if (mid.isBlank()) {
+            android.util.Log.i("AmpPlex", "no machine identifier — the server can't be named in a queue uri")
+            return@runCatching null
+        }
+        // A queue is built out of this server's own rating keys. Ids from
+        // another source — a queue left over from Navidrome — name nothing
+        // here, and the server rejects the lot with no hint which it was.
+        val alien = trackIds.filterNot { it.all(Char::isDigit) }
+        if (alien.isNotEmpty()) {
+            android.util.Log.i(
+                "AmpPlex",
+                "queue holds ${alien.size} track(s) that aren't Plex ids, e.g. ${alien.first()}",
+            )
+            return@runCatching null
+        }
         val uri = "server://$mid/com.plexapp.plugins.library/library/metadata/" +
             trackIds.joinToString(",")
         val body = companionXml(
@@ -871,9 +889,15 @@ class PlexClient(
                 "own" to "1",
             ),
             post = true,
+            inBody = true,
         )
-        queueFrom(body)
-    }.getOrNull()
+        queueFrom(body).also {
+            if (it == null) android.util.Log.i("AmpPlex", "the server made a queue with no id in it")
+        }
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "play queue refused: ${it.message}")
+        null
+    }
 
     /** The queue id and its item places, out of any play-queue answer. */
     private fun queueFrom(body: String): PlexQueue? {
@@ -919,6 +943,7 @@ class PlexClient(
                 "/playQueues/${queue.id}",
                 listOf("uri" to uri) + if (next) listOf("next" to "1") else emptyList(),
                 put = true,
+                inBody = true,
             )
         )
     }.getOrNull()
@@ -1015,6 +1040,13 @@ class PlexClient(
      * A Companion request: to the player itself when one is named, to the
      * server otherwise (the client list and play queues are the server's).
      */
+    /**
+     * @param inBody send the parameters as a form body rather than a query.
+     *   A play queue names every track in one `uri`, and percent-encoded that
+     *   is kilobytes for a long queue — enough for a reverse proxy in front of
+     *   the server to answer 400 before Plex ever sees it. A body has no such
+     *   ceiling, and is what a payload that size should have been all along.
+     */
     private suspend fun companionXml(
         path: String,
         params: List<Pair<String, String>> = emptyList(),
@@ -1022,13 +1054,21 @@ class PlexClient(
         post: Boolean = false,
         put: Boolean = false,
         delete: Boolean = false,
+        inBody: Boolean = false,
     ): String {
         val host = target?.directUrl ?: baseUrl
-        val query = params.joinToString("&") { (k, v) -> "$k=${enc(v)}" }
-        val url = host.trimEnd('/') + path + if (query.isEmpty()) "" else "?$query"
+        val encoded = params.joinToString("&") { (k, v) -> "$k=${enc(v)}" }
+        val url = host.trimEnd('/') + path + if (encoded.isEmpty() || inBody) "" else "?$encoded"
+        val form: io.ktor.client.request.HttpRequestBuilder.() -> Unit = {
+            companionHeaders(target)
+            if (inBody) {
+                contentType(ContentType.Application.FormUrlEncoded)
+                setBody(encoded)
+            }
+        }
         val response = when {
-            post -> http.post(url) { companionHeaders(target) }
-            put -> http.put(url) { companionHeaders(target) }
+            post -> http.post(url, form)
+            put -> http.put(url, form)
             delete -> http.delete(url) { companionHeaders(target) }
             else -> http.get(url) { companionHeaders(target) }
         }
