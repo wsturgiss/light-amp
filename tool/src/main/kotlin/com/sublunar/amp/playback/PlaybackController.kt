@@ -1628,12 +1628,14 @@ class PlaybackController(
     }
 
     /**
-     * Hand the player a whole new queue, cued where it already is.
+     * Hand the player a whole new queue, cued at [positionMs] of wherever the
+     * index now points.
      *
-     * The last resort — it restarts the playing track — for a change too broad
-     * to express as edits, or one the server wouldn't take.
+     * How a *new* queue reaches the player, and the last resort for an edit —
+     * it restarts the playing track — too broad to express in place, or one
+     * the server wouldn't take.
      */
-    private suspend fun repushPlexQueue() {
+    private suspend fun repushPlexQueue(positionMs: Long = _positionMs.value) {
         val target = _plexPlayer.value ?: return
         val client = plexClient() ?: return
         val tracks = _queue.value
@@ -1646,7 +1648,7 @@ class PlaybackController(
         ) ?: return
         plexQueue = queue
         plexPushedIds = tracks.map { it.id }
-        client.companionPlay(target, queue, tracks[index].id, _positionMs.value, ++plexCommandId)
+        client.companionPlay(target, queue, tracks[index].id, positionMs, ++plexCommandId)
         android.util.Log.i("AmpPlex", "re-pushed ${tracks.size} tracks at idx=$index")
     }
 
@@ -2368,6 +2370,16 @@ class PlaybackController(
         tracks.getOrNull(startIndex)?.durationMs
             ?.takeIf { it > 0L }
             ?.let { _durationMs.value = it }
+        // A new queue goes wherever the sound is already going. Without this it
+        // started here while the Companion player carried on with the queue it
+        // still owned — two songs at once, and the Output page still naming the
+        // TV. From the top, not the old queue's position.
+        if (_plexPlayer.value != null) {
+            p.pause()
+            _positionMs.value = 0L
+            scope.launch { repushPlexQueue(positionMs = 0L) }
+            return
+        }
         val renderer = _castRenderer.value
         if (renderer != null) {
             p.pause()
