@@ -1146,8 +1146,18 @@ class PlaybackController(
             _index.value = index
             _positionMs.value = 0
             scope.launch {
-                // Within the queue it already holds — see companionSkipTo.
-                plexClient()?.companionSkipTo(target, track.id, ++plexCommandId)
+                if (plexPushedIds.contains(track.id)) {
+                    // Within the queue it already holds — see companionSkipTo.
+                    plexClient()?.companionSkipTo(target, track.id, ++plexCommandId)
+                } else {
+                    // Outside the window the player was given, so there is
+                    // nothing there to skip to — asking left it where it was
+                    // and the poll put the row back. Rebuild the window around
+                    // the track instead; a jump is already a change of what is
+                    // playing, so starting it is what was asked for.
+                    android.util.Log.i("AmpPlex", "jump to idx=$index is outside the window — rebuilding")
+                    repushPlexQueue(positionMs = 0L)
+                }
             }
             return
         }
