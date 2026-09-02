@@ -255,6 +255,19 @@ class PlaybackController(
     /** Companion wants a fresh command id per request, per controller. */
     private var plexCommandId = 0
 
+    /**
+     * How far into [_queue] the player has been given, or -1 when it holds the
+     * lot.
+     *
+     * A play queue names every track in one `uri`, and Plex takes that in the
+     * *request line* — a 500-track queue is 5 KB of URL and the server answers
+     * "Error parsing HTTP request" before reading a byte of it. So a long queue
+     * goes over in a window, topped up in place as the player nears the end,
+     * which costs nothing audible: appending to a play queue is an edit, not a
+     * new queue.
+     */
+    private var plexWindowEnd = -1
+
     // "rendererId|format" -> stream format actually sent + its MIME type.
     private val castFormats = mutableMapOf<String, Pair<StreamFormat, String>>()
 
@@ -1454,27 +1467,18 @@ class PlaybackController(
         plexVolumeAsked = null
         plexVolumeProbes = 0
         val from = _positionMs.value
+        plexWindowEnd = -1
         plexJob?.cancel()
         plexJob = scope.launch {
-            val tracks = _queue.value
-            if (tracks.isEmpty()) { _plexPlayer.value = null; return@launch }
-            val index = _index.value.coerceIn(0, tracks.lastIndex)
-            val start = tracks[index]
-            val queue = client.createPlayQueue(
-                tracks.map { it.id },
-                start.id,
-                repeatAll = _repeatMode.value == RepeatMode.QUEUE,
-            )
-            if (queue == null) {
+            if (_queue.value.isEmpty()) { _plexPlayer.value = null; return@launch }
+            // The same push a new queue takes — windowed, so a long queue
+            // doesn't arrive as five kilobytes of URL.
+            repushPlexQueue(positionMs = from)
+            if (plexQueue == null) {
                 android.util.Log.i("AmpPlex", "play queue refused — staying on this device")
                 _plexPlayer.value = null
                 return@launch
             }
-            plexQueue = queue
-            plexPushedIds = tracks.map { it.id }
-            val ok = client.companionPlay(target, queue, start.id, from, ++plexCommandId)
-            android.util.Log.i("AmpPlex", "playMedia → ${target.name}: ok=$ok idx=$index at=$from queue=${queue.id}")
-            if (!ok) { _plexPlayer.value = null; return@launch }
             if (_repeatMode.value == RepeatMode.TRACK) {
                 client.companionSetParameters(target, listOf("repeat" to "1"), ++plexCommandId)
             }
@@ -1492,6 +1496,7 @@ class PlaybackController(
         plexJob = null
         _plexPlayer.value = null
         plexQueue = null
+        plexWindowEnd = -1
         scope.launch { client?.companionCommand(target, "stop", ++plexCommandId) }
         val p = player ?: return
         _volume.value = p.deviceVolume.value
@@ -1540,6 +1545,7 @@ class PlaybackController(
                         android.util.Log.i("AmpPlex", "player moved to idx=$idx")
                     }
                 }
+                topUpPlexWindow(client, target)
             }
             delay(CAST_POLL_MS)
         }
@@ -1641,15 +1647,54 @@ class PlaybackController(
         val tracks = _queue.value
         if (tracks.isEmpty()) return
         val index = _index.value.coerceIn(0, tracks.lastIndex)
+        // A window around where playback is, not the whole queue — see
+        // [plexWindowEnd]. Enough history behind it that Previous still works
+        // on the player's own remote.
+        val from = (index - PLEX_WINDOW_BEHIND).coerceAtLeast(0)
+        val to = (from + PLEX_WINDOW).coerceAtMost(tracks.size)
+        val window = tracks.subList(from, to)
         val queue = client.createPlayQueue(
-            tracks.map { it.id },
+            window.map { it.id },
             tracks[index].id,
             repeatAll = _repeatMode.value == RepeatMode.QUEUE,
         ) ?: return
         plexQueue = queue
-        plexPushedIds = tracks.map { it.id }
+        plexPushedIds = window.map { it.id }
+        plexWindowEnd = if (to >= tracks.size) -1 else to - 1
         client.companionPlay(target, queue, tracks[index].id, positionMs, ++plexCommandId)
-        android.util.Log.i("AmpPlex", "re-pushed ${tracks.size} tracks at idx=$index")
+        android.util.Log.i(
+            "AmpPlex",
+            "pushed ${window.size} of ${tracks.size} at idx=$index from ${positionMs}ms" +
+                if (plexWindowEnd >= 0) ", window ends at $plexWindowEnd" else "",
+        )
+    }
+
+    /**
+     * Hand the player the next stretch of a long queue as it nears the end of
+     * what it has.
+     *
+     * An append is an edit of the queue it already holds, so nothing restarts
+     * — the difference between this and pushing a fresh window, which would
+     * blip every hundred tracks.
+     */
+    private suspend fun topUpPlexWindow(client: PlexClient, target: PlexPlayer) {
+        val end = plexWindowEnd
+        if (end < 0) return
+        val tracks = _queue.value
+        if (end >= tracks.lastIndex) {
+            plexWindowEnd = -1
+            return
+        }
+        if (_index.value < end - PLEX_WINDOW_REFILL) return
+        val queue = plexQueue ?: return
+        val to = (end + 1 + PLEX_WINDOW_CHUNK).coerceAtMost(tracks.size)
+        val more = tracks.subList(end + 1, to)
+        val updated = client.addToPlayQueue(queue, more.map { it.id }, next = false) ?: return
+        plexQueue = updated
+        plexPushedIds = plexPushedIds + more.map { it.id }
+        plexWindowEnd = if (to >= tracks.size) -1 else to - 1
+        client.companionRefreshQueue(target, updated, ++plexCommandId)
+        android.util.Log.i("AmpPlex", "topped up ${more.size} more; window now ends at $plexWindowEnd")
     }
 
     private fun plexVolumeNotOurs(why: String) {
@@ -2728,6 +2773,21 @@ class PlaybackController(
 
         /** Consecutive silent/stopped polls before a Companion player counts as gone. */
         private const val PLEX_GONE_POLLS = 5
+
+        /**
+         * How much of a long queue a player is given at once, and how much of
+         * it sits behind the playing track. Small enough that the queue's uri
+         * stays a URL rather than a payload — Plex reads it from the request
+         * line — and long enough that a top-up is rare.
+         */
+        private const val PLEX_WINDOW = 150
+        private const val PLEX_WINDOW_BEHIND = 20
+
+        /** Tracks left ahead of the player before the window is topped up. */
+        private const val PLEX_WINDOW_REFILL = 30
+
+        /** How many more go over in a top-up. */
+        private const val PLEX_WINDOW_CHUNK = 80
 
         /** How near the asked-for level counts as the player having taken it. */
         private const val PLEX_VOLUME_SLACK = 5

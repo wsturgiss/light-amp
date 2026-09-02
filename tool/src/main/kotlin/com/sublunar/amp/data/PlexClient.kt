@@ -865,6 +865,7 @@ class PlexClient(
             android.util.Log.i("AmpPlex", "no machine identifier — the server can't be named in a queue uri")
             return@runCatching null
         }
+        android.util.Log.i("AmpPlex", "building a queue of ${trackIds.size} on $mid, starting at $startId")
         // A queue is built out of this server's own rating keys. Ids from
         // another source — a queue left over from Navidrome — name nothing
         // here, and the server rejects the lot with no hint which it was.
@@ -889,7 +890,6 @@ class PlexClient(
                 "own" to "1",
             ),
             post = true,
-            inBody = true,
         )
         queueFrom(body).also {
             if (it == null) android.util.Log.i("AmpPlex", "the server made a queue with no id in it")
@@ -943,7 +943,6 @@ class PlexClient(
                 "/playQueues/${queue.id}",
                 listOf("uri" to uri) + if (next) listOf("next" to "1") else emptyList(),
                 put = true,
-                inBody = true,
             )
         )
     }.getOrNull()
@@ -1073,7 +1072,10 @@ class PlexClient(
             else -> http.get(url) { companionHeaders(target) }
         }
         if (!response.status.isSuccess()) {
-            throw PlexException("Plex says ${response.status.value} for $path at $host")
+            // The server explains itself in the body, and throwing that away is
+            // how a 400 stayed a mystery through three guesses.
+            val why = runCatching { response.bodyAsText() }.getOrDefault("").take(300).replace('\n', ' ')
+            throw PlexException("Plex says ${response.status.value} for $path at $host — $why")
         }
         return response.bodyAsText()
     }
