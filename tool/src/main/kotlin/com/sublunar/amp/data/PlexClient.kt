@@ -53,6 +53,9 @@ class PlexClient(
 
     private val http = HttpClient(OkHttp) { expectSuccess = false }
 
+    /** Serialises requests aimed at a player; see [companionXml]. */
+    private val playerLock = Mutex()
+
     private val json = Json {
         ignoreUnknownKeys = true
         coerceInputValues = true
@@ -991,6 +994,30 @@ class PlexClient(
         false
     }
 
+    /**
+     * Jump to a track *within the queue the player already holds*.
+     *
+     * Not [companionPlay]: that hands the player a queue to go and fetch, and
+     * a player pulling a hundred-item container back over the WAN takes long
+     * enough that the command times out — which is what tapping a queue row
+     * used to do. `skipTo` moves inside what it has.
+     */
+    suspend fun companionSkipTo(target: PlexPlayer, trackId: String, commandId: Int): Boolean = runCatching {
+        companionXml(
+            "/player/playback/skipTo",
+            listOf(
+                "key" to "/library/metadata/$trackId",
+                "type" to "music",
+                "commandID" to commandId.toString(),
+            ),
+            target = target,
+        )
+        true
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "skipTo refused: ${it.message}")
+        false
+    }
+
     /** A plain transport command: `play`, `pause`, `stop`, `skipNext`, `skipPrevious`. */
     suspend fun companionCommand(target: PlexPlayer, command: String, commandId: Int): Boolean = runCatching {
         companionXml(
@@ -1065,11 +1092,25 @@ class PlexClient(
                 setBody(encoded)
             }
         }
-        val response = when {
-            post -> http.post(url, form)
-            put -> http.put(url, form)
-            delete -> http.delete(url) { companionHeaders(target) }
-            else -> http.get(url) { companionHeaders(target) }
+        // A player answers one caller at a time. The poll runs every second, so
+        // without this a command lands on top of it, the socket wedges, and
+        // enough of those in a row take the player down altogether.
+        val response = if (target != null) {
+            playerLock.withLock {
+                when {
+                    post -> http.post(url, form)
+                    put -> http.put(url, form)
+                    delete -> http.delete(url) { companionHeaders(target) }
+                    else -> http.get(url) { companionHeaders(target) }
+                }
+            }
+        } else {
+            when {
+                post -> http.post(url, form)
+                put -> http.put(url, form)
+                delete -> http.delete(url) { companionHeaders(target) }
+                else -> http.get(url) { companionHeaders(target) }
+            }
         }
         if (!response.status.isSuccess()) {
             // The server explains itself in the body, and throwing that away is

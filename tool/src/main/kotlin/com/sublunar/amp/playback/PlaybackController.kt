@@ -1146,10 +1146,8 @@ class PlaybackController(
             _index.value = index
             _positionMs.value = 0
             scope.launch {
-                val queue = plexQueue ?: return@launch
-                // The queue is already on the server; playMedia with another of
-                // its keys is Companion's way of saying "this one now".
-                plexClient()?.companionPlay(target, queue, track.id, 0L, ++plexCommandId)
+                // Within the queue it already holds — see companionSkipTo.
+                plexClient()?.companionSkipTo(target, track.id, ++plexCommandId)
             }
             return
         }
