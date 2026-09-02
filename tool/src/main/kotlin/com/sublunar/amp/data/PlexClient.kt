@@ -872,9 +872,69 @@ class PlexClient(
             ),
             post = true,
         )
-        val container = plexXmlElements(body, "MediaContainer").firstOrNull() ?: return@runCatching null
-        container["playQueueID"]?.let { PlexQueue(it) }
+        queueFrom(body)
     }.getOrNull()
+
+    /** The queue id and its item places, out of any play-queue answer. */
+    private fun queueFrom(body: String): PlexQueue? {
+        val container = plexXmlElements(body, "MediaContainer").firstOrNull() ?: return null
+        val id = container["playQueueID"] ?: return null
+        val items = plexXmlElements(body, "Track").mapNotNull { t ->
+            val rating = t["ratingKey"] ?: return@mapNotNull null
+            val place = t["playQueueItemID"] ?: return@mapNotNull null
+            rating to place
+        }.toMap()
+        return PlexQueue(id, items)
+    }
+
+    /**
+     * Move a track's place so it follows [afterTrackId] — or to the front when
+     * that is null. The server answers with the queue as it now stands.
+     */
+    suspend fun movePlayQueueItem(queue: PlexQueue, trackId: String, afterTrackId: String?): PlexQueue? = runCatching {
+        val place = queue.items[trackId] ?: return@runCatching null
+        val after = afterTrackId?.let { queue.items[it] }
+        queueFrom(
+            companionXml(
+                "/playQueues/${queue.id}/items/$place/move",
+                if (after != null) listOf("after" to after) else emptyList(),
+                put = true,
+            )
+        )
+    }.getOrNull()
+
+    /** Drop a track's place from the queue. */
+    suspend fun removePlayQueueItem(queue: PlexQueue, trackId: String): PlexQueue? = runCatching {
+        val place = queue.items[trackId] ?: return@runCatching null
+        queueFrom(companionXml("/playQueues/${queue.id}/items/$place", delete = true))
+    }.getOrNull()
+
+    /** Append [trackIds], or put them next when [next]. */
+    suspend fun addToPlayQueue(queue: PlexQueue, trackIds: List<String>, next: Boolean): PlexQueue? = runCatching {
+        if (trackIds.isEmpty()) return@runCatching null
+        val mid = machineIdentifier.ifBlank { identity() ?: return@runCatching null }
+        val uri = "server://$mid/com.plexapp.plugins.library/library/metadata/" + trackIds.joinToString(",")
+        queueFrom(
+            companionXml(
+                "/playQueues/${queue.id}",
+                listOf("uri" to uri) + if (next) listOf("next" to "1") else emptyList(),
+                put = true,
+            )
+        )
+    }.getOrNull()
+
+    /** Tell [target] its play queue changed underneath it. */
+    suspend fun companionRefreshQueue(target: PlexPlayer, queue: PlexQueue, commandId: Int): Boolean = runCatching {
+        companionXml(
+            "/player/playback/refreshPlayQueue",
+            listOf("playQueueID" to queue.id, "type" to "music", "commandID" to commandId.toString()),
+            target = target,
+        )
+        true
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "refreshPlayQueue refused: ${it.message}")
+        false
+    }
 
     /** Start [queue] on [target] at [startId]/[offsetMs]. True when the player took it. */
     suspend fun companionPlay(
@@ -960,11 +1020,18 @@ class PlexClient(
         params: List<Pair<String, String>> = emptyList(),
         target: PlexPlayer? = null,
         post: Boolean = false,
+        put: Boolean = false,
+        delete: Boolean = false,
     ): String {
         val host = target?.directUrl ?: baseUrl
         val query = params.joinToString("&") { (k, v) -> "$k=${enc(v)}" }
         val url = host.trimEnd('/') + path + if (query.isEmpty()) "" else "?$query"
-        val response = if (post) http.post(url) { companionHeaders(target) } else http.get(url) { companionHeaders(target) }
+        val response = when {
+            post -> http.post(url) { companionHeaders(target) }
+            put -> http.put(url) { companionHeaders(target) }
+            delete -> http.delete(url) { companionHeaders(target) }
+            else -> http.get(url) { companionHeaders(target) }
+        }
         if (!response.status.isSuccess()) {
             throw PlexException("Plex says ${response.status.value} for $path at $host")
         }
@@ -1105,8 +1172,14 @@ data class PlexPlayer(
     val directUrl: String,
 )
 
-/** A server-side play queue; the id is all a player needs. */
-data class PlexQueue(val id: String)
+/**
+ * A server-side play queue.
+ *
+ * [items] maps a track id to its *place* in this queue (`playQueueItemID`),
+ * which is what the edit endpoints address — the same track appearing twice
+ * has two of them, so the queue is edited by place, not by song.
+ */
+data class PlexQueue(val id: String, val items: Map<String, String> = emptyMap())
 
 /** What a player reports about its music playback. */
 data class PlexPlayerTimeline(

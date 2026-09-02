@@ -46,8 +46,6 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
-import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import java.util.UUID
@@ -494,30 +492,6 @@ class PlaybackController(
                 }
                 announceNowPlaying()
             }
-        }
-        // A Companion player owns a *snapshot* of the queue (the server-side
-        // play queue we created), so edits made here have to be pushed as a
-        // fresh one. Only edits: the index changing is the player advancing,
-        // which is its business, not a reason to interrupt it.
-        @OptIn(kotlinx.coroutines.FlowPreview::class)
-        scope.launch {
-            _queue.map { q -> q.map { it.id } }
-                .distinctUntilChanged()
-                .debounce(CAST_REQUEUE_DEBOUNCE_MS)
-                .collect { ids ->
-                    val target = _plexPlayer.value ?: return@collect
-                    if (ids.isEmpty() || ids == plexPushedIds) return@collect
-                    val client = plexClient() ?: return@collect
-                    val idx = _index.value.coerceIn(0, ids.lastIndex)
-                    val queue = client.createPlayQueue(
-                        ids, ids[idx],
-                        repeatAll = _repeatMode.value == RepeatMode.QUEUE,
-                    ) ?: return@collect
-                    plexQueue = queue
-                    plexPushedIds = ids
-                    client.companionPlay(target, queue, ids[idx], _positionMs.value, ++plexCommandId)
-                    android.util.Log.i("AmpPlex", "queue changed — repushed ${ids.size} tracks")
-                }
         }
         // Anything that changes what plays next — an edit, a jump, a repeat mode —
         // has to be pushed to the renderer, which is holding a URI we chose
@@ -1193,6 +1167,7 @@ class PlaybackController(
         }
         _queue.value = _queue.value + tracks
         p.addItems(tracks.map { it.toAudioItem() })
+        plexQueueEdit { client, queue -> client.addToPlayQueue(queue, tracks.map { it.id }, next = false) }
     }
 
     /**
@@ -1216,6 +1191,7 @@ class PlaybackController(
                 val at = (cur + 1).coerceIn(0, _queue.value.size)
                 _queue.value = _queue.value.toMutableList().apply { add(at, track) }
                 p.addItemAt(at, track.toAudioItem())
+                plexQueueEdit { client, queue -> client.addToPlayQueue(queue, listOf(track.id), next = true) }
                 continue
             }
             if (from == cur) continue
@@ -1242,21 +1218,34 @@ class PlaybackController(
             playQueue(tracks, 0, name)
             return
         }
+        val droppedIds = q.drop(cur + 1).map { it.id }
         for (i in q.lastIndex downTo cur + 1) p.removeItem(i)
         _queue.value = q.take(cur + 1) + tracks
         if (tracks.isNotEmpty()) p.addItems(tracks.map { it.toAudioItem() })
         _queueName.value = name
+        // Everything after the playing track goes, then the new set arrives —
+        // expressed as edits so the song already playing carries on untouched,
+        // which is the whole point of replacing only what is upcoming.
+        plexQueueEdit { client, queue ->
+            val emptied = droppedIds.fold<String, PlexQueue?>(queue) { acc, id ->
+                acc?.let { client.removePlayQueueItem(it, id) }
+            }
+            if (tracks.isEmpty()) emptied
+            else emptied?.let { client.addToPlayQueue(it, tracks.map { t -> t.id }, next = false) }
+        }
     }
 
     fun removeFromQueue(index: Int) {
         val p = player ?: return
         val q = _queue.value
         if (index !in q.indices) return
+        val playingId = q.getOrNull(_index.value)?.id
+        val goneId = q[index].id
         p.removeItem(index)
         val newQueue = q.toMutableList().apply { removeAt(index) }
         _queue.value = newQueue
-        _index.value = if (newQueue.isEmpty()) -1
-        else p.currentMediaItemIndex.value.coerceIn(0, newQueue.lastIndex)
+        _index.value = indexAfterEdit(newQueue, playingId)
+        plexQueueEdit { client, queue -> client.removePlayQueueItem(queue, goneId) }
     }
 
     /**
@@ -1273,14 +1262,18 @@ class PlaybackController(
         val q = _queue.value
         val targets = q.indices.filter { q[it].id in ids }
         if (targets.isEmpty()) return
+        val playingId = q.getOrNull(_index.value)?.id
         targets.sortedDescending().forEach { p.removeItem(it) }
         val gone = targets.toSet()
+        val goneIds = targets.map { q[it].id }
         val newQueue = q.filterIndexed { i, _ -> i !in gone }
         _queue.value = newQueue
-        _index.value = if (newQueue.isEmpty()) {
-            -1
-        } else {
-            p.currentMediaItemIndex.value.coerceIn(0, newQueue.lastIndex)
+        _index.value = indexAfterEdit(newQueue, playingId)
+        plexQueueEdit { client, queue ->
+            // One at a time, each answer carrying the places for the next.
+            goneIds.fold<String, PlexQueue?>(queue) { acc, id ->
+                acc?.let { client.removePlayQueueItem(it, id) }
+            }
         }
     }
 
@@ -1288,9 +1281,16 @@ class PlaybackController(
         val p = player ?: return
         val q = _queue.value
         if (from !in q.indices || to !in q.indices || from == to) return
+        val playingId = q.getOrNull(_index.value)?.id
+        val movedId = q[from].id
         p.moveItem(from, to)
-        _queue.value = q.toMutableList().apply { add(to, removeAt(from)) }
-        _index.value = p.currentMediaItemIndex.value.coerceIn(0, _queue.value.lastIndex)
+        val newQueue = q.toMutableList().apply { add(to, removeAt(from)) }
+        _queue.value = newQueue
+        _index.value = indexAfterEdit(newQueue, playingId)
+        // Plex places an item *after* another one, so the move is expressed as
+        // whoever it now follows — nothing when it lands at the front.
+        val afterId = newQueue.getOrNull(to - 1)?.id
+        plexQueueEdit { client, queue -> client.movePlayQueueItem(queue, movedId, afterId) }
     }
 
     // --- Modes ---------------------------------------------------------------
@@ -1418,6 +1418,10 @@ class PlaybackController(
         // positions one at a time is a timeline update each, which locks the main
         // thread and (with artwork) exhausts the heap.
         player?.replaceRange(head.size, q.size, newTail.map { it.toAudioItem() })
+        // Reordering everything upcoming is the one edit not worth expressing
+        // as a move apiece — a shuffled hundred is a hundred round trips. The
+        // player gets a fresh queue, and pays a blip for it.
+        if (_plexPlayer.value != null) scope.launch { repushPlexQueue() }
     }
 
     // --- Plex Companion casting ----------------------------------------------
@@ -1577,6 +1581,73 @@ class PlaybackController(
                 }
             }
         }
+    }
+
+    /**
+     * Where the playing track sits after a queue edit.
+     *
+     * The local player's index answers when it is the one playing. While the
+     * sound is elsewhere that player sits paused on whatever it held when
+     * casting began, so its index is stale — reading it is what made an edit
+     * start the wrong song. A track's identity survives a reorder; an index
+     * does not.
+     */
+    private fun indexAfterEdit(newQueue: List<Track>, playingId: String?): Int {
+        if (newQueue.isEmpty()) return -1
+        if (isCasting) {
+            val byId = newQueue.indexOfFirst { it.id == playingId }
+            return if (byId >= 0) byId else _index.value.coerceIn(0, newQueue.lastIndex)
+        }
+        return (player?.currentMediaItemIndex?.value ?: _index.value).coerceIn(0, newQueue.lastIndex)
+    }
+
+    /**
+     * Apply a queue edit to the *live* play queue on the server, then tell the
+     * player to re-read it.
+     *
+     * The queue is the player's own copy, so an edit here has to reach it
+     * somehow. Pushing a whole new queue does — and restarts the current track
+     * to do it, which is the blip an edit used to make. Editing the queue in
+     * place changes what comes next and leaves what is playing alone.
+     */
+    private fun plexQueueEdit(edit: suspend (PlexClient, PlexQueue) -> PlexQueue?) {
+        val target = _plexPlayer.value ?: return
+        val client = plexClient() ?: return
+        val queue = plexQueue ?: return
+        scope.launch {
+            val updated = edit(client, queue)
+            if (updated == null) {
+                android.util.Log.i("AmpPlex", "queue edit refused — falling back to a re-push")
+                repushPlexQueue()
+                return@launch
+            }
+            plexQueue = updated
+            plexPushedIds = _queue.value.map { it.id }
+            client.companionRefreshQueue(target, updated, ++plexCommandId)
+        }
+    }
+
+    /**
+     * Hand the player a whole new queue, cued where it already is.
+     *
+     * The last resort — it restarts the playing track — for a change too broad
+     * to express as edits, or one the server wouldn't take.
+     */
+    private suspend fun repushPlexQueue() {
+        val target = _plexPlayer.value ?: return
+        val client = plexClient() ?: return
+        val tracks = _queue.value
+        if (tracks.isEmpty()) return
+        val index = _index.value.coerceIn(0, tracks.lastIndex)
+        val queue = client.createPlayQueue(
+            tracks.map { it.id },
+            tracks[index].id,
+            repeatAll = _repeatMode.value == RepeatMode.QUEUE,
+        ) ?: return
+        plexQueue = queue
+        plexPushedIds = tracks.map { it.id }
+        client.companionPlay(target, queue, tracks[index].id, _positionMs.value, ++plexCommandId)
+        android.util.Log.i("AmpPlex", "re-pushed ${tracks.size} tracks at idx=$index")
     }
 
     private fun plexVolumeNotOurs(why: String) {
