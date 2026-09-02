@@ -1448,8 +1448,32 @@ class PlaybackController(
 
     private fun plexClient(): PlexClient? = serverClient.value as? PlexClient
 
-    /** Companion players on the active Plex server. Empty on any other source. */
-    suspend fun findPlexPlayers(): List<PlexPlayer> = plexClient()?.companionPlayers().orEmpty()
+    /**
+     * Companion players for the active Plex source. Empty on any other source.
+     *
+     * The lists are asked first, then the players this phone has cast to
+     * before are *asked directly* — plex.tv drops a device that sleeps, and an
+     * Apple TV woken and playing can be missing from every list while sitting
+     * there ready. One that answers is offered; one that doesn't, isn't.
+     */
+    suspend fun findPlexPlayers(): List<PlexPlayer> {
+        val client = plexClient() ?: return emptyList()
+        val listed = client.companionPlayers()
+        val seen = listed.map { it.id }.toSet()
+        val remembered = settings.knownPlexPlayers.first()
+            .mapNotNull { line ->
+                val parts = line.split('|')
+                if (parts.size < 4 || parts[0] in seen) null
+                else PlexPlayer(id = parts[0], name = parts[1], product = parts[2], directUrl = parts[3])
+            }
+        if (remembered.isEmpty()) return listed
+        val answering = remembered.filter { client.playerAnswers(it) }
+        android.util.Log.i(
+            "AmpPlex",
+            "remembered ${remembered.map { it.name }}, still answering ${answering.map { it.name }}",
+        )
+        return listed + answering
+    }
 
     /**
      * Move playback to [target]: push the queue to the server, point the player
@@ -1480,6 +1504,11 @@ class PlaybackController(
             if (_repeatMode.value == RepeatMode.TRACK) {
                 client.companionSetParameters(target, listOf("repeat" to "1"), ++plexCommandId)
             }
+            // It worked, so it is worth asking about next time no list mentions
+            // it — see findPlexPlayers.
+            settings.rememberPlexPlayer(
+                listOf(target.id, target.name, target.product, target.directUrl).joinToString("|"),
+            )
             pollPlexPlayer(client, target)
         }
     }

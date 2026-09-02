@@ -826,9 +826,25 @@ class PlexClient(
             }
         }.getOrDefault(emptyList())
         val fromAccount = runCatching {
-            val body = http.get("$PLEX_TV_RESOURCES") { plexHeaders() }.bodyAsText()
-            json.decodeFromString<List<PlexResource>>(body)
-                .filter { it.provides.contains("player") && it.presence && it.clientIdentifier.isNotBlank() }
+            val response = http.get("$PLEX_TV_RESOURCES") { plexHeaders() }
+            if (!response.status.isSuccess()) {
+                throw PlexException("plex.tv says ${response.status.value} for the device list")
+            }
+            val body = response.bodyAsText()
+            val players = json.decodeFromString<List<PlexResource>>(body)
+                .filter { it.provides.contains("player") && it.clientIdentifier.isNotBlank() }
+            android.util.Log.i(
+                "AmpPlex",
+                "plex.tv lists ${players.size} player(s): " + players.joinToString {
+                    "${it.name}(present=${it.presence}, connections=${it.connections.size})"
+                },
+            )
+            players
+                // Deliberately not filtered on plex.tv's `presence`: it goes
+                // stale — an Apple TV that slept and woke reads as absent while
+                // sitting there playing. What decides is an address to reach it
+                // at; a player that answers nothing simply fails to take the
+                // cast, which is visible, unlike a device missing from a list.
                 .mapNotNull { resource ->
                     // The local address first: this Wi-Fi, plain http, no
                     // round trip through Plex's relay. A player with no
@@ -847,7 +863,10 @@ class PlexClient(
                         directUrl = direct,
                     )
                 }
-        }.getOrDefault(emptyList())
+        }.getOrElse {
+            android.util.Log.i("AmpPlex", "plex.tv device list failed: ${it.message}")
+            emptyList()
+        }
         val seen = fromServer.map { it.id }.toSet()
         val merged = fromServer + fromAccount.filter { it.id !in seen }
         android.util.Log.i(
@@ -949,6 +968,17 @@ class PlexClient(
             )
         )
     }.getOrNull()
+
+    /**
+     * Whether a player is at [directUrl] and willing to talk.
+     *
+     * For the ones no list mentions any more — see
+     * [AppSettings.knownPlexPlayers]. A short question with a short answer:
+     * either it replies to a timeline poll or it isn't there.
+     */
+    suspend fun playerAnswers(player: PlexPlayer): Boolean = runCatching {
+        companionTimeline(player, 0) != null
+    }.getOrDefault(false)
 
     /** Tell [target] its play queue changed underneath it. */
     suspend fun companionRefreshQueue(target: PlexPlayer, queue: PlexQueue, commandId: Int): Boolean = runCatching {

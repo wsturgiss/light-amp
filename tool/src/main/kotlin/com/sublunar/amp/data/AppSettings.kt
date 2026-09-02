@@ -432,6 +432,15 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     val invertColors: Flow<Boolean> = boolFlow(INVERT_COLORS, false)
     val karaokeLyrics: Flow<Boolean> = boolFlow(KARAOKE_LYRICS, true)
 
+    /**
+     * Raise a USB DAC's own hardware volume to its maximum on plug-in. Off by
+     * default: it claims the adapter's USB interface for a moment (a system
+     * permission dialog per plug-in, a brief audio gap if something is
+     * playing). See the SDK's UsbDacVolume for the mechanism and the measured
+     * 23.5 dB it recovers on the Apple adapter.
+     */
+    val usbDacUnlock: Flow<Boolean> = boolFlow(USB_DAC_UNLOCK, false)
+
 
     /** Whether to use the simplified or standard layout mode. */
     val layoutMode: Flow<LayoutMode> = enumFlow(LAYOUT_MODE, LayoutMode.STANDARD)
@@ -569,12 +578,35 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     suspend fun setArtistAlbumGrid(value: Boolean) = putBool(ARTIST_ALBUM_GRID, value)
     suspend fun setHideArtistImages(value: Boolean) = putBool(HIDE_ARTIST_IMAGES, value)
     suspend fun setHideDownloadIcons(value: Boolean) = putBool(HIDE_DOWNLOAD_ICONS, value)
+    suspend fun setUsbDacUnlock(value: Boolean) = putBool(USB_DAC_UNLOCK, value)
 
     suspend fun setArtwork(value: ArtworkMode) = putString(ARTWORK, value.name)
     suspend fun setDownloadsPaused(value: Boolean) = putBool(DOWNLOADS_PAUSED, value)
     suspend fun setLayoutMode(value: LayoutMode) = putString(LAYOUT_MODE, value.name)
 
     suspend fun setLastSection(value: LastSection) = putString(LAST_SECTION, value.name)
+
+    /**
+     * Plex players this phone has cast to, as `id|name|product|url`, one a line.
+     *
+     * plex.tv forgets a device that goes to sleep — an Apple TV woken up and
+     * playing can be missing from the account's list entirely — and a player
+     * nothing lists can't be chosen. Somewhere that answered once is worth
+     * asking again, which is all this is: a place to ask.
+     */
+    val knownPlexPlayers: Flow<List<String>> =
+        dataStore.data.map { p ->
+            p[KNOWN_PLEX_PLAYERS]?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
+        }.distinctUntilChanged()
+
+    suspend fun rememberPlexPlayer(line: String) {
+        dataStore.edit { p ->
+            val id = line.substringBefore('|')
+            val kept = (p[KNOWN_PLEX_PLAYERS]?.split('\n') ?: emptyList())
+                .filter { it.isNotBlank() && it.substringBefore('|') != id }
+            p[KNOWN_PLEX_PLAYERS] = (listOf(line) + kept).take(MAX_KNOWN_PLAYERS).joinToString("\n")
+        }
+    }
 
     // --- helpers -------------------------------------------------------------
 
@@ -627,6 +659,7 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
         private val INVERT_COLORS = booleanPreferencesKey("pref.invertColors")
         private val KARAOKE_LYRICS = booleanPreferencesKey("pref.karaokeLyrics")
+        private val USB_DAC_UNLOCK = booleanPreferencesKey("pref.usbDacUnlock")
         private val ALBUM_GRID = booleanPreferencesKey("pref.albumGrid")
         private val ARTIST_ALBUM_GRID = booleanPreferencesKey("pref.artistAlbumGrid")
         private val HIDE_ARTIST_IMAGES = booleanPreferencesKey("pref.hideArtistImages")
@@ -644,6 +677,10 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         private val CACHED_PLAYLISTS = stringPreferencesKey("state.playlists")
         private val PENDING_ACTIONS = stringPreferencesKey("state.pendingActions")
         private val SAVED_QUEUE = stringPreferencesKey("state.queueIds")
+        private val KNOWN_PLEX_PLAYERS = stringPreferencesKey("state.plexPlayers")
+
+        /** Enough for the players in one home; the oldest drops off. */
+        private const val MAX_KNOWN_PLAYERS = 8
         private val SAVED_INDEX = intPreferencesKey("state.queueIndex")
         private val SAVED_POSITION = longPreferencesKey("state.positionMs")
 
