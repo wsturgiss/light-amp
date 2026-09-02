@@ -433,23 +433,29 @@ class PlaylistDetailScreen(
     }
 
     /**
-     * Remove several at once by rewriting the playlist with the survivors: the
-     * per-index endpoint would shift every index behind each removal, and one
-     * request can't half-apply. Pessimistic, like [removeSong].
+     * Remove several at once via a sequence of per-index deletes, highest index
+     * first so an earlier removal never shifts the index of one still to come.
+     * Pessimistic, like [removeSong]: each row disappears only once its own
+     * delete has landed, and a failure partway through leaves the rest in place
+     * rather than the whole batch reverting.
      */
     private fun removeSongs(keys: Set<String>) {
         val current = entries.value ?: return
         if (keys.isEmpty()) return
-        val remaining = current.filterNot { it.key in keys }
-        if (remaining.size == current.size) return
+        val targets = current.withIndex().filter { it.value.key in keys }.sortedByDescending { it.index }
+        if (targets.isEmpty()) return
         pendingKeys.value = pendingKeys.value + keys
         App.scope.launch {
             try {
-                if (App.library.reorderPlaylist(playlistId, remaining.map { it.track.id })) {
-                    entries.value = remaining
+                val removed = mutableSetOf<String>()
+                for ((index, entry) in targets) {
+                    if (App.library.removeFromPlaylistAt(playlistId, index)) removed += entry.key
+                }
+                if (removed.isNotEmpty()) {
+                    entries.value = entries.value?.filterNot { it.key in removed }
                     App.scope.launch { App.library.refreshPlaylists() }
-                    pendingKeys.value = pendingKeys.value - keys
-                    flashSuccess(keys)
+                    pendingKeys.value = pendingKeys.value - removed
+                    flashSuccess(removed)
                 }
             } finally {
                 pendingKeys.value = pendingKeys.value - keys
