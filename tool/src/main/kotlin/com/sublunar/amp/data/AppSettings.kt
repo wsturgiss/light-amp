@@ -586,28 +586,6 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
     suspend fun setLastSection(value: LastSection) = putString(LAST_SECTION, value.name)
 
-    /**
-     * Plex players this phone has cast to, as `id|name|product|url`, one a line.
-     *
-     * plex.tv forgets a device that goes to sleep — an Apple TV woken up and
-     * playing can be missing from the account's list entirely — and a player
-     * nothing lists can't be chosen. Somewhere that answered once is worth
-     * asking again, which is all this is: a place to ask.
-     */
-    val knownPlexPlayers: Flow<List<String>> =
-        dataStore.data.map { p ->
-            p[KNOWN_PLEX_PLAYERS]?.split('\n')?.filter { it.isNotBlank() } ?: emptyList()
-        }.distinctUntilChanged()
-
-    suspend fun rememberPlexPlayer(line: String) {
-        dataStore.edit { p ->
-            val id = line.substringBefore('|')
-            val kept = (p[KNOWN_PLEX_PLAYERS]?.split('\n') ?: emptyList())
-                .filter { it.isNotBlank() && it.substringBefore('|') != id }
-            p[KNOWN_PLEX_PLAYERS] = (listOf(line) + kept).take(MAX_KNOWN_PLAYERS).joinToString("\n")
-        }
-    }
-
     // --- helpers -------------------------------------------------------------
 
     private fun stringFlow(key: Preferences.Key<String>): Flow<String> =
@@ -677,10 +655,6 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         private val CACHED_PLAYLISTS = stringPreferencesKey("state.playlists")
         private val PENDING_ACTIONS = stringPreferencesKey("state.pendingActions")
         private val SAVED_QUEUE = stringPreferencesKey("state.queueIds")
-        private val KNOWN_PLEX_PLAYERS = stringPreferencesKey("state.plexPlayers")
-
-        /** Enough for the players in one home; the oldest drops off. */
-        private const val MAX_KNOWN_PLAYERS = 8
         private val SAVED_INDEX = intPreferencesKey("state.queueIndex")
         private val SAVED_POSITION = longPreferencesKey("state.positionMs")
 

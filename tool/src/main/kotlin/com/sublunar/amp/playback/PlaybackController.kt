@@ -17,6 +17,7 @@ import com.sublunar.amp.data.SavedQueue
 import com.sublunar.amp.data.StreamFormat
 import com.sublunar.amp.data.MusicServer
 import com.sublunar.amp.data.PlexClient
+import com.sublunar.amp.data.PlexGdm
 import com.sublunar.amp.data.PlexPlayer
 import com.sublunar.amp.data.PlexQueue
 import com.sublunar.amp.data.TimelineState
@@ -1461,28 +1462,21 @@ class PlaybackController(
     /**
      * Companion players for the active Plex source. Empty on any other source.
      *
-     * The lists are asked first, then the players this phone has cast to
-     * before are *asked directly* — plex.tv drops a device that sleeps, and an
-     * Apple TV woken and playing can be missing from every list while sitting
-     * there ready. One that answers is offered; one that doesn't, isn't.
+     * Three answers to the same question, because no one of them is complete:
+     * the server knows the players it discovered itself, plex.tv knows the
+     * account's devices — and forgets the ones that sleep — and [PlexGdm] asks
+     * the network, which is the only one that can see a player nobody has
+     * heard from lately. A device answering GDM is on this Wi-Fi and listening,
+     * which is the whole question.
      */
     suspend fun findPlexPlayers(): List<PlexPlayer> {
         val client = plexClient() ?: return emptyList()
         val listed = client.companionPlayers()
-        val seen = listed.map { it.id }.toSet()
-        val remembered = settings.knownPlexPlayers.first()
-            .mapNotNull { line ->
-                val parts = line.split('|')
-                if (parts.size < 4 || parts[0] in seen) null
-                else PlexPlayer(id = parts[0], name = parts[1], product = parts[2], directUrl = parts[3])
-            }
-        if (remembered.isEmpty()) return listed
-        val answering = remembered.filter { client.playerAnswers(it) }
-        android.util.Log.i(
-            "AmpPlex",
-            "remembered ${remembered.map { it.name }}, still answering ${answering.map { it.name }}",
-        )
-        return listed + answering
+        val onNetwork = PlexGdm.findPlayers()
+        val seen = listed.map { it.id }.toMutableSet()
+        val extra = onNetwork.filter { seen.add(it.id) }
+        android.util.Log.i("AmpPlex", "gdm found ${onNetwork.map { it.name }}, new here ${extra.map { it.name }}")
+        return listed + extra
     }
 
     /**
@@ -1514,11 +1508,6 @@ class PlaybackController(
             if (_repeatMode.value == RepeatMode.TRACK) {
                 client.companionSetParameters(target, listOf("repeat" to "1"), ++plexCommandId)
             }
-            // It worked, so it is worth asking about next time no list mentions
-            // it — see findPlexPlayers.
-            settings.rememberPlexPlayer(
-                listOf(target.id, target.name, target.product, target.directUrl).joinToString("|"),
-            )
             pollPlexPlayer(client, target)
         }
     }

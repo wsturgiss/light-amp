@@ -969,17 +969,6 @@ class PlexClient(
         )
     }.getOrNull()
 
-    /**
-     * Whether a player is at [directUrl] and willing to talk.
-     *
-     * For the ones no list mentions any more — see
-     * [AppSettings.knownPlexPlayers]. A short question with a short answer:
-     * either it replies to a timeline poll or it isn't there.
-     */
-    suspend fun playerAnswers(player: PlexPlayer): Boolean = runCatching {
-        companionTimeline(player, 0) != null
-    }.getOrDefault(false)
-
     /** Tell [target] its play queue changed underneath it. */
     suspend fun companionRefreshQueue(target: PlexPlayer, queue: PlexQueue, commandId: Int): Boolean = runCatching {
         companionXml(
