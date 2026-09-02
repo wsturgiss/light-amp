@@ -1182,6 +1182,24 @@ class PlaybackController(
                 if (plexPushedIds.contains(track.id)) {
                     // Within the queue it already holds — see companionSkipTo.
                     plexClient()?.companionSkipTo(target, track.id, ++plexCommandId)
+                    // A player keeps its own window of a play queue, and it
+                    // need not hold as much of it as we handed over. A skipTo
+                    // to something outside *its* window is accepted and then
+                    // quietly not acted on — the player stays put and the
+                    // mirror puts the row back, which is exactly what a
+                    // distant song refusing to play looks like. So check where
+                    // it actually went, and rebuild around the track when it
+                    // didn't go there. Same shape as verifyNativeSeek: trust
+                    // the command, then confirm it landed.
+                    delay(PLEX_SKIP_VERIFY_MS)
+                    if (_plexPlayer.value?.id == target.id &&
+                        _queue.value.getOrNull(_index.value)?.id != track.id
+                    ) {
+                        android.util.Log.i("AmpPlex", "skipTo idx=$index didn't land — rebuilding around it")
+                        _index.value = index
+                        _positionMs.value = 0
+                        repushPlexQueue(positionMs = 0L)
+                    }
                 } else {
                     // Outside the window the player was given, so there is
                     // nothing there to skip to — asking left it where it was
@@ -2938,6 +2956,9 @@ class PlaybackController(
          */
         private const val PLEX_WINDOW = 150
         private const val PLEX_WINDOW_BEHIND = 20
+
+        /** Long enough for a player to act on a skip before it is judged. */
+        private const val PLEX_SKIP_VERIFY_MS = 2_500L
 
         /** How often a subscribed cast checks that pushes are still coming. */
         private const val PLEX_SUBSCRIBED_CHECK_MS = 3_000L
