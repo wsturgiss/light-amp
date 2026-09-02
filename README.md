@@ -28,7 +28,12 @@ built on Light's SDK, so it looks like it belongs there.
   streaming — change it in Settings if you'd rather it streamed.
 - Synced lyrics.
 - Play counts, ratings, likes and playlist edits sync back to the server.
-- Cast to a DLNA speaker or receiver.
+- Cast to a DLNA speaker or receiver, or — on a Plex source — to another Plex
+  player such as the Apple TV app. A Plex player fetches the music from your
+  server itself, so the quality is settled between those two: Amp's streaming
+  setting doesn't apply, and lossless depends on the player's own quality
+  setting. The player also needs "Remote Control: Advertise as Player" turned
+  on.
 - Artwork can be turned off completely.
 
 ## Installing

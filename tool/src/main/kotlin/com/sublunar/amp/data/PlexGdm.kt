@@ -91,6 +91,8 @@ object PlexGdm {
                 ?: "Plex player",
             product = headers["product"].orEmpty(),
             directUrl = "http://$fromAddress:$port",
+            // The reply carried its own identity.
+            identityKnown = true,
         )
     }
 }

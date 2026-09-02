@@ -822,6 +822,8 @@ class PlexClient(
                     name = attrs["name"] ?: attrs["product"] ?: "Plex player",
                     product = attrs["product"].orEmpty(),
                     directUrl = "http://$host:$port",
+                    // The server found it; it is who the server says.
+                    identityKnown = true,
                 )
             }
         }.getOrDefault(emptyList())
@@ -921,7 +923,7 @@ class PlexClient(
         null
     }
 
-    /** The queue id and its item places, out of any play-queue answer. */
+    /** The queue id, version and item places, out of any play-queue answer. */
     private fun queueFrom(body: String): PlexQueue? {
         val container = plexXmlElements(body, "MediaContainer").firstOrNull() ?: return null
         val id = container["playQueueID"] ?: return null
@@ -930,7 +932,27 @@ class PlexClient(
             val place = t["playQueueItemID"] ?: return@mapNotNull null
             rating to place
         }.toMap()
-        return PlexQueue(id, items)
+        return PlexQueue(id, items, container["playQueueVersion"])
+    }
+
+    /**
+     * Re-read a queue, asking for [window] items around the current one.
+     *
+     * An edit's own answer carries only as much of the queue as Plex feels
+     * like returning, and an item whose place we don't know can't be moved or
+     * removed — which is a queue edit silently becoming a re-push. Asking
+     * plainly for the window we pushed keeps the places we need.
+     */
+    suspend fun readPlayQueue(queue: PlexQueue, window: Int): PlexQueue? = runCatching {
+        queueFrom(
+            companionXml(
+                "/playQueues/${queue.id}",
+                listOf("window" to window.toString(), "own" to "1"),
+            )
+        )
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "re-reading the queue failed: ${it.message}")
+        null
     }
 
     /**
@@ -973,7 +995,12 @@ class PlexClient(
     suspend fun companionRefreshQueue(target: PlexPlayer, queue: PlexQueue, commandId: Int): Boolean = runCatching {
         companionXml(
             "/player/playback/refreshPlayQueue",
-            listOf("playQueueID" to queue.id, "type" to "music", "commandID" to commandId.toString()),
+            listOfNotNull(
+                "playQueueID" to queue.id,
+                queue.version?.let { "playQueueVersion" to it },
+                "type" to "music",
+                "commandID" to commandId.toString(),
+            ),
             target = target,
         )
         true
@@ -982,6 +1009,65 @@ class PlexClient(
         false
     }
 
+    /**
+     * Whether the player at this address really is the one we mean.
+     *
+     * An address is not an identity. A device listed by plex.tv is named by
+     * whatever connection the account has on file, and a DHCP lease that moved
+     * would have us commanding whatever answers there now. GDM replies carry
+     * their own identity, so this is for the ones that don't.
+     */
+    suspend fun playerIsWhoWeThink(target: PlexPlayer): Boolean = runCatching {
+        val reported = plexXmlElements(companionXml("/resources", target = target), "Player")
+            .firstNotNullOfOrNull { it["machineIdentifier"] }
+        if (reported == null) {
+            // Nothing said either way. Not proof of an impostor, and refusing
+            // on silence would be worse than the risk.
+            android.util.Log.i("AmpPlex", "${target.name} didn't say who it is; going ahead")
+            return@runCatching true
+        }
+        (reported == target.id).also {
+            if (!it) android.util.Log.i("AmpPlex", "${target.directUrl} is $reported, not ${target.id}")
+        }
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "couldn't check who ${target.name} is: ${it.message}")
+        false
+    }
+
+    /**
+     * Ask [target] to push its timeline to us at [port] instead of being asked
+     * every second.
+     *
+     * The protocol's own answer to polling, and the reason a controller has an
+     * HTTP server in it — see [PlexCompanionListener]. Polling remains the
+     * fallback for a player that won't subscribe.
+     */
+    suspend fun companionSubscribe(target: PlexPlayer, port: Int, commandId: Int): Boolean = runCatching {
+        companionXml(
+            "/player/timeline/subscribe",
+            listOf(
+                "port" to port.toString(),
+                "protocol" to "http",
+                "commandID" to commandId.toString(),
+            ),
+            target = target,
+        )
+        true
+    }.getOrElse {
+        android.util.Log.i("AmpPlex", "subscribe refused: ${it.message}")
+        false
+    }
+
+    /** Stop the pushes started by [companionSubscribe]. */
+    suspend fun companionUnsubscribe(target: PlexPlayer, commandId: Int): Boolean = runCatching {
+        companionXml(
+            "/player/timeline/unsubscribe",
+            listOf("commandID" to commandId.toString()),
+            target = target,
+        )
+        true
+    }.getOrDefault(false)
+
     /** Start [queue] on [target] at [startId]/[offsetMs]. True when the player took it. */
     suspend fun companionPlay(
         target: PlexPlayer,
@@ -989,6 +1075,7 @@ class PlexClient(
         startId: String,
         offsetMs: Long,
         commandId: Int,
+        window: Int = DEFAULT_QUEUE_WINDOW,
     ): Boolean = runCatching {
         val u = URI(baseUrl)
         val mid = machineIdentifier.ifBlank { identity().orEmpty() }
@@ -1001,7 +1088,10 @@ class PlexClient(
                 "protocol" to (u.scheme ?: "http"),
                 "address" to u.host.orEmpty(),
                 "port" to (if (u.port > 0) u.port else if (u.scheme == "https") 443 else 32400).toString(),
-                "containerKey" to "/playQueues/${queue.id}?window=100&own=1",
+                // The window the player is told to fetch is the window it was
+                // given; a smaller number here means it re-reads less of the
+                // queue than we pushed.
+                "containerKey" to "/playQueues/${queue.id}?window=$window&own=1",
                 "token" to token,
                 "commandID" to commandId.toString(),
             ),
@@ -1237,6 +1327,9 @@ class PlexClient(
         /** Where a Plex player listens for Companion commands. */
         private const val COMPANION_PORT = 32500
 
+        /** Queue items a player is asked to fetch when nobody says otherwise. */
+        const val DEFAULT_QUEUE_WINDOW = 150
+
         fun plexIdentity(product: String? = null): List<Pair<String, String>> = listOf(
             "X-Plex-Client-Identifier" to "com.sublunar.amp",
             "X-Plex-Product" to (product ?: "Amp"),
@@ -1272,6 +1365,15 @@ data class PlexPlayer(
     val product: String,
     /** `http://host:32500` — the player's own door. */
     val directUrl: String,
+    /**
+     * Whether the device at [directUrl] said who it was.
+     *
+     * True for GDM (the reply carries its identity) and for the server's own
+     * client list (the server discovered it). False for a device named only by
+     * plex.tv, whose address is whatever the account has on file — that one is
+     * asked before it is handed any audio.
+     */
+    val identityKnown: Boolean = false,
 )
 
 /**
@@ -1281,7 +1383,16 @@ data class PlexPlayer(
  * which is what the edit endpoints address — the same track appearing twice
  * has two of them, so the queue is edited by place, not by song.
  */
-data class PlexQueue(val id: String, val items: Map<String, String> = emptyMap())
+data class PlexQueue(
+    val id: String,
+    val items: Map<String, String> = emptyMap(),
+    /**
+     * The queue's version, which Plex bumps on every edit. Sent with a refresh
+     * so a player re-reads the version we mean rather than whichever it
+     * happens to fetch — two edits in quick succession are otherwise a race.
+     */
+    val version: String? = null,
+)
 
 /** What a player reports about its music playback. */
 data class PlexPlayerTimeline(
@@ -1293,6 +1404,10 @@ data class PlexPlayerTimeline(
     val ratingKey: String?,
     /** 0–100 where the player reports one; null where volume isn't its to control. */
     val volume: Int?,
+    /** The player's repeat: 0 off, 1 the track, 2 the queue. Null when unsaid. */
+    val repeat: Int?,
+    /** Whether the player is shuffling. Null when unsaid. */
+    val shuffle: Boolean?,
     /**
      * What the player says it accepts — `playPause,stop,volume,seekTo,…` —
      * or null where it doesn't say. The player's own word on its capabilities,
@@ -1344,5 +1459,7 @@ internal fun plexTimelineFrom(body: String): PlexPlayerTimeline? {
         ratingKey = music["ratingKey"]?.takeIf { it.isNotBlank() },
         volume = music["volume"]?.toIntOrNull(),
         controllable = music["controllable"]?.takeIf { it.isNotBlank() },
+        repeat = music["repeat"]?.toIntOrNull(),
+        shuffle = music["shuffle"]?.let { it == "1" || it.equals("true", ignoreCase = true) },
     )
 }

@@ -88,6 +88,25 @@ class PlexCompanionParsingTest {
     }
 
     @Test
+    fun `repeat and shuffle come back so a change on the TV is seen`() {
+        val body = """
+            <MediaContainer><Timeline type="music" state="playing" time="1000"
+              repeat="2" shuffle="1" volume="50" controllable="playPause,volume"/></MediaContainer>
+        """.trimIndent()
+        val t = plexTimelineFrom(body)!!
+        assertEquals(2, t.repeat)
+        assertEquals(true, t.shuffle)
+    }
+
+    @Test
+    fun `a timeline that says nothing about modes claims nothing`() {
+        val body = """<MediaContainer><Timeline type="music" state="playing" time="1"/></MediaContainer>"""
+        val t = plexTimelineFrom(body)!!
+        assertNull(t.repeat)
+        assertNull(t.shuffle)
+    }
+
+    @Test
     fun `no music timeline means null, not a guess`() {
         assertNull(plexTimelineFrom("""<MediaContainer><Timeline type="video" state="playing"/></MediaContainer>"""))
         assertNull(plexTimelineFrom(""))

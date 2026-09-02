@@ -5,13 +5,21 @@
 ### Added
 
 - Cast to other Plex players. When the active source is Plex, the Output page
-  lists every player signed into the server — the Apple TV app among them —
-  next to the DLNA speakers, over Plex's own Companion protocol. The player
-  takes the whole queue and plays it itself (gapless, skippable from its own
-  remote, scrobbling its own plays); Amp steers, mirrors, and takes playback
-  back at the position the player reached. Closing Amp deliberately leaves
-  the player playing. The volume fader dims when the player's volume isn't
-  its to control — an Apple TV's usually belongs to the television.
+  lists the Plex players on your network — the Apple TV app among them — next
+  to the DLNA speakers, over Plex's own Companion protocol. Players are found
+  the way Plex's own controllers find them: the server's list, your account's
+  devices, and a GDM broadcast to the network, so a player that slept and woke
+  is still there. The player takes the queue and plays it itself (gapless,
+  skippable from its own remote, scrobbling its own plays); Amp steers and
+  mirrors — a skip or a repeat change on the TV shows up on the phone — and
+  takes playback back at the position the player reached. Closing Amp
+  deliberately leaves the player playing.
+
+  Quality is settled between the player and your server: Amp's streaming
+  setting doesn't apply while casting this way, and lossless depends on the
+  player's own quality setting. The volume fader disables itself, at unity,
+  when the player's volume isn't its to control — an Apple TV passing digital
+  audio to a receiver is the common case.
 
 ### Changed
 
