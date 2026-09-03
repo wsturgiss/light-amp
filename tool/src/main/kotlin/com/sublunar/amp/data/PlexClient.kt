@@ -756,6 +756,14 @@ class PlexClient(
      * same playlist (see [removeFromPlaylistAt]'s sibling comment on delete),
      * and a failed move here should stop rather than let every move after it
      * land against a playlist that isn't in the order it assumes.
+     *
+     * An entry already directly after its wanted predecessor is skipped
+     * rather than moved: a request that would put it exactly where it already
+     * is is still a full round trip Plex has to serve, and a drag that only
+     * touches a few rows of a long playlist would otherwise fire a move for
+     * every untouched row too. [localOrder] tracks the running order as moves
+     * land, since a skip decision after the first move has to go by where an
+     * entry ended up, not [entries]' original position.
      */
     override suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) {
         val entries = playlistEntries(id)
@@ -783,16 +791,23 @@ class PlexClient(
             }
             queue.removeAt(0)
         }
+        val localOrder = entries.map { it.second }.toMutableList()
         for (i in 1 until orderedEntryIds.size) {
+            val entryId = orderedEntryIds[i]
+            val afterId = orderedEntryIds[i - 1]
+            val afterPos = localOrder.indexOf(afterId)
+            if (localOrder.getOrNull(afterPos + 1) == entryId) continue
             val moved = sendChecked(
-                "/playlists/$id/items/${orderedEntryIds[i]}/move",
-                listOf("after" to orderedEntryIds[i - 1].toString()),
+                "/playlists/$id/items/$entryId/move",
+                listOf("after" to afterId.toString()),
                 method = "PUT",
             )
             if (!moved) {
                 android.util.Log.w(TAG, "reorderPlaylist($id): move failed partway; playlist left partially reordered, nothing lost")
                 return
             }
+            localOrder.remove(entryId)
+            localOrder.add(localOrder.indexOf(afterId) + 1, entryId)
         }
     }
 

@@ -505,13 +505,38 @@ class LibraryRepository(
     private val _pendingPlaylistWrites = MutableStateFlow<Set<String>>(emptySet())
     val pendingPlaylistWrites: StateFlow<Set<String>> = _pendingPlaylistWrites
 
+    // Backs [_pendingPlaylistWrites] with a per-id count, not just membership: two
+    // overlapping writes to the same playlist (e.g. a reorder still saving when a
+    // delete starts) would otherwise have the first one's `finally` clear the id
+    // out from under the second, hiding the indicator while a write is still in
+    // flight. Only accessed inside [playlistWrite], always on the calling
+    // coroutine's thread at entry/exit, but guarded anyway since two callers can
+    // interleave those entries/exits.
+    private val pendingPlaylistWriteCounts = mutableMapOf<String, Int>()
+    private val pendingPlaylistWriteCountsLock = Any()
+
     /** Runs [block] for playlist [id], serialized via [playlistMutex] and tracked in [pendingPlaylistWrites]. */
     private suspend fun <T> playlistWrite(id: String, block: suspend () -> T): T {
-        _pendingPlaylistWrites.update { it + id }
+        val firstWriter = synchronized(pendingPlaylistWriteCountsLock) {
+            val count = (pendingPlaylistWriteCounts[id] ?: 0) + 1
+            pendingPlaylistWriteCounts[id] = count
+            count == 1
+        }
+        if (firstWriter) _pendingPlaylistWrites.update { it + id }
         try {
             return playlistMutex.withLock { block() }
         } finally {
-            _pendingPlaylistWrites.update { it - id }
+            val lastWriter = synchronized(pendingPlaylistWriteCountsLock) {
+                val count = (pendingPlaylistWriteCounts[id] ?: 1) - 1
+                if (count <= 0) {
+                    pendingPlaylistWriteCounts.remove(id)
+                    true
+                } else {
+                    pendingPlaylistWriteCounts[id] = count
+                    false
+                }
+            }
+            if (lastWriter) _pendingPlaylistWrites.update { it - id }
         }
     }
 
