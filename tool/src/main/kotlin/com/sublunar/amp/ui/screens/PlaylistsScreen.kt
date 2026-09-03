@@ -72,6 +72,10 @@ import kotlinx.coroutines.launch
 
 private const val SUCCESS_FLASH_MS = 1000L
 
+// Longer than the success flash: an error is worth reading, not just registering as a
+// flicker before it's gone.
+private const val ERROR_FLASH_MS = 2500L
+
 class PlaylistDetailScreen(
     sealed: SealedLightActivity,
     private val playlistId: String,
@@ -91,6 +95,11 @@ class PlaylistDetailScreen(
     // spinning long enough that its success is worth confirming, not just inferring
     // from the spinner going away.
     private val successKeys = mutableStateOf<Set<String>>(emptySet())
+
+    // Rows whose write just failed, briefly -- a failed edit otherwise looks identical
+    // to one still in flight (the row just reverts to its pre-edit state), so this is
+    // what tells both the row and the StatusOverlay that it didn't go through.
+    private val errorKeys = mutableStateOf<Set<String>>(emptySet())
 
     // Set once a drag-reorder lands, to the topmost row that moved, so TrackList can
     // scroll it into view -- the drop happened somewhere the finger was, not necessarily
@@ -169,16 +178,17 @@ class PlaylistDetailScreen(
                 StatusOverlay(
                     pending = playlistId in App.library.pendingPlaylistWrites.collectAsState().value,
                     done = successKeys.value.isNotEmpty(),
+                    failed = errorKeys.value.isNotEmpty(),
                 )
             }
         }
     }
 
     @Composable
-    private fun BoxScope.StatusOverlay(pending: Boolean, done: Boolean) {
-        // Pending wins the moment both are briefly true, e.g. a second edit landing
-        // while the last one's success flash is still winding down.
-        if (!pending && !done) return
+    private fun BoxScope.StatusOverlay(pending: Boolean, done: Boolean, failed: Boolean) {
+        // Pending wins the moment more than one is briefly true, e.g. a second edit
+        // landing while the last one's success flash is still winding down.
+        if (!pending && !done && !failed) return
         Row(
             modifier = Modifier
                 .align(Alignment.Center)
@@ -190,19 +200,29 @@ class PlaylistDetailScreen(
                 .padding(horizontal = px(44), vertical = px(28)),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            if (pending) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(px(46)),
-                    strokeWidth = px(5),
-                    color = LightThemeTokens.colors.content,
-                )
-                Spacer(Modifier.width(px(20)))
-                // Same size as a track title, the largest text already on this screen.
-                AppText("Saving…", pxSp(ROW_TITLE_PX))
-            } else {
-                AppIcon(AppIcons.Selected, size = px(54))
-                Spacer(Modifier.width(px(20)))
-                AppText("Done", pxSp(ROW_TITLE_PX))
+            when {
+                pending -> {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(px(46)),
+                        strokeWidth = px(5),
+                        color = LightThemeTokens.colors.content,
+                    )
+                    Spacer(Modifier.width(px(20)))
+                    // Same size as a track title, the largest text already on this screen.
+                    AppText("Saving…", pxSp(ROW_TITLE_PX))
+                }
+                failed -> {
+                    // Theme content color, not a hardcoded red: see the history on this
+                    // overlay -- it follows the phone's own theme, not an assumed palette.
+                    AppIcon(AppIcons.ErrorOutline, size = px(54))
+                    Spacer(Modifier.width(px(20)))
+                    AppText("Couldn't save", pxSp(ROW_TITLE_PX))
+                }
+                else -> {
+                    AppIcon(AppIcons.Selected, size = px(54))
+                    Spacer(Modifier.width(px(20)))
+                    AppText("Done", pxSp(ROW_TITLE_PX))
+                }
             }
         }
     }
@@ -335,6 +355,11 @@ class PlaylistDetailScreen(
                                         color = LightThemeTokens.colors.content,
                                     )
                                 }
+                            } else if (entry.key in errorKeys.value) {
+                                // Row-level echo of the centered "Couldn't save": the row
+                                // itself reverted, so without this it's indistinguishable
+                                // from one that was never touched.
+                                AppIcon(AppIcons.ErrorOutline, size = px(51))
                             } else if (editing) {
                                 // Drag handle for reordering within the playlist.
                                 AppIcon(
@@ -408,11 +433,19 @@ class PlaylistDetailScreen(
         successKeys.value = successKeys.value - keys
     }
 
+    /** Shows [StatusOverlay]'s "Couldn't save" state for [ERROR_FLASH_MS], then clears it. */
+    private suspend fun flashError(keys: Set<String>) {
+        errorKeys.value = errorKeys.value + keys
+        delay(ERROR_FLASH_MS)
+        errorKeys.value = errorKeys.value - keys
+    }
+
     /**
      * Pessimistic on purpose: the on-screen order doesn't change until the server
-     * confirms it, since [StatusOverlay] is the only sign an edit is in flight, and
-     * there's currently no error surfaced on failure. `refreshPlaylists` runs after the
-     * fact, unwaited -- it updates each playlist's track-count badge elsewhere, not
+     * confirms it, since [StatusOverlay] is the only sign an edit is in flight. A
+     * failed write leaves the row as it was and flashes [errorKeys] instead, rather
+     * than looking identical to one that's still slow. `refreshPlaylists` runs after
+     * the fact, unwaited -- it updates each playlist's track-count badge elsewhere, not
      * this write's own success, so it shouldn't hold up the flash confirming it.
      */
     private fun removeSong(index: Int) {
@@ -425,6 +458,9 @@ class PlaylistDetailScreen(
                     App.scope.launch { App.library.refreshPlaylists() }
                     pendingKeys.value = pendingKeys.value - entry.key
                     flashSuccess(setOf(entry.key))
+                } else {
+                    pendingKeys.value = pendingKeys.value - entry.key
+                    flashError(setOf(entry.key))
                 }
             } finally {
                 pendingKeys.value = pendingKeys.value - entry.key
@@ -433,24 +469,39 @@ class PlaylistDetailScreen(
     }
 
     /**
-     * Remove several at once by rewriting the playlist with the survivors: the
-     * per-index endpoint would shift every index behind each removal, and one
-     * request can't half-apply. Pessimistic, like [removeSong].
+     * Remove several at once via the same per-index endpoint [removeSong] uses,
+     * one at a time from the tail backward: deleting the highest index first
+     * means every index still to come is untouched by the deletes before it,
+     * so no bulk endpoint is needed. Sequential and awaited, not concurrent --
+     * see [removeSongs]'s sibling in git history (bb9845d) for why a racing
+     * version of this against a server playlist doesn't hold up. Pessimistic
+     * and per-track, like [removeSong]: a track that fails to delete flashes
+     * its own error instead of the whole selection reverting.
      */
     private fun removeSongs(keys: Set<String>) {
         val current = entries.value ?: return
         if (keys.isEmpty()) return
-        val remaining = current.filterNot { it.key in keys }
-        if (remaining.size == current.size) return
+        val targets = current.withIndex().filter { it.value.key in keys }.sortedByDescending { it.index }
+        if (targets.isEmpty()) return
         pendingKeys.value = pendingKeys.value + keys
         App.scope.launch {
+            val removedKeys = mutableSetOf<String>()
+            val failedKeys = mutableSetOf<String>()
             try {
-                if (App.library.reorderPlaylist(playlistId, remaining.map { it.track.id })) {
-                    entries.value = remaining
-                    App.scope.launch { App.library.refreshPlaylists() }
-                    pendingKeys.value = pendingKeys.value - keys
-                    flashSuccess(keys)
+                for ((index, entry) in targets) {
+                    if (App.library.removeFromPlaylistAt(playlistId, index)) {
+                        removedKeys += entry.key
+                    } else {
+                        failedKeys += entry.key
+                    }
                 }
+                if (removedKeys.isNotEmpty()) {
+                    entries.value = entries.value?.filterNot { it.key in removedKeys }
+                    App.scope.launch { App.library.refreshPlaylists() }
+                }
+                pendingKeys.value = pendingKeys.value - keys
+                if (removedKeys.isNotEmpty()) flashSuccess(removedKeys)
+                if (failedKeys.isNotEmpty()) flashError(failedKeys)
             } finally {
                 pendingKeys.value = pendingKeys.value - keys
             }
@@ -486,6 +537,9 @@ class PlaylistDetailScreen(
                     App.scope.launch { App.library.refreshPlaylists() }
                     pendingKeys.value = pendingKeys.value - keys
                     flashSuccess(keys)
+                } else {
+                    pendingKeys.value = pendingKeys.value - keys
+                    flashError(keys)
                 }
             } finally {
                 pendingKeys.value = pendingKeys.value - keys
