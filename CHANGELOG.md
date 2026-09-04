@@ -4,12 +4,12 @@
 
 ### Added
 
-- Replay Gain, under Settings → Playback, on by default. Navidrome, Jellyfin
-  and the phone's own files; Plex has nothing to read yet. Only ever turns a
-  track down.
 - Cast to Plex players from the Output page when the active source is Plex.
   The player plays the queue itself; Amp steers and mirrors, and takes
   playback back where the player left it.
+- Replay Gain, under Settings → Playback, on by default. Navidrome, Jellyfin
+  and the phone's own files; Plex has nothing to read yet. Only ever turns a
+  track down.
 
 ### Changed
 
