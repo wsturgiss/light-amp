@@ -163,6 +163,15 @@ interface LibraryDao {
     @Query("SELECT * FROM albums")
     suspend fun allAlbumsSnapshot(): List<AlbumEntity>
 
+    /**
+     * The whole table, once — for the download top-up, which reads every
+     * source's tables rather than only the one being observed. Same read
+     * transaction as [observeTracks], for the same CursorWindow reason.
+     */
+    @Transaction
+    @Query("SELECT * FROM tracks")
+    suspend fun allTracksSnapshot(): List<TrackEntity>
+
     @Query("SELECT * FROM tracks WHERE albumId = :albumId")
     suspend fun tracksForAlbum(albumId: String): List<TrackEntity>
 
@@ -258,6 +267,10 @@ interface LibraryDao {
 
     @Query("SELECT name FROM liked_artists")
     fun observeLikedArtists(): Flow<List<String>>
+
+    /** The same, once — see [allTracksSnapshot]. */
+    @Query("SELECT name FROM liked_artists")
+    suspend fun likedArtistNames(): List<String>
 
     @Upsert
     suspend fun likeArtists(artists: List<LikedArtistEntity>)

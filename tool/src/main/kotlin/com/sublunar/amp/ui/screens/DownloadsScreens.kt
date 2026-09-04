@@ -80,18 +80,20 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
     @Composable
     override fun Content() {
         // Every source's downloads, not the active one's — see
-        // App.downloadsBySource. Read again each time the active source's set
-        // of completed downloads changes, which is what makes a song landing
-        // appear here while you are watching it happen; it used to be read once
-        // when the page opened and then sat still, so a download finishing was
-        // invisible until you left and came back.
+        // App.downloadsBySource. Read again each time a download lands, which
+        // is what makes a song appear here while you are watching it happen;
+        // it used to be read once when the page opened and then sat still, so
+        // a download finishing was invisible until you left and came back.
         //
-        // Keyed on that set rather than observing every source: this read
-        // reaches into databases the app is not otherwise holding open, and
-        // this way it opens them for a moment instead of holding all of them
-        // open for as long as the page is up. Nothing is lost by it — only the
-        // active source downloads, so the others cannot change while you look.
+        // Keyed on the downloader's count of completed transfers rather than
+        // observing every source: this read reaches into databases the app is
+        // not otherwise holding open, and this way it opens them for a moment
+        // instead of holding all of them open for as long as the page is up.
+        // The count covers every source, since downloads run for all of them
+        // whichever is being browsed; the active source's set is watched too,
+        // for a download removed from a library screen.
         val downloadedIds by App.library.downloadedTrackIds.collectAsState()
+        val progress by App.downloader.progress.collectAsState()
         var bySource by remember { mutableStateOf<List<Pair<String, List<Track>>>>(emptyList()) }
         // The song lists' own order, chosen from the header — this page used to
         // be stuck with whatever order the store handed back.
@@ -107,7 +109,7 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
         // Read alongside the lists, so the figure and the songs it counts can
         // never disagree.
         var bytes by remember { mutableStateOf(0L) }
-        LaunchedEffect(downloadedIds) {
+        LaunchedEffect(downloadedIds, progress.completed) {
             // Both of these touch the disk, and neither belongs on the frame
             // this page is drawn on. A change arriving mid-read cancels it and
             // starts again, so the newest answer is the one that lands.
@@ -120,8 +122,11 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
         val limit by App.settings.downloadLimit.collectAsState(
             initial = AppSettings.DEFAULT_DOWNLOAD_LIMIT,
         )
-        val progress by App.downloader.progress.collectAsState()
         val paused by App.settings.downloadsPaused.collectAsState(initial = false)
+        // Named only with more than one server to download from — with one,
+        // the name would repeat the obvious.
+        val sources by App.settings.sources.collectAsState(initial = emptyList())
+        val severalServers = sources.count { it.supportsDownloads } > 1
 
         // No tab bar and no menu: this is reached from Settings, and it is a
         // page about storage rather than a way of browsing the library. Back
@@ -166,7 +171,14 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
                             // the whole library and the size limit stops it long
                             // before the end, so "N of 10105" told the user nothing.
                             title = progress.currentTitle ?: "Downloading",
-                            subtitle = if (paused) "Paused" else "Downloading",
+                            // Whose music is moving, when that isn't obvious:
+                            // every server's downloads share this one row.
+                            subtitle = when {
+                                paused -> "Paused"
+                                severalServers && progress.currentSource != null ->
+                                    "Downloading · ${progress.currentSource}"
+                                else -> "Downloading"
+                            },
                             onClick = { App.downloader.setUserPaused(!paused) },
                             trailing = {
                                 AppIcon(

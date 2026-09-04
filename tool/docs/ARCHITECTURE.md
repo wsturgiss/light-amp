@@ -24,9 +24,19 @@ repository, the downloader, the player and the artwork loader, and it holds the
 active source. It is also where a **source switch** is handled, and that is worth
 reading before anything else: switching swaps the database under every flow at
 once, and a surprising amount of state has to be dropped with it — the playback
-queue, the download queue, playlists, popular songs, the search index, which
-tabs were showing their liked list. Anything keyed by name rather than by source
-will answer for the wrong server if you forget it.
+queue, playlists, popular songs, the search index, which tabs were showing their
+liked list. Anything keyed by name rather than by source will answer for the
+wrong server if you forget it.
+
+The one thing a switch does *not* drop is the download queue. Selecting a source
+is a browsing choice, not a download scope: every queued track names its own
+source, and `Downloader` resolves the client, the tables, the folder and the
+format per track from that — so a Plex library set to download everything keeps
+arriving while you browse Navidrome or the phone's own files. `App` keeps one
+client per source for that reason, closed only when the source is removed, and
+the top-up reads every source's tables rather than the repository's lists.
+`DownloadQueue` is the pure part — two lanes, per-source keys, where a failure
+goes back to — and has tests.
 
 **`LibraryRepository`** is the library. Room-backed lists come out as eagerly
 shared `StateFlow`s so a screen never renders an empty list on its way to a full

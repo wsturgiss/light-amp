@@ -646,7 +646,7 @@ class PlaybackController(
         scope.launch {
             App.library.downloadFiles.collect { rows ->
                 localFiles = rows.mapNotNull { row ->
-                    downloads.existing(row.fileName)?.let { file ->
+                    downloads.existing(App.source.value.id, row.fileName)?.let { file ->
                         row.trackId to (file to StreamFormat.fromId(row.format))
                     }
                 }.toMap()

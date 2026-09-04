@@ -240,47 +240,14 @@ class LibraryRepository(
     /**
      * The whole cached library, ignoring the offline view filter.
      *
-     * Downloading has to work from this, never from [tracks]: in Wi-Fi Only mode
-     * (or whenever the server is unreachable) [tracks] narrows to what is already
-     * downloaded, so feeding it to the downloader asks it to fetch the things it
-     * has already fetched — the queue comes out empty and downloads stop dead.
+     * The download top-up is triggered off this, never off [tracks]: in Wi-Fi
+     * Only mode (or whenever the server is unreachable) [tracks] narrows to what
+     * is already downloaded, so a trigger keyed on it would fire on the wrong
+     * changes. What the top-up actually *fetches* it reads from each source's
+     * own tables — see App.topUpDownloads — since it runs for every source, not
+     * only the one these lists follow.
      */
     val fullTracks: StateFlow<List<Track>> get() = allTracks
-
-    /** The same libraries' albums — see [downloadableTracks]. */
-    val downloadableAlbums: StateFlow<List<Album>> =
-        combine(albumRows, settings.activeSource) { rows, source ->
-            val hidden = source?.hiddenLibraryIds?.filterNotNull()?.toSet().orEmpty()
-            rows.asSequence()
-                .filter { hidden.isEmpty() || it.libraryId == null || it.libraryId !in hidden }
-                .map { it.toAlbum() }
-                .toList()
-        }.stateIn(scope, SharingStarted.Eagerly, emptyList())
-
-    /**
-     * Everything in the libraries kept on the Sources page — what the downloader
-     * works from.
-     *
-     * Downloads used to have a library setting of their own, which restated a
-     * choice already made a level up and could disagree with it. Hiding a
-     * library there says you are not interested in it; fetching it anyway, in
-     * the background, onto a phone with a size limit, is not a reading of that.
-     *
-     * Not [allTracks]: that narrows to the one library being browsed, and what
-     * to *keep* is a wider question than what to look at right now.
-     */
-    val downloadableTracks: StateFlow<List<Track>> =
-        combine(trackRows, albumRows, settings.activeSource) { rows, albums, source ->
-            val hidden = source?.hiddenLibraryIds?.filterNotNull()?.toSet().orEmpty()
-            if (hidden.isEmpty()) {
-                rows
-            } else {
-                val allowed = albums.asSequence()
-                    .filter { it.libraryId == null || it.libraryId !in hidden }
-                    .mapTo(HashSet()) { it.id }
-                rows.filter { it.albumId == null || it.albumId in allowed }
-            }
-        }.stateIn(scope, SharingStarted.Eagerly, emptyList())
     val fullAlbums: StateFlow<List<Album>> get() = allAlbums
 
     /**
@@ -451,8 +418,8 @@ class LibraryRepository(
      *
      * Deliberately not derived from [artists], which narrows with the offline
      * view and the chosen library: whether you have starred someone is not a
-     * fact about what is on screen. The downloader reads this for that reason —
-     * see App.topUpDownloads.
+     * fact about what is on screen. The download top-up reads the same table
+     * directly, for the same reason — see App.topUpDownloads.
      */
     val likedArtistNames: StateFlow<Set<String>> =
         observing(emptyList()) { it.observeLikedArtists() }.map { names -> names.toSet() }

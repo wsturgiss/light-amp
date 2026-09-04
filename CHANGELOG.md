@@ -30,6 +30,20 @@
   queue left alone for 15 minutes now winds down (the spike held on for
   ever), and tapping the media surface opens Amp.
 
+- Downloads run for every source at once. Which source you are browsing no
+  longer decides which downloads move: a Plex library set to download
+  everything keeps arriving while you listen to Navidrome or to the phone's
+  own files, and Navidrome set to Manual fetches only what you picked by
+  hand, whichever is on screen. Each server's Auto-Download setting on the
+  Offline page now means what it says for that server — it used to do
+  nothing until you switched to it. Switching source used to throw the whole
+  queue away, an hour's worth to rebuild; it stays now, because every queued
+  track knows which server it came from and is fetched from that one. What
+  holds downloads back is the data mode, your own pause, and the storage
+  limit; a server that stops answering, or one whose library is syncing,
+  holds back only its own. With more than one server the Downloads page says
+  whose music is moving.
+
 ### Fixed
 
 - Switching source left the app holding one server's identity and another's

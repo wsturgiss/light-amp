@@ -12,27 +12,25 @@ import kotlinx.coroutines.withContext
  * The on-disk half of offline playback: downloaded audio under the tool's private
  * files directory, plus the storage arithmetic the settings UI needs.
  *
+ * A folder per source, because two servers can hand out the same track id for
+ * different music — and because removing a source has to be able to take its
+ * audio with it without touching anyone else's. Every call names the source it
+ * means: the downloader fetches for every source at once, whichever is being
+ * browsed, so there is no "current" folder for it to default to.
+ *
  * Plain [File] work — the plugin sandbox allows `java.io` and `android.os.StatFs`,
  * so none of this needs SDK support.
  */
-class DownloadStore(
-    private val filesDir: File,
-    /**
-     * Which source's downloads to work in.
-     *
-     * A folder per source, because two servers can hand out the same track id for
-     * different music — and because removing a source has to be able to take its
-     * audio with it without touching anyone else's.
-     */
-    private val sourceId: () -> String,
-) {
+class DownloadStore(private val filesDir: File) {
 
-    private val root: File
-        get() = File(File(filesDir, "downloads"), sourceId()).apply { mkdirs() }
+    private val downloadsDir: File get() = File(filesDir, "downloads")
+
+    private fun rootFor(sourceId: String): File =
+        File(downloadsDir, sourceId).apply { mkdirs() }
 
     /** Every source's folder — used by the sweep and by "delete everything". */
     private fun allRoots(): List<File> =
-        File(filesDir, "downloads").listFiles().orEmpty().filter { it.isDirectory }
+        downloadsDir.listFiles().orEmpty().filter { it.isDirectory }
 
     init {
         // Sweep partials left by a download the process didn't live to finish;
@@ -43,37 +41,36 @@ class DownloadStore(
         // Legacy layout: downloads used to sit directly in the folder that now
         // holds one directory per source. Anything left there is moved into the
         // first source's folder by [adoptLegacyFiles].
-        val downloads = File(filesDir, "downloads").apply { mkdirs() }
+        val downloads = downloadsDir.apply { mkdirs() }
         (downloads.listFiles().orEmpty().toList() + allRoots().flatMap { it.listFiles().orEmpty().toList() })
             .filter { it.isFile && it.name.endsWith(PART_SUFFIX) }
             .forEach { it.delete() }
     }
 
     /**
-     * Move pre-sources downloads into this source's folder.
+     * Move pre-sources downloads into [sourceId]'s folder.
      *
      * Called once for the source that inherits the old single-server setup; the
      * files are the durable artefact, and re-fetching gigabytes because the
      * layout changed underneath them is not an acceptable upgrade.
      */
-    fun adoptLegacyFiles() {
-        val downloads = File(filesDir, "downloads")
-        val target = root
-        downloads.listFiles().orEmpty()
+    fun adoptLegacyFiles(sourceId: String) {
+        val target = rootFor(sourceId)
+        downloadsDir.listFiles().orEmpty()
             .filter { it.isFile }
             .forEach { it.renameTo(File(target, it.name)) }
     }
 
     /**
-     * Everything already on disk, as (trackId, format) pairs.
+     * Everything [sourceId] has on disk, as (trackId, format) pairs.
      *
      * The download index lives in Room, and the SDK drops every table whenever the
      * schema version moves — so a bump would otherwise strand gigabytes of audio
      * as unreferenced files and re-fetch the lot. The files are named
      * `<trackId>.<suffix>`, which is enough to rebuild the index from.
      */
-    fun onDisk(): List<Pair<String, StreamFormat>> =
-        root.listFiles().orEmpty().mapNotNull { file ->
+    fun onDisk(sourceId: String): List<Pair<String, StreamFormat>> =
+        rootFor(sourceId).listFiles().orEmpty().mapNotNull { file ->
             if (!file.isFile || file.name.endsWith(PART_SUFFIX)) return@mapNotNull null
             val dot = file.name.lastIndexOf('.')
             if (dot <= 0) return@mapNotNull null
@@ -84,19 +81,21 @@ class DownloadStore(
             id to format
         }
 
-    fun fileFor(trackId: String, format: StreamFormat): File =
-        File(root, "$trackId.${format.suffix}")
+    fun fileFor(sourceId: String, trackId: String, format: StreamFormat): File =
+        File(rootFor(sourceId), "$trackId.${format.suffix}")
 
-    fun existing(fileName: String): File? = File(root, fileName).takeIf { it.isFile }
+    fun existing(sourceId: String, fileName: String): File? =
+        File(rootFor(sourceId), fileName).takeIf { it.isFile }
 
     /**
-     * Download [url] to the file for this track. Writes to a temporary file first
-     * so an interrupted download can never be mistaken for a complete one.
+     * Download [url] to the file for this track of [sourceId]. Writes to a
+     * temporary file first so an interrupted download can never be mistaken for
+     * a complete one.
      */
-    suspend fun download(url: String, trackId: String, format: StreamFormat): File? =
+    suspend fun download(sourceId: String, url: String, trackId: String, format: StreamFormat): File? =
         withContext(Dispatchers.IO) {
-            val target = fileFor(trackId, format)
-            val partial = File(root, "${target.name}$PART_SUFFIX")
+            val target = fileFor(sourceId, trackId, format)
+            val partial = File(target.parentFile, "${target.name}$PART_SUFFIX")
             try {
                 val startedMs = System.currentTimeMillis()
                 val connection = URL(url).openConnection()
@@ -142,17 +141,18 @@ class DownloadStore(
     var lastError: String? = null
         private set
 
-    suspend fun delete(fileName: String) = withContext(Dispatchers.IO) {
-        File(root, fileName).delete()
+    suspend fun delete(sourceId: String, fileName: String) = withContext(Dispatchers.IO) {
+        File(rootFor(sourceId), fileName).delete()
     }
 
     /** Throw away one source's audio entirely — see App.forgetSource. */
     fun deleteSource(id: String) {
-        File(File(filesDir, "downloads"), id).deleteRecursively()
+        File(downloadsDir, id).deleteRecursively()
     }
 
     /** Free space on the volume holding the downloads. */
-    fun freeBytes(): Long = runCatching { StatFs(root.absolutePath).availableBytes }.getOrDefault(0L)
+    fun freeBytes(): Long =
+        runCatching { StatFs(downloadsDir.apply { mkdirs() }.absolutePath).availableBytes }.getOrDefault(0L)
 
     /**
      * Everything the tool has downloaded, across every source, read off the disk.
