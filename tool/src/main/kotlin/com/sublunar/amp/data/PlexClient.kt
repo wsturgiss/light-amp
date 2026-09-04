@@ -170,15 +170,32 @@ class PlexClient(
         pagedSection(section, ALBUM_TYPE).map { it.toAlbum() }
 
     /** Everything of one type in a section, following the pages to the end. */
-    private suspend fun pagedSection(section: String, type: String): List<PlexMetadata> {
+    private suspend fun pagedSection(section: String, type: String): List<PlexMetadata> =
+        paged(
+            "/library/sections/$section/all",
+            listOf("type" to type, "sort" to "titleSort:asc"),
+        )
+
+    /**
+     * A container's every item, a page at a time — see [pagedSection] for why
+     * Plex is never asked for everything in one request.
+     *
+     * Playlists too, and for a second reason: their items come with the full
+     * media description of every track, and one large playlist answered as a
+     * single 27 MB body that the phone could not hold — the fetch failed out
+     * of memory, in the background, on every download top-up. No `sort` is
+     * added here; a playlist's order is its own, and a section names its own.
+     */
+    private suspend fun paged(
+        path: String,
+        params: List<Pair<String, String>> = emptyList(),
+    ): List<PlexMetadata> {
         val items = mutableListOf<PlexMetadata>()
         var start = 0
         while (true) {
             val container = fetch(
-                "/library/sections/$section/all",
-                listOf(
-                    "type" to type,
-                    "sort" to "titleSort:asc",
+                path,
+                params + listOf(
                     "X-Plex-Container-Start" to start.toString(),
                     "X-Plex-Container-Size" to PAGE_SIZE.toString(),
                 ),
@@ -702,7 +719,7 @@ class PlexClient(
     }
 
     override suspend fun getPlaylistTracks(id: String): List<Track> =
-        fetch("/playlists/$id/items").container.metadata.map { it.toTrack() }
+        paged("/playlists/$id/items").map { it.toTrack() }
 
     /**
      * Plex has no call for an empty playlist: creating one means naming its
@@ -785,7 +802,7 @@ class PlexClient(
 
     /** Each entry's `(songId, playlistItemID)`, in playlist order. */
     private suspend fun playlistEntries(id: String): List<Pair<String, Long>> =
-        fetch("/playlists/$id/items").container.metadata.mapNotNull { item ->
+        paged("/playlists/$id/items").mapNotNull { item ->
             item.playlistItemID?.let { item.ratingKey to it }
         }
 

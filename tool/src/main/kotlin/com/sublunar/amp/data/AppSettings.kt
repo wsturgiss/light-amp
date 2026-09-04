@@ -591,6 +591,24 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     suspend fun setLikedSongsOnly(value: Boolean) = putBool(LIKED_SONGS_ONLY, value)
     suspend fun setLikedArtistsOnly(value: Boolean) = putBool(LIKED_ARTISTS_ONLY, value)
 
+    /**
+     * Drop every narrowing of the library lists — the liked switches and the
+     * genre and composer filters — in one write. See App.swapSource: these
+     * are facts about one library, and a genre chosen on one server applied
+     * to the next empties its lists with nothing on screen to say why.
+     */
+    suspend fun clearLibraryFilters() {
+        dataStore.edit { p ->
+            p.remove(LIKED_ALBUMS_ONLY)
+            p.remove(LIKED_SONGS_ONLY)
+            p.remove(LIKED_ARTISTS_ONLY)
+            p.remove(ALBUMS_GENRE)
+            p.remove(ALBUMS_COMPOSER)
+            p.remove(SONGS_GENRE)
+            p.remove(SONGS_COMPOSER)
+        }
+    }
+
     suspend fun setAlbumSortReversed(value: Boolean) = putBool(ALBUM_SORT_REV, value)
     suspend fun setSongSortReversed(value: Boolean) = putBool(SONG_SORT_REV, value)
     suspend fun setArtistSortReversed(value: Boolean) = putBool(ARTIST_SORT_REV, value)

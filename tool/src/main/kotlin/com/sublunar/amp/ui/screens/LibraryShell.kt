@@ -469,7 +469,7 @@ private fun TabHeader(tab: LibraryTab, actions: ShellActions) {
     // opened from.
     val simplified = App.layoutMode.collectAsState().value == LayoutMode.SIMPLIFIED
     AppHeader(
-        title = tabTitle(tab, likedOnly(tab)),
+        title = tabTitle(tab, likedOnly(tab), tagFilter(tab)),
         onBack = if (simplified) ({ LibraryNav.openLibraryIndex() }) else null,
         // Expanded only: Simplified keeps search in the bar, and a second way to
         // it directly above that one is the same control twice.
@@ -528,8 +528,14 @@ fun likedOnly(tab: LibraryTab): Boolean = when (tab) {
  * without it a filtered library just looks like one that lost most of its
  * records.
  */
-fun tabTitle(tab: LibraryTab, likedOnly: Boolean): String =
-    if (likedOnly) "Liked " + tab.title else tab.title
+fun tabTitle(tab: LibraryTab, likedOnly: Boolean, filter: TagFilter = TagFilter()): String {
+    val base = if (likedOnly) "Liked " + tab.title else tab.title
+    // The genre and composer too, for the same reason as "Liked": a list
+    // narrowed to a tag looked exactly like a library that had lost most of
+    // its records, and the only way to learn otherwise was to open More.
+    val tags = listOf(filter.genre, filter.composer).filter { it.isNotEmpty() }
+    return if (tags.isEmpty()) base else (listOf(base) + tags).joinToString(" · ")
+}
 
 @Composable
 private fun rememberLocalAccess(): Boolean {

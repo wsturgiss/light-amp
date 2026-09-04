@@ -53,6 +53,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -209,6 +210,7 @@ object App {
         downloads.deleteSource(source.id)
         artwork.forget(source.id, covers)
         backgroundPlaylistTracks.remove(source.id)
+        backgroundPlaylistFailedAt.keys.removeAll { it.startsWith("${source.id}/") }
         forgetClient(source.id)
     }
 
@@ -844,6 +846,13 @@ object App {
         // over, so nothing that recomposes on the new source can catch the old
         // data.
         library.forgetDerived()
+        // So are the liked switches and the genre and composer filters: they
+        // narrow *this* library's lists, and a genre chosen on one server means
+        // nothing on the next. Left in place, "Ambient" from Plex applied to a
+        // Navidrome that spells its genres differently emptied every list, the
+        // page said nothing about being narrowed, and the row to clear it hid
+        // itself because the new library had no such tag to offer.
+        settings.clearLibraryFilters()
         // The pool keeps the previous client open: its source may well have
         // downloads still to fetch.
         _serverClient.value = clientFor(next)
@@ -867,6 +876,28 @@ object App {
      */
     private val topUpRunning = Mutex()
     private val topUpRequested = AtomicBoolean(false)
+
+    /**
+     * How long a pass waits after being asked for, before it starts.
+     *
+     * The triggers fire at the moments the screen is busiest — a source switch
+     * blanks every list and refills it from the database, and a pass that
+     * started in the same instant read every source's whole tables on the same
+     * database thread the refill was queued behind. Background work goes after
+     * the screen. The wait also folds a burst of triggers into one pass.
+     */
+    private const val TOP_UP_SETTLE_MS = 3_000L
+
+    /**
+     * How long a playlist that would not answer is left alone before being
+     * asked again — a fetch that just failed is not improved by repeating it on
+     * the next pass, and one that failed for want of memory took the heap to
+     * its ceiling each time it was tried.
+     */
+    private const val PLAYLIST_RETRY_MS = 30 * 60 * 1000L
+
+    /** When a background source's playlist last failed to answer, by "source/playlist". */
+    private val backgroundPlaylistFailedAt = ConcurrentHashMap<String, Long>()
 
     /**
      * Playlist membership for the sources not being browsed, by source id, for
@@ -903,7 +934,12 @@ object App {
             // once more when they finish.
             if (!topUpRunning.tryLock()) return
             try {
-                while (topUpRequested.getAndSet(false)) topUpPass()
+                while (topUpRequested.get()) {
+                    // After the screen, and once for a burst — see TOP_UP_SETTLE_MS.
+                    delay(TOP_UP_SETTLE_MS)
+                    topUpRequested.set(false)
+                    topUpPass()
+                }
             } finally {
                 topUpRunning.unlock()
             }
@@ -998,10 +1034,14 @@ object App {
                 .also { map -> playlists.forEach { map[it.id] = null } }
                 .also { backgroundPlaylistTracks[source.id] = it }
         }
-        // Then whichever playlists haven't answered yet. One request per
-        // playlist is unavoidable; running them one after another is not.
-        // Same width as the repository gives the sync.
-        val missing = known.filterValues { it == null }.keys.toList()
+        // Then whichever playlists haven't answered yet — leaving alone, for a
+        // while, the ones that were asked and failed. One request per playlist
+        // is unavoidable; running them one after another is not. Same width as
+        // the repository gives the sync.
+        val now = System.currentTimeMillis()
+        val missing = known.filterValues { it == null }.keys.filter { id ->
+            now - (backgroundPlaylistFailedAt["${source.id}/$id"] ?: 0L) > PLAYLIST_RETRY_MS
+        }
         if (missing.isNotEmpty() && metadataAllowed()) {
             val gate = Semaphore(PLAYLIST_PRIME_CONCURRENCY)
             val fetched = coroutineScope {
@@ -1014,8 +1054,10 @@ object App {
                 }.awaitAll()
             }
             // A failed fetch stays null: cached as "empty" it would stand for
-            // the rest of the session.
-            fetched.forEach { (id, ids) -> if (ids != null) known[id] = ids }
+            // the rest of the session. It is dated, so the next pass skips it.
+            fetched.forEach { (id, ids) ->
+                if (ids != null) known[id] = ids else backgroundPlaylistFailedAt["${source.id}/$id"] = now
+            }
         }
         return known.values.flatMapTo(HashSet()) { it.orEmpty() }
     }

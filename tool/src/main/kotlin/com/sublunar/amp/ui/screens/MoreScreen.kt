@@ -371,9 +371,12 @@ private fun tagSettingOf(page: LibraryPage, byComposer: Boolean): PageSetting? {
         LibraryPage.SONGS -> LibraryTab.SONGS
         else -> return null
     }
-    if (values.isEmpty()) return null
     val filter = if (tab == LibraryTab.ALBUMS) albums else songs
     val chosen = if (byComposer) filter.composer else filter.genre
+    // Offered where the library carries the tag — or where a filter is set,
+    // whatever the library carries: a row that hides while it is narrowing
+    // the list leaves no way to un-narrow it.
+    if (values.isEmpty() && chosen.isEmpty()) return null
     return PageSetting(
         value = chosen.ifEmpty { "All" },
         open = { TagFilterScreen(it, tab, byComposer) },

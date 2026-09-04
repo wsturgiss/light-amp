@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.6.1
+
+### Fixed
+
+- Switching source could leave the library looking empty for a long while,
+  or narrowed by a filter chosen on the previous server. The genre, composer
+  and liked filters now clear on a switch, a narrowed page says so in its
+  title, and a set filter can always be cleared from More.
+- Large Plex playlists were fetched as one response the phone couldn't hold,
+  which failed in the background on every download check. They are fetched a
+  page at a time now, and a playlist that won't answer is left alone for a
+  while rather than asked again immediately.
+- Download checks wait a few seconds after a source switch, so the screen
+  refills before the background work starts.
+
 ## 0.6.0
 
 ### Added
