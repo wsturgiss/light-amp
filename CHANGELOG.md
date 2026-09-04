@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.6.0
 
 ### Added
 
@@ -20,6 +20,14 @@
   player's own quality setting. The volume fader disables itself, at unity,
   when the player's volume isn't its to control — an Apple TV passing digital
   audio to a receiver is the common case.
+
+- Replay Gain. Tracks play at the loudness their tags say, so a quiet folk
+  record and a loud modern master sit at the same level. Navidrome sends the
+  track gain (the album gain when there is none), Jellyfin its own loudness
+  measurement, and files on the phone are read for their own tags; Plex offers
+  nothing Amp can read yet, so its tracks play untouched. It only ever turns a
+  track down, never up, so nothing clips. On by default; the switch is under
+  Settings → Playback.
 
 ### Changed
 
@@ -43,6 +51,18 @@
   limit; a server that stops answering, or one whose library is syncing,
   holds back only its own. With more than one server the Downloads page says
   whose music is moving.
+
+- Light's SDK now comes in as the `light-sdk` submodule, pinned to upstream
+  and pulled pristine; every change Amp makes to it travels as a patch file in
+  `light-sdk-patch/` that the build applies by itself. Same code, honest
+  shape — and an SDK update becomes a checkout instead of archaeology.
+
+- SDK updated 0.0.12 → 0.1.1. Background audio above is the first of its new
+  pieces in use; an NFC reader API and `openDialer` are there for later. One
+  behavioral edge moved: audio-focus handling now rides ExoPlayer's built-in
+  path (upstream's change), so ducking and transient-loss resume come from
+  Media3 rather than the SDK's old helper — worth an ear during phone-call and
+  navigation-prompt interruptions.
 
 ### Fixed
 
@@ -85,7 +105,7 @@
   cost no data, only the wait for its own timeout on a page that could not
   find anything. Note that this asks whether there is a network to speak to,
   which is a different question from whether its bytes are free: a phone
-  hotspot is Wi-Fi and metered, and still has neighbours worth asking.
+  hotspot is Wi-Fi and metered, and still has neighbors worth asking.
 
 - Lyrics were never stored with a downloaded Plex track, and every download
   spent a request discovering it. Amp asked for the lyric file with a header
@@ -137,7 +157,7 @@
   check for "already have it" could only see finished work — and two callers
   start it about three seconds apart at launch, so both looked, both found
   nothing, and both asked. On an 8,000-track playlist that was over a megabyte
-  of the same answer twice, one copy of it abandoned half-way when its screen
+  of the same answer twice, one copy of it abandoned halfway when its screen
   went away. A fetch already running is now shared, and it survives the screen
   that started it.
 
@@ -175,20 +195,6 @@
   "paused" and never resumed. All are fixed and were verified against a
   real Navidrome on the emulator; none of this touched downloads, which is
   why it went unseen so long.
-
-### Changed
-
-- Light's SDK now comes in as the `light-sdk` submodule, pinned to upstream
-  and pulled pristine; every change Amp makes to it travels as a patch file in
-  `light-sdk-patch/` that the build applies by itself. Same code, honest
-  shape — and an SDK update becomes a checkout instead of archaeology.
-- SDK updated 0.0.12 → 0.1.1. Nothing here uses the new pieces yet, but they
-  are the ones the next releases will build on: official background audio
-  (`detached-audio`), an NFC reader API, `openDialer`. One behavioural edge
-  moved: audio-focus handling now rides ExoPlayer's built-in path (upstream's
-  change), so ducking and transient-loss resume come from Media3 rather than
-  the SDK's old helper — worth an ear during phone-call and navigation-prompt
-  interruptions.
 
 ## 0.5.0
 
