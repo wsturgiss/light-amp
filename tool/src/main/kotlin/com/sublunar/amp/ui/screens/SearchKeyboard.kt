@@ -9,9 +9,7 @@ import com.thelightphone.lp3Keyboard.ui.LayoutOptions
 import com.thelightphone.lp3Keyboard.ui.SpecialKey
 import com.thelightphone.lp3Keyboard.ui.viewmodel.EnQwertyLp3KeyboardViewModel
 import com.thelightphone.lp3Keyboard.ui.viewmodel.Lp3RepeatableKeyboardCallback
-import com.thelightphone.sdk.ui.defaultKeyboardOptions
 import com.thelightphone.sdk.ui.keyboard.LightEmbeddedLp3Keyboard
-import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * The LP3's own keyboard, against the bottom of the search page.
@@ -29,7 +27,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 @Composable
 fun SearchKeyboard(state: TextFieldState, onReturn: () -> Unit) {
     val callback = remember(state) { SearchKeyboardCallback(state, onReturn) }
-    val options = remember { MutableStateFlow(defaultKeyboardOptions()) }
+    val options = rememberPhoneKeyboardOptions()
     // Held in remember rather than through viewModel(): the tool doesn't carry
     // lifecycle-viewmodel-compose, and this is a state holder for a view that
     // lives exactly as long as the typing does.

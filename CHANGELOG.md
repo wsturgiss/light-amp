@@ -46,6 +46,14 @@
 
 ### Fixed
 
+- The keyboard ignored the phone's keyboard settings. Swipe typing and key
+  animation were the SDK's fixed defaults on every Amp keyboard, whatever was
+  set on the phone — the keyboard is a library each tool carries, and only
+  LightOS knows how you have it set. Amp now asks, the way Light's own tools
+  do, each time a keyboard appears. The password screen keeps swipe typing
+  off: it masks what you type and has no words to offer. The emoji key is
+  gone from every Amp keyboard: nothing typed in a music tool is a message.
+
 - Switching source left the app holding one server's identity and another's
   music for a few seconds. Three separate watchers of the active source each
   changed part of the world — one the client, one the database, one the
