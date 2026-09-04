@@ -4,197 +4,44 @@
 
 ### Added
 
-- Cast to other Plex players. When the active source is Plex, the Output page
-  lists the Plex players on your network — the Apple TV app among them — next
-  to the DLNA speakers, over Plex's own Companion protocol. Players are found
-  the way Plex's own controllers find them: the server's list, your account's
-  devices, and a GDM broadcast to the network, so a player that slept and woke
-  is still there. The player takes the queue and plays it itself (gapless,
-  skippable from its own remote, scrobbling its own plays); Amp steers and
-  mirrors — a skip or a repeat change on the TV shows up on the phone — and
-  takes playback back at the position the player reached. Closing Amp
-  deliberately leaves the player playing.
-
-  Quality is settled between the player and your server: Amp's streaming
-  setting doesn't apply while casting this way, and lossless depends on the
-  player's own quality setting. The volume fader disables itself, at unity,
-  when the player's volume isn't its to control — an Apple TV passing digital
-  audio to a receiver is the common case.
-
-- Replay Gain. Tracks play at the loudness their tags say, so a quiet folk
-  record and a loud modern master sit at the same level. Navidrome sends the
-  track gain (the album gain when there is none), Jellyfin its own loudness
-  measurement, and files on the phone are read for their own tags; Plex offers
-  nothing Amp can read yet, so its tracks play untouched. It only ever turns a
-  track down, never up, so nothing clips. On by default; the switch is under
-  Settings → Playback.
+- Cast to Plex players, the Apple TV app among them, from the Output page when
+  the active source is Plex. The player plays the queue itself; Amp steers and
+  mirrors, and takes playback back where the player left it.
+- Replay Gain, under Settings → Playback. Navidrome, Jellyfin and the phone's
+  own files; Plex has nothing to read yet. Only ever turns a track down.
 
 ### Changed
 
-- Background audio is official. Playback now runs in the SDK's own detached
-  audio service (`capabilities = ["detached-audio"]`, new in SDK 0.1.1)
-  instead of the keep-alive spike this app carried since July — the largest
-  off-SDK workaround, deleted in full. Two trades ship with it: a paused
-  queue left alone for 15 minutes now winds down (the spike held on for
-  ever), and tapping the media surface opens Amp.
-
-- Downloads run for every source at once. Which source you are browsing no
-  longer decides which downloads move: a Plex library set to download
-  everything keeps arriving while you listen to Navidrome or to the phone's
-  own files, and Navidrome set to Manual fetches only what you picked by
-  hand, whichever is on screen. Each server's Auto-Download setting on the
-  Offline page now means what it says for that server — it used to do
-  nothing until you switched to it. Switching source used to throw the whole
-  queue away, an hour's worth to rebuild; it stays now, because every queued
-  track knows which server it came from and is fetched from that one. What
-  holds downloads back is the data mode, your own pause, and the storage
-  limit; a server that stops answering, or one whose library is syncing,
-  holds back only its own. With more than one server the Downloads page says
-  whose music is moving.
-
-- Light's SDK now comes in as the `light-sdk` submodule, pinned to upstream
-  and pulled pristine; every change Amp makes to it travels as a patch file in
-  `light-sdk-patch/` that the build applies by itself. Same code, honest
-  shape — and an SDK update becomes a checkout instead of archaeology.
-
-- SDK updated 0.0.12 → 0.1.1. Background audio above is the first of its new
-  pieces in use; an NFC reader API and `openDialer` are there for later. One
-  behavioral edge moved: audio-focus handling now rides ExoPlayer's built-in
-  path (upstream's change), so ducking and transient-loss resume come from
-  Media3 rather than the SDK's old helper — worth an ear during phone-call and
-  navigation-prompt interruptions.
+- Downloads run for every source at once, whichever source you're browsing.
+  Each server's Auto-Download setting applies to that server, and switching
+  source no longer clears the queue.
+- Background audio uses the SDK's own detached audio service. A paused queue
+  winds down after 15 minutes.
+- The keyboard follows the phone's keyboard settings: swipe typing, key
+  animation. No emoji key.
+- Light's SDK is the `light-sdk` submodule, updated 0.0.12 → 0.1.1, with Amp's
+  changes as patch files. Audio-focus handling (ducking, resuming after a
+  call) now comes from Media3.
 
 ### Fixed
 
-- The keyboard ignored the phone's keyboard settings. Swipe typing and key
-  animation were the SDK's fixed defaults on every Amp keyboard, whatever was
-  set on the phone — the keyboard is a library each tool carries, and only
-  LightOS knows how you have it set. Amp now asks, the way Light's own tools
-  do, each time a keyboard appears. The password screen keeps swipe typing
-  off: it masks what you type and has no words to offer. The emoji key is
-  gone from every Amp keyboard: nothing typed in a music tool is a message.
-
-- Switching source left the app holding one server's identity and another's
-  music for a few seconds. Three separate watchers of the active source each
-  changed part of the world — one the client, one the database, one the
-  downloads — and nothing ordered them, so the source flipped first and the
-  rest caught up afterwards. Anything running in that gap asked the new server
-  for the old one's ids: a download top-up queued sixteen thousand Navidrome
-  tracks against Plex, which rejected each one and put it back at the front of
-  the queue to be retried every minute forever, and cover art from one server
-  was fetched from the other, which tried to resolve the id as a hostname.
-  The change is now one ordered operation — client, then database, then the
-  source that everything else keys on — and the lists that follow the database
-  empty the moment it changes rather than answering for a source already left.
-  The playing queue goes with them: it was cleared a moment later than the
-  switch itself, and in that moment the tracks in it were rebuilt against the
-  server that had just arrived, which refused ids it had never heard of.
-
-- Likes and ratings were sent to the server on cellular even in Wi-Fi Only.
-  They had a queue already, for when the server can't be reached, but nothing
-  asked whether the connection was allowed — so the one thing still going out
-  regardless of the setting was the thing the user had just tapped. They now
-  join that queue and reach the server when Wi-Fi does, the same way a play
-  does — and the queue now empties as soon as the connection changes into one
-  that allows it, rather than waiting for the next thing that happened to talk
-  to the server. That could be half an hour after Wi-Fi came back, with
-  nothing on screen to say anything was waiting.
-
-- The Output page searched the local network for players even with Wi-Fi off,
-  where there is no local network to search and nothing that could answer. It
-  cost no data, only the wait for its own timeout on a page that could not
-  find anything. Note that this asks whether there is a network to speak to,
-  which is a different question from whether its bytes are free: a phone
-  hotspot is Wi-Fi and metered, and still has neighbors worth asking.
-
-- Lyrics were never stored with a downloaded Plex track, and every download
-  spent a request discovering it. Amp asked for the lyric file with a header
-  saying it wanted JSON — right for every other Plex endpoint, wrong for the
-  one that serves the file itself — and Plex answered 404 every time.
-
+- Switching source could ask the new server for the old one's ids; one
+  Navidrome id retried against Plex every minute, forever.
+- Likes, ratings, lyrics, timelines and now-playing reports went out on
+  cellular in Wi-Fi Only. They wait for Wi-Fi now, like plays.
+- The Output page searched for players with Wi-Fi off.
+- Lyrics were never stored with a downloaded Plex track.
 - Downloaded MP3s from Plex showed the wrong length, played on in silence past
-  their end, and seeked to the wrong place. Plex transcodes to MP3 as a live
-  stream, and a stream can't carry the index — a frame at the front stating
-  how many frames follow and where each percent begins — that an encoder
-  writing to a file adds last, by seeking back. Without it the player guessed
-  the length from the file size and the *first* frame's bitrate, which on a
-  variable-rate encode was out by up to sevenfold: a 3:07 song read as 22:57,
-  the clock running on through a phantom remainder with nothing to play, and
-  every seek landing early. Amp now finishes the encoder's job: after a
-  download it walks the frames, counts them, and writes the index LAME would
-  have. Not one audio byte moves, and the result is what any decoder expects
-  an MP3 to be. Downloads already on the phone are repaired at the next
-  launch, once, in place — nothing is re-fetched. Navidrome and Jellyfin
-  were never affected: they encode MP3 at a constant rate, where the guess
-  happens to be right.
-
-- Downloading an album fetched its cover even with artwork turned off — a
-  quarter of a megabyte per record, for a picture the app had been told never
-  to draw. Browsing already knew not to; downloading was the other way in.
-
-- Wi-Fi Only let three things through. Lyrics were fetched on any connection —
-  from the server and, failing that, from lrclib.net — and the timeline and
-  now-playing reports that accompany a track carried on over cellular even
-  while playing a song already on the phone. All three now respect the mode.
-  Low Data is unchanged: it has always been about downloads and artwork, and
-  still allows all of this.
-
-  A play is treated differently from the rest, because it is durable where the
-  others are momentary: rather than being dropped it joins the queue that
-  already holds likes and ratings made out of reach, stamped with when it
-  happened, and reaches the server when Wi-Fi does. A timeline heartbeat says
-  where playback is *now* and is simply skipped — replaying a stale one later
-  would be worse than sending nothing.
-
-- The Downloads page sat still while songs were downloading. It read the list
-  and the storage figure once, when the page opened, on the assumption that
-  nothing would change while you looked at it — which is untrue in the one
-  case you are most likely to have it open. Both now follow the downloads as
-  they land.
-
-- Opening the app fetched every playlist's contents twice. The membership each
-  playlist needs for its download badge is fetched once and remembered, but the
-  check for "already have it" could only see finished work — and two callers
-  start it about three seconds apart at launch, so both looked, both found
-  nothing, and both asked. On an 8,000-track playlist that was over a megabyte
-  of the same answer twice, one copy of it abandoned halfway when its screen
-  went away. A fetch already running is now shared, and it survives the screen
-  that started it.
-
-- Stopping the queue while casting to a Plex player left the player subscribed.
-  Every other way out of a cast closes the subscription; this one sent the stop
-  and walked away, so the player went on pushing its timeline to the phone —
-  at a socket nobody was reading, and then at a dead port once the app closed.
-  Nothing could tidy up afterwards either, since the player's own "stopped"
-  push is handled by a path that returns as soon as the cast is forgotten.
-
-- A Plex library was re-fetched in full on every sync. Only new or changed
-  albums are meant to have their songs fetched, and "changed" was decided by
-  comparing the server's song count against the cached one — but Plex leaves
-  that count off its album listing, so every album reported zero against a
-  cache holding the real number, every album looked changed, and all 708 of
-  them were walked again. Once at every launch, and again every half hour for
-  as long as the app was running, which with background audio is the whole
-  time music is playing. A count the server didn't send is no longer read as
-  a count of zero; where there is none, Amp compares the album's own
-  modification time instead, which Plex does send and does move when a record
-  gains a track. A steady library now costs two requests to sync rather than
-  seven hundred and ten. The first sync after updating still walks the
-  library once, to learn those times and pick up anything missed.
-
-- Streamed tracks behave like downloaded ones again around the edges.
-  A reopened app showed the restored track with a full bar and a total of
-  0:00; Previous could only ever restart the song — from the wrong place —
-  and never reach the previous track; the end of a streamed queue didn't
-  park back at the start; and repeat modes could stop playback or wrap to
-  the first track paused. One family of causes: the seeked/restored stream
-  (a shorter file starting mid-track) was advertised with a guessed length
-  that invited range requests the server answers with 416, the player's own
-  duration never arrives for a live transcode, a queue edit could land
-  after the seek that should follow it, and a seek during rebuffering read
-  "paused" and never resumed. All are fixed and were verified against a
-  real Navidrome on the emulator; none of this touched downloads, which is
-  why it went unseen so long.
+  the end and seeked to the wrong place. Existing downloads are repaired at
+  the next launch.
+- Downloading an album fetched its cover with artwork turned off.
+- The Downloads page sat still while songs were downloading.
+- Every playlist's contents were fetched twice at launch.
+- Stopping the queue while casting to a Plex player left it subscribed.
+- A Plex library was re-fetched in full on every sync.
+- Streamed tracks around the edges: a restored track read 0:00, Previous
+  couldn't reach the previous track, a streamed queue didn't park at its start,
+  and repeat could stop playback.
 
 ## 0.5.0
 
