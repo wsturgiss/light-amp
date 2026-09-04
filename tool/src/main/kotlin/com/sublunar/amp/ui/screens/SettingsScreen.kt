@@ -104,6 +104,9 @@ class SettingsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                 item {
                     TextRow(title = "Appearance") { go { AppearanceScreen(it) } }
                 }
+                item {
+                    TextRow(title = "Playback") { go { PlaybackScreen(it) } }
+                }
                 // Everything about a source that is set once — its address, its
                 // name, how it logs in. Switching *between* them stays on the
                 // Sources page under More, where it is reached while listening
@@ -136,6 +139,34 @@ class SettingsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                     }
                 }
                 item { TextRow(title = "About") { go { AboutScreen(it) } } }
+            }
+        }
+    }
+}
+
+/** How the audio itself is treated on the way out — levels, not sources. */
+class PlaybackScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) {
+
+    // While casting, the rocker belongs to the speaker — see handleVolumeKey.
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
+        App.playback.handleVolumeKey(keyCode) || super.onKeyDown(keyCode, event)
+
+    @Composable
+    override fun Content() {
+        val replayGain by App.settings.replayGain.collectAsState(initial = true)
+
+        ListScreen(onBack = { goBack() }, title = "Playback") {
+            ScrollableList(modifier = Modifier.fillMaxSize()) {
+                item {
+                    // Evens out the jump between a loud remaster and the record
+                    // before it, from the loudness the server measured
+                    // (Navidrome's ReplayGain tags, Jellyfin's own scan). Only
+                    // ever turns a track down, so it cannot introduce clipping;
+                    // a library with no measurements plays untouched.
+                    ToggleRow("Replay Gain", replayGain) {
+                        App.scope.launch { App.settings.setReplayGain(!replayGain) }
+                    }
+                }
             }
         }
     }

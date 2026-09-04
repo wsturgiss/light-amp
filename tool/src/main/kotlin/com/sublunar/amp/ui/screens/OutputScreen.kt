@@ -39,6 +39,8 @@ import com.sublunar.amp.ui.components.TextRow
 import com.sublunar.amp.ui.LightType
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
+import com.sublunar.amp.data.PlexPlayer
+import com.sublunar.amp.playback.PlaybackController
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.cast.DlnaRenderer
@@ -53,7 +55,9 @@ import kotlin.math.roundToInt
  * The volume fader drives the phone's own media volume. Speaker-vs-Bluetooth
  * routing is LightOS's job (a tool has no access to the audio-routing APIs), so
  * that part of the list is informational. Network speakers found over DLNA *can*
- * be switched to — see the temporary cast support in `DlnaCast`.
+ * be switched to — see the temporary cast support in `DlnaCast` — and so can
+ * other Plex players (an Apple TV's Plex app, say) when the active source is
+ * Plex, over Plex's own Companion protocol.
  */
 class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) {
 
@@ -65,40 +69,66 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
     override fun Content() {
         val volume by App.playback.volume.collectAsState()
         val casting by App.playback.castRenderer.collectAsState()
+        val plexCasting by App.playback.plexPlayer.collectAsState()
+        val plexVolume by App.playback.plexVolume.collectAsState()
         var renderers by remember { mutableStateOf<List<DlnaRenderer>>(emptyList()) }
+        var plexPlayers by remember { mutableStateOf<List<PlexPlayer>>(emptyList()) }
         var scanning by remember { mutableStateOf(true) }
 
         // Discovery is a few seconds of UDP waiting, so it runs once on open and
         // is repeatable from the Scan row rather than on every recomposition.
+        // The Plex ask is one HTTP round trip, so it goes first and its players
+        // appear while the UDP wait is still on.
         var scanToken by remember { mutableStateOf(0) }
         LaunchedEffect(scanToken) {
             scanning = true
+            plexPlayers = App.playback.findPlexPlayers()
             renderers = App.playback.findCastDevices()
             scanning = false
         }
+
+        // A fader with nothing to move: an Apple TV feeding a receiver reports
+        // a volume it doesn't own, takes the command and changes nothing. Once
+        // that is established the control is disabled rather than left to lie.
+        // Dimmed rather than hidden, so the page doesn't jump.
+        val faderLive = plexCasting == null ||
+            plexVolume != PlaybackController.PlexVolume.NotOurs
 
         PlayerTheme {
             Column(modifier = Modifier.fillMaxSize()) {
                 AppHeader(onBack = { goBack() }, title = "Output")
 
-                Column(modifier = Modifier.padding(horizontal = px(80), vertical = px(32))) {
+                Column(
+                    modifier = Modifier
+                        .padding(horizontal = px(80), vertical = px(32))
+                        .alpha(if (faderLive) 1f else 0.35f),
+                ) {
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                     ) {
                         AppText("Volume", pxSp(LightType.DETAIL_PX))
-                        AppText("${(volume * 100).roundToInt()}%", pxSp(LightType.DETAIL_PX), dim = true)
+                        AppText(
+                            if (faderLive) "${(volume * 100).roundToInt()}%" else "on the TV",
+                            pxSp(LightType.DETAIL_PX),
+                            dim = true,
+                        )
                     }
                     Spacer(Modifier.height(px(26)))
-                    VolumeFader(volume)
+                    VolumeFader(volume, enabled = faderLive)
                 }
 
                 Spacer(Modifier.height(px(20)))
                 LazyColumn(modifier = Modifier.weight(1f)) {
                     item { SectionLabel("Playing on") }
                     item {
-                        OutputRow(AppIcons.Smartphone, "This device", selected = casting == null) {
+                        OutputRow(
+                            AppIcons.Smartphone,
+                            "This device",
+                            selected = casting == null && plexCasting == null,
+                        ) {
                             if (casting != null) App.playback.stopCasting()
+                            if (plexCasting != null) App.playback.stopPlexCasting()
                         }
                     }
                     item {
@@ -119,7 +149,20 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                             }
                         }
                     }
-                    if (!scanning && renderers.isEmpty()) {
+                    items(plexPlayers, key = { "plex-" + it.id }) { p ->
+                        OutputRow(
+                            icon = AppIcons.Cast,
+                            label = p.name,
+                            selected = plexCasting?.id == p.id,
+                        ) {
+                            if (plexCasting?.id == p.id) {
+                                App.playback.stopPlexCasting()
+                            } else {
+                                App.playback.castToPlex(p)
+                            }
+                        }
+                    }
+                    if (!scanning && renderers.isEmpty() && plexPlayers.isEmpty()) {
                         item {
                             AppText(
                                 "No network speakers found. They need to be on the same Wi-Fi.",
@@ -152,7 +195,7 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
     }
 
     @Composable
-    private fun VolumeFader(volume: Float) {
+    private fun VolumeFader(volume: Float, enabled: Boolean = true) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             verticalAlignment = Alignment.CenterVertically,
@@ -163,7 +206,10 @@ class OutputScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed
                 modifier = Modifier
                     .weight(1f)
                     .height(px(71))
-                    .pointerInput(Unit) {
+                    // Not merely dimmed: a control that can't do anything
+                    // shouldn't move under the thumb either.
+                    .pointerInput(enabled) {
+                        if (!enabled) return@pointerInput
                         awaitEachGesture {
                             val down = awaitFirstDown()
                             fun ratioAt(x: Float) = (x / size.width).coerceIn(0f, 1f)

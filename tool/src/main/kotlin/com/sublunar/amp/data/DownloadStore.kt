@@ -12,27 +12,25 @@ import kotlinx.coroutines.withContext
  * The on-disk half of offline playback: downloaded audio under the tool's private
  * files directory, plus the storage arithmetic the settings UI needs.
  *
+ * A folder per source, because two servers can hand out the same track id for
+ * different music — and because removing a source has to be able to take its
+ * audio with it without touching anyone else's. Every call names the source it
+ * means: the downloader fetches for every source at once, whichever is being
+ * browsed, so there is no "current" folder for it to default to.
+ *
  * Plain [File] work — the plugin sandbox allows `java.io` and `android.os.StatFs`,
  * so none of this needs SDK support.
  */
-class DownloadStore(
-    private val filesDir: File,
-    /**
-     * Which source's downloads to work in.
-     *
-     * A folder per source, because two servers can hand out the same track id for
-     * different music — and because removing a source has to be able to take its
-     * audio with it without touching anyone else's.
-     */
-    private val sourceId: () -> String,
-) {
+class DownloadStore(private val filesDir: File) {
 
-    private val root: File
-        get() = File(File(filesDir, "downloads"), sourceId()).apply { mkdirs() }
+    private val downloadsDir: File get() = File(filesDir, "downloads")
+
+    private fun rootFor(sourceId: String): File =
+        File(downloadsDir, sourceId).apply { mkdirs() }
 
     /** Every source's folder — used by the sweep and by "delete everything". */
     private fun allRoots(): List<File> =
-        File(filesDir, "downloads").listFiles().orEmpty().filter { it.isDirectory }
+        downloadsDir.listFiles().orEmpty().filter { it.isDirectory }
 
     init {
         // Sweep partials left by a download the process didn't live to finish;
@@ -43,37 +41,36 @@ class DownloadStore(
         // Legacy layout: downloads used to sit directly in the folder that now
         // holds one directory per source. Anything left there is moved into the
         // first source's folder by [adoptLegacyFiles].
-        val downloads = File(filesDir, "downloads").apply { mkdirs() }
+        val downloads = downloadsDir.apply { mkdirs() }
         (downloads.listFiles().orEmpty().toList() + allRoots().flatMap { it.listFiles().orEmpty().toList() })
             .filter { it.isFile && it.name.endsWith(PART_SUFFIX) }
             .forEach { it.delete() }
     }
 
     /**
-     * Move pre-sources downloads into this source's folder.
+     * Move pre-sources downloads into [sourceId]'s folder.
      *
      * Called once for the source that inherits the old single-server setup; the
      * files are the durable artefact, and re-fetching gigabytes because the
      * layout changed underneath them is not an acceptable upgrade.
      */
-    fun adoptLegacyFiles() {
-        val downloads = File(filesDir, "downloads")
-        val target = root
-        downloads.listFiles().orEmpty()
+    fun adoptLegacyFiles(sourceId: String) {
+        val target = rootFor(sourceId)
+        downloadsDir.listFiles().orEmpty()
             .filter { it.isFile }
             .forEach { it.renameTo(File(target, it.name)) }
     }
 
     /**
-     * Everything already on disk, as (trackId, format) pairs.
+     * Everything [sourceId] has on disk, as (trackId, format) pairs.
      *
      * The download index lives in Room, and the SDK drops every table whenever the
      * schema version moves — so a bump would otherwise strand gigabytes of audio
      * as unreferenced files and re-fetch the lot. The files are named
      * `<trackId>.<suffix>`, which is enough to rebuild the index from.
      */
-    fun onDisk(): List<Pair<String, StreamFormat>> =
-        root.listFiles().orEmpty().mapNotNull { file ->
+    fun onDisk(sourceId: String): List<Pair<String, StreamFormat>> =
+        rootFor(sourceId).listFiles().orEmpty().mapNotNull { file ->
             if (!file.isFile || file.name.endsWith(PART_SUFFIX)) return@mapNotNull null
             val dot = file.name.lastIndexOf('.')
             if (dot <= 0) return@mapNotNull null
@@ -84,19 +81,21 @@ class DownloadStore(
             id to format
         }
 
-    fun fileFor(trackId: String, format: StreamFormat): File =
-        File(root, "$trackId.${format.suffix}")
+    fun fileFor(sourceId: String, trackId: String, format: StreamFormat): File =
+        File(rootFor(sourceId), "$trackId.${format.suffix}")
 
-    fun existing(fileName: String): File? = File(root, fileName).takeIf { it.isFile }
+    fun existing(sourceId: String, fileName: String): File? =
+        File(rootFor(sourceId), fileName).takeIf { it.isFile }
 
     /**
-     * Download [url] to the file for this track. Writes to a temporary file first
-     * so an interrupted download can never be mistaken for a complete one.
+     * Download [url] to the file for this track of [sourceId]. Writes to a
+     * temporary file first so an interrupted download can never be mistaken for
+     * a complete one.
      */
-    suspend fun download(url: String, trackId: String, format: StreamFormat): File? =
+    suspend fun download(sourceId: String, url: String, trackId: String, format: StreamFormat): File? =
         withContext(Dispatchers.IO) {
-            val target = fileFor(trackId, format)
-            val partial = File(root, "${target.name}$PART_SUFFIX")
+            val target = fileFor(sourceId, trackId, format)
+            val partial = File(target.parentFile, "${target.name}$PART_SUFFIX")
             try {
                 val startedMs = System.currentTimeMillis()
                 val connection = URL(url).openConnection()
@@ -142,17 +141,18 @@ class DownloadStore(
     var lastError: String? = null
         private set
 
-    suspend fun delete(fileName: String) = withContext(Dispatchers.IO) {
-        File(root, fileName).delete()
+    suspend fun delete(sourceId: String, fileName: String) = withContext(Dispatchers.IO) {
+        File(rootFor(sourceId), fileName).delete()
     }
 
     /** Throw away one source's audio entirely — see App.forgetSource. */
     fun deleteSource(id: String) {
-        File(File(filesDir, "downloads"), id).deleteRecursively()
+        File(downloadsDir, id).deleteRecursively()
     }
 
     /** Free space on the volume holding the downloads. */
-    fun freeBytes(): Long = runCatching { StatFs(root.absolutePath).availableBytes }.getOrDefault(0L)
+    fun freeBytes(): Long =
+        runCatching { StatFs(downloadsDir.apply { mkdirs() }.absolutePath).availableBytes }.getOrDefault(0L)
 
     /**
      * Everything the tool has downloaded, across every source, read off the disk.
@@ -168,6 +168,78 @@ class DownloadStore(
                 .filter { it.isFile && !it.name.endsWith(PART_SUFFIX) }
                 .sumOf { it.length() }
         }
+
+    /**
+     * TEMPORARY MIGRATION — DELETE BEFORE SUBMITTING THE TOOL FOR COMMUNITY
+     * REVIEW.
+     *
+     * ## What this is
+     *
+     * Index every mp3 on disk that lacks one — see [Mp3VbrIndex] for what an
+     * index is and why a streamed mp3 arrives without one. Amp downloaded mp3s
+     * without writing that index until 2026-09-03. This repairs the files
+     * already on people's phones, once, so that a fix shipped in an update does
+     * not require re-fetching a library to take effect.
+     *
+     * ## Why it is temporary
+     *
+     * Everything downloaded since that date is indexed as it lands, by the call
+     * in [Downloader]'s download loop. That is the real mechanism and it is
+     * permanent. This walk exists only for files that predate it, so it is
+     * dead weight the moment those files are gone — and it is not free: it
+     * reads the first frame of every downloaded mp3 in every source's folder,
+     * which for a large offline library is tens of megabytes of disk at
+     * startup to discover there is nothing to do. It is gated to run once per
+     * install ([AppSettings.mp3IndexRepairNeeded]) so that cost is paid once,
+     * but the code should not outlive the installs that need it.
+     *
+     * ## How to remove it (all of it)
+     *
+     * 1. This function.
+     * 2. Its caller in `App.boot` — the `scope.launch(Dispatchers.IO)` block
+     *    marked TEMPORARY, which claims the flag and calls this.
+     * 3. [AppSettings.mp3IndexRepairNeeded], [AppSettings.markMp3IndexRepaired]
+     *    and their `MP3_INDEX_REPAIRED` key.
+     *
+     * Keep [Mp3VbrIndex] itself and the call in [Downloader]. Those are not
+     * part of this migration — without them, every mp3 downloaded from a
+     * server that transcodes as a stream goes back to reporting a length that
+     * can be wrong by a factor of seven, playing silence past its end, and
+     * seeking to the wrong place.
+     *
+     * ## When it is safe to remove
+     *
+     * When it is reasonable to expect that anyone still using downloads made
+     * before 2026-09-03 has launched a version carrying this at least once.
+     * Nothing breaks for a straggler who has not: their old files keep the
+     * wrong duration until re-downloaded, which is the state they were already
+     * in. No data is lost either way.
+     *
+     * ## One detail, if you are reading this to change it
+     *
+     * The downloads table's `bytes` for a repaired file is left as it was, a
+     * few hundred bytes short of the truth. That is deliberate: the storage
+     * figure the user sees is read off the disk rather than the table, and the
+     * table lives in one source's database while this covers every source.
+     */
+    fun indexMp3s(): Int {
+        var written = 0
+        allRoots().forEach { root ->
+            root.listFiles().orEmpty()
+                .filter { it.isFile && it.name.endsWith(".${StreamFormat.MP3.suffix}") }
+                .forEach { file ->
+                    runCatching { Mp3VbrIndex.index(file) }
+                        .onSuccess {
+                            if (it is Mp3VbrIndex.Outcome.Written) {
+                                written++
+                                Log.i("AmpMp3", "indexed ${file.name}: ${it.frames} frames")
+                            }
+                        }
+                        .onFailure { Log.w("AmpMp3", "couldn't index ${file.name}", it) }
+                }
+        }
+        return written
+    }
 
     /**
      * The largest limit the user may choose.

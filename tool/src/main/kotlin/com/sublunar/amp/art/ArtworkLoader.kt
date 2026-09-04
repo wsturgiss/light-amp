@@ -32,6 +32,14 @@ class ArtworkLoader(
     /** Whether a cover may be fetched over the network now — see App.heavyDataAllowed. */
     private val fetchAllowed: () -> Boolean = { true },
     /**
+     * Whether covers are switched off entirely — see App.hideArtwork.
+     *
+     * Only [prefetch] asks. The drawing path is already stopped a level up, in
+     * rememberArtwork, which is where switching covers off stops them being
+     * fetched and decoded; this is the other way in, and it had no such gate.
+     */
+    private val artworkOff: () -> Boolean = { false },
+    /**
      * Which source a cover belongs to, read at the moment it is asked for.
      *
      * Cover ids are only unique *within* a server, and [serverClient] is
@@ -76,9 +84,10 @@ class ArtworkLoader(
             // already on disk that turns out not to be a picture is thrown away
             // and asked for again — otherwise one bad answer, cached once, is a
             // cover that stays broken for the life of the install.
-            val cached = readDisk(coverArtId)?.takeIf { looksLikeImage(it) }
-            if (cached == null) diskFile(coverArtId).delete()
-            val bytes = cached ?: fetch(coverArtId)?.also { writeDisk(coverArtId, it) }
+            val source = sourceId()
+            val cached = readDisk(source, coverArtId)?.takeIf { looksLikeImage(it) }
+            if (cached == null) diskFile(source, coverArtId).delete()
+            val bytes = cached ?: fetch(serverClient.value, coverArtId)?.also { writeDisk(source, coverArtId, it) }
                 ?: return@withContext null
             val bitmap = decodeDownsampled(bytes, bucket) ?: return@withContext null
             val image = bitmap.asImageBitmap()
@@ -92,16 +101,26 @@ class ArtworkLoader(
      *
      * Called as tracks are downloaded, so an offline library has its sleeves —
      * [load] finds them in the same place it would have written them itself.
+     *
+     * Names its source and its client rather than reading the active ones:
+     * downloads run for every source whichever is being browsed, so the sleeve
+     * of a Plex track landing while Navidrome is on screen has to be asked of
+     * Plex and filed under Plex — the other way round is how a "not found"
+     * body once became a cover that could never load again (see [sourceId]).
      */
-    suspend fun prefetch(coverArtId: String?) {
+    suspend fun prefetch(sourceId: String, client: MusicServer, coverArtId: String?) {
         if (coverArtId.isNullOrBlank()) return
+        // Downloading an album pulled its sleeve down even with artwork turned
+        // off — a quarter-megabyte per record, for a picture the app had been
+        // told never to draw.
+        if (artworkOff()) return
         withContext(Dispatchers.IO) {
-            if (diskFile(coverArtId).let { it.exists() && it.length() > 0 }) return@withContext
-            fetch(coverArtId)?.let { writeDisk(coverArtId, it) }
+            if (diskFile(sourceId, coverArtId).let { it.exists() && it.length() > 0 }) return@withContext
+            fetch(client, coverArtId)?.let { writeDisk(sourceId, coverArtId, it) }
         }
     }
 
-    private suspend fun fetch(coverArtId: String): ByteArray? {
+    private suspend fun fetch(client: MusicServer?, coverArtId: String): ByteArray? {
         // A local track's cover id is its own path: the sleeve is inside the
         // file, and there is no server to ask for it.
         LocalLibrary.fileOf(coverArtId)?.let { return embedded(it) }
@@ -109,7 +128,7 @@ class ArtworkLoader(
         // bytes: the placeholder shows, nothing is cached, and the next look
         // on Wi-Fi fetches as though this never happened.
         if (!fetchAllowed()) return null
-        val client = serverClient.value ?: return null
+        if (client == null) return null
         val sized = client.coverArtUrl(coverArtId, panelWidthPx)
         val original = client.coverArtUrl(coverArtId)
         // Not all at once. A grid asks for a screenful of covers the moment it
@@ -152,10 +171,11 @@ class ArtworkLoader(
         }
     }
 
-    private fun diskFile(coverArtId: String) = File(diskDir, fileNameFor(sourceId(), coverArtId))
+    private fun diskFile(sourceId: String, coverArtId: String) =
+        File(diskDir, fileNameFor(sourceId, coverArtId))
 
-    private fun readDisk(coverArtId: String): ByteArray? {
-        val file = diskFile(coverArtId).takeIf { it.exists() && it.length() > 0 } ?: return null
+    private fun readDisk(sourceId: String, coverArtId: String): ByteArray? {
+        val file = diskFile(sourceId, coverArtId).takeIf { it.exists() && it.length() > 0 } ?: return null
         // Reading is use. The budget evicts by last use, and a read leaves no
         // mark of its own — so the covers you look at are the ones that stay.
         file.setLastModified(System.currentTimeMillis())
@@ -230,10 +250,10 @@ class ArtworkLoader(
         return jpeg || png || gif || webp || bmp
     }
 
-    private fun writeDisk(coverArtId: String, bytes: ByteArray) {
+    private fun writeDisk(sourceId: String, coverArtId: String, bytes: ByteArray) {
         if (!looksLikeImage(bytes)) return
         try {
-            diskFile(coverArtId).writeBytes(bytes)
+            diskFile(sourceId, coverArtId).writeBytes(bytes)
         } catch (_: Exception) {
             // A failed cache write is non-fatal; the image still displays this time.
         }

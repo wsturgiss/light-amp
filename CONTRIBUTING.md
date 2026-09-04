@@ -1,24 +1,25 @@
 # Contributing to Amp
 
-Amp is a music player for the Light Phone III. This repository is a fork of
-[lightphone/light-sdk](https://github.com/lightphone/light-sdk) with the app in
-its `tool/` module, because that is the shape a LightOS tool takes — a Gradle
-module inside the SDK rather than a project that depends on it.
+Amp is a music player for the Light Phone III. It is the `tool/` module built
+against [lightphone/light-sdk](https://github.com/lightphone/light-sdk), which
+comes in as the `light-sdk` submodule, because that is the shape a LightOS tool
+takes — a Gradle module inside the SDK rather than a project that depends on it.
 
-**That means most of what is here is Light's, not ours.** Please send anything
-about the SDK itself upstream rather than here:
+**The submodule is Light's, not ours.** Please send anything about the SDK
+itself upstream rather than here:
 
 | | |
 |---|---|
 | `tool/` | Amp. Issues and pull requests belong here. |
-| `sdk/`, `plugin/`, `builder/`, `examples/`, `lint-rules/` | Light's. See [their contributing guide](docs/light-sdk-CONTRIBUTING.md) and file upstream. |
+| `light-sdk/` | Light's SDK, pristine. See [their contributing guide](https://github.com/lightphone/light-sdk/blob/main/CONTRIBUTING.md) and file upstream. |
+| `light-sdk-patch/` | Amp's changes to the SDK, one patch file per area — the build applies them to the submodule automatically. [Its README](light-sdk-patch/README.md) says what each one is. |
 
-The exception is the handful of SDK changes Amp needs to work at all. Those are
-documented, marked in the source, and listed with revert steps in
+Those patches are the handful of SDK changes Amp needs to work at all. Each is
+marked in the source and listed with revert steps in
 [SDK-PATCHES](tool/docs/SDK-PATCHES.md). Find every one of them with:
 
 ```bash
-grep -rn "SDK PATCH\|SPIKE\|TEMPORARY" sdk/ tool/src
+grep -rn "SDK PATCH\|SPIKE\|TEMPORARY" light-sdk/sdk tool/src
 ```
 
 If a change isn't marked, it isn't ours.
@@ -57,5 +58,5 @@ something to hide. If you contribute the same way, the bar is the one Light sets
 upstream and it is a fair one: you must be able to explain your change in your
 own words, comments must be brief and in your voice rather than a transcript of
 a session, and you are responsible for what you submit. Note that Light's
-[AI policy](docs/light-sdk-CONTRIBUTING.md) governs anything sent upstream to
-them, including the SDK patches above.
+[AI policy](https://github.com/lightphone/light-sdk/blob/main/CONTRIBUTING.md)
+governs anything sent upstream to them, including the SDK patches above.

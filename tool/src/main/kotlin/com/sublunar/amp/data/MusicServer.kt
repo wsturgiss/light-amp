@@ -127,6 +127,19 @@ interface MusicServer {
     ): String = streamUrl(track.id, format, timeOffsetSeconds, estimateContentLength, sessionId)
 
     /**
+     * Where to fetch a *copy* from, as opposed to something to play now.
+     *
+     * The same URL for most servers, which serve a whole file either way. Plex
+     * is the exception and the reason this exists: its transcoder has a
+     * streaming mode and a download mode, and asking the streaming one for a
+     * file you mean to keep gets you a live segmented encode with no header
+     * stating how long it is — which the player then has to guess at, wrongly,
+     * for the life of the file. See [PlexClient].
+     */
+    fun downloadUrl(track: Track, format: StreamFormat): String =
+        streamUrl(track, format, estimateContentLength = false)
+
+    /**
      * Settle whatever the server needs settling before it will serve a stream.
      *
      * Most servers need nothing and the default says so. Plex is the exception:

@@ -31,7 +31,7 @@ android {
 
     signingConfigs {
         create("lightsdkDev") {
-            storeFile = file("../sdk/keys/lightsdk-dev.jks")
+            storeFile = file("../light-sdk/sdk/keys/lightsdk-dev.jks")
             storePassword = "android"
             keyAlias = "lightsdk-dev"
             keyPassword = "android"

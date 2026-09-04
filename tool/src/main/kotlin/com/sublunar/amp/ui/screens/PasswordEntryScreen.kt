@@ -17,8 +17,6 @@ import com.thelightphone.lp3Keyboard.ui.viewmodel.Lp3RepeatableKeyboardCallback
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightTextInputEditor
-import com.thelightphone.sdk.ui.defaultKeyboardOptions
-import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * Password entry on the LP3 keyboard, masked as you type.
@@ -48,7 +46,10 @@ class PasswordEntryScreen(
             // What the editor draws: one bullet per real character.
             val masked = rememberTextFieldState("")
             val secret = remember { StringBuilder() }
-            val options = remember { MutableStateFlow(defaultKeyboardOptions()) }
+            // The phone's keyboard settings, with swipe typing off whatever they
+            // say: this keyboard masks what it types and offers no words, so a
+            // swiped word would have nowhere to go — see onSubmitWord below.
+            val options = rememberPhoneKeyboardOptions(swipe = false)
 
             val callback = remember {
                 MaskedKeyboardCallback(
@@ -155,5 +156,6 @@ private class MaskedKeyboardCallback(
     override fun onKeyCancelled(code: Int) = Unit
 
     /** Predictive text would leak the password into a suggestion strip. Ignored. */
+    /** Never called: swipe typing is pinned off for this keyboard, see above. */
     override fun onSubmitWord(word: CharSequence) = Unit
 }

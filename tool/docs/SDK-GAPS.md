@@ -2,21 +2,21 @@
 
 Amp ships today, but parts of it are built around the SDK because there is no
 supported route. Each item below is a workaround we would delete the day an API
-exists. Checked against `upstream/main` at `c86e40a`, 19 Aug 2026.
+exists. Checked against `upstream/main` at `3df3c24` (SDK 0.1.1, 30 Aug 2026) —
+which is also the commit the `light-sdk` submodule is pinned to.
 
 ## Workarounds we would drop
 
-### Background audio
+### Background audio — CLOSED, adopted 31 Aug 2026
 
-- **Need:** keep playing when the screen goes off or another tool opens.
-- **Now:** a foreground `MediaSessionService` (`LightMediaService`) in
-  `sdk/client`, started by `LightAudioPlayer`.
-- **Why not in the tool:** the sandbox blocks `android.app.*` and
-  `android.content.*`, so a tool cannot declare or start a service.
-- **Answered upstream** by detached audio (PR #148). See below.
-- **Revert:** delete `LightMediaService.kt`, the `mediaSession` and `appContext`
-  fields in `LightAudioPlayer`, and the service and two permissions from the SDK
-  manifest.
+The gap that started the spikes is gone: Amp declares
+`capabilities = ["detached-audio"]` and plays through the SDK's own
+`LightAudioService`. The `LightMediaService` spike was deleted in full.
+What remains ours: the service's player needed `setDeviceVolumeControlEnabled`
+and `setHandleAudioBecomingNoisy`, and its session a `sessionActivity` — three
+additive lines, in `audio-service.patch`, written to be upstreamed. One
+behavioural trade accepted: the SDK stops a paused, unheld session after 15
+minutes, where the spike held on indefinitely.
 
 ### Background downloads
 
@@ -26,6 +26,10 @@ exists. Checked against `upstream/main` at `c86e40a`, 19 Aug 2026.
 - **Measured:** without it, a backgrounded tool is throttled about 9x on the LP3.
 - **Would replace it:** an SDK transfer primitive — fetch this URL to this file,
   keep going in the background. A podcast or photo tool would want the same.
+- **Requested upstream:**
+  [lightphone/light-sdk#187](https://github.com/lightphone/light-sdk/issues/187)
+  (31 Aug 2026) proposes a `background-transfer` capability in detached audio's
+  shape, with the throttle measurements attached.
 - **Revert:** delete `LightTransferService.kt`, its calls in `Downloader.kt`, and
   the service and permission from the SDK manifest.
 
@@ -88,45 +92,44 @@ exists. Checked against `upstream/main` at `c86e40a`, 19 Aug 2026.
 
 ## Answered upstream, not yet adopted
 
-### Detached audio — PR #148, merged 5 Aug 2026
+### Detached audio — PR #148: ADOPTED, 31 Aug 2026
 
-The supported route for background audio: `newPlayer(playback = Detached)` plus
-`capabilities = ["detached-audio"]` in `lighttool.toml`.
+`newPlayer(playback = Detached)` + `capabilities = ["detached-audio"]`; the
+plugin emits the service and its permissions into the tool manifest. Every one
+of our player additions rides the `Player` interface, which the detached
+`MediaController` implements. The background-audio section above has what
+little remains ours. Still open: whether hardware volume keys route through
+the SDK's session (the `LightActivity` pass-through spike stays until the
+phone answers).
 
-Not adopted yet because it rewrote `LightAudioPlayer.kt`, which is where most of
-our additions live:
+### Connectivity — PR #166: adopted, gap closed
 
-- Our copy 528 lines, upstream 360, differing 456.
-- `onPlaybackError`, `replaceRange`, `setHandleAudioBecomingNoisy` and
-  `isCurrentItemSeekable` are ours, none upstream.
-- `replaceRange` and `isCurrentItemSeekable` reach into player internals that may
-  not survive a controller boundary. `PlaybackController` uses the first for the
-  gapless cast hand-off and the second for the seek fallback.
-
-Worth doing deliberately, with background playback, cast hand-off and download
-throttling re-tested on the device.
-
-### Connectivity — PR #166, merged 17 Aug 2026
-
-`LightConnectivity` gives `isConnected`, `isWifi`, `isMetered` and an observer.
-That replaces our `Connectivity.kt`, which polls network interfaces every five
-seconds because `getSystemService` is blocked. We will drop it when we take a
-newer SDK.
+`LightConnectivity` gives connected/Wi-Fi/metered and an observer. Amp took it
+in 0.5.0 (as a verbatim backport, replacing an interface-polling heuristic);
+since the 0.1.1 pin it is plain upstream code and the backport patch is gone.
+The tool's `Connectivity.kt` remains only as a thin metered-ness wrapper for
+the data-mode gates.
 
 ## Smaller additions
 
 Already written as patches; see [SDK-PATCHES.md](SDK-PATCHES.md), which is the
-authority. None were upstream as of `c86e40a`.
+authority. None were upstream as of `3df3c24` (0.1.1).
+
+**Plan (2026-09-03, not yet done):** offer these upstream as **one PR** rather
+than nine issues — they are written and working, so the PR is the ask. The
+exception is **Room migrations**, which should go in on its own and as a *bug*:
+without a migration path every schema change wipes the user's library cache and
+download index, which is data loss rather than a missing convenience.
 
 | Gap | Why |
 |---|---|
 | `popToRoot()` | A tab bar visible on nested screens has to unwind to the root. Without it, tapping a tab three levels deep only goes back one. |
-| `onPlaybackError` | Media3 reports failures; the SDK swallowed them. A player that cannot report a failure cannot fall back to a downloaded copy. |
+| `onPlaybackError` | Media3 reports failures; the SDK swallowed them. A player that cannot report a failure cannot fall back to a downloaded copy. 0.1.1 grew an `error: StateFlow<LightAudioError?>` — real progress, but it maps the exception away and the fallback logic reads the raw `errorCode` (a bad HTTP status proves the server is *there*). The callback stays until the flow carries the code. |
 | Room migrations | `buildDatabase` exposes no builder, so a tool cannot register a migration. We patched in `fallbackToDestructiveMigration`, which means every schema change wipes the user's cache and download index. |
 | `replaceRange()` | Reordering by repeated `moveItem` rebuilds the session queue per move; a few hundred moves exhausts memory. |
 | `isCurrentItemSeekable` | Whether the stream that arrived can be seeked. Guessing from the requested format is wrong when a server declines to transcode, and it fails silently. |
 | `setHandleAudioBecomingNoisy(true)` | One line on the builder. Without it, unplugging headphones leaves music playing out of the speaker. Doing it by hand needs a `BroadcastReceiver`, which the sandbox blocks. |
-| Playback state | The player exposes position, duration and `isPlaying`, but not the state behind them. A tool cannot tell a finished queue from a pause, so we infer it from position against duration. |
+| Playback state | The player exposes position, duration and `isPlaying`, but not the state behind them. A tool cannot tell a finished queue from a pause, so we infer it from position against duration. 0.1.1 added `availability` (connection lifecycle) and the `error` flow, but `STATE_ENDED` is still not surfaced. |
 | `TextInputKeyboardCallback` | `LightEmbeddedLp3Keyboard` is public and usable on a tool's own screen, but the callback that turns keys into edits is `internal`. We copied ~60 lines of it, including surrogate-aware backspace, to put a keyboard under our search results. |
 | Splash icon centring | The loading glyph sits ~88px above centre on a 1240px panel; the artwork is off-centre inside its own viewport. |
 
@@ -135,6 +138,15 @@ authority. None were upstream as of `c86e40a`.
 - **Physical buttons.** The side buttons and dimmer wheel are behind a LightOS
   token trust-gate. A side-loaded tool cannot bind them and no SDK patch changes
   that.
-- **The stock Music tool's library.** It lives in `com.lightos` private storage
-  and does not appear in MediaStore, so a tool cannot offer to play it. Amp reads
-  its own folder, which is why local files go in `Music/Amp`.
+- **The stock Music tool's library.** Not the storage — the metadata. Corrected
+  2026-09-03, having actually looked: the files sit in
+  `/storage/emulated/0/Download/Persisted/Music/` (shared storage, alongside a
+  `Podcasts/` sibling) and *are* indexed in MediaStore, so reading them is
+  probably possible today. What is missing is anything to show. The filenames
+  are UUIDs, the files carry no real tags (only ffmpeg's `TSSE`/`TXXX`
+  leftovers — no `TIT2`, `TPE1` or `TALB`), and MediaStore holds
+  `title=<the UUID>, artist=<unknown>, album=Music`. The real titles live only
+  in `com.lightos`'s private database. So a tool could list six tracks named
+  after their UUIDs, which is not a library. Amp reads its own folder, which is
+  why local files go in `Music/Amp`. Worth re-checking after the Music tool
+  rework: if it starts writing real tags, this closes by itself.

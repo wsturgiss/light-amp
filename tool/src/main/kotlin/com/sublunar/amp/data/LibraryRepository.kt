@@ -13,6 +13,7 @@ import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.cancelAndJoin
@@ -26,6 +27,7 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.SharingStarted
@@ -90,9 +92,31 @@ class LibraryRepository(
     /** The database in use right now, for the imperative half of this class. */
     private val dao: LibraryDao get() = daos.value ?: error("Library database not ready")
 
-    /** [daos] as a flow of tables, for the observed half. */
-    private fun <T> observing(select: (LibraryDao) -> Flow<T>): Flow<T> =
-        daos.flatMapLatest { current -> current?.let(select) ?: emptyFlow() }
+    /**
+     * [daos] as a flow of tables, for the observed half.
+     *
+     * Every list clears the moment the database underneath changes, before the
+     * new one has answered. Without that, `flatMapLatest` switches the source
+     * of truth while everything downstream goes on serving the *previous*
+     * source's rows until Room finishes the first query — about three seconds,
+     * during which the app holds one source's identity and another's contents.
+     *
+     * That window was not theoretical. A download top-up ran inside it holding
+     * 16,222 Navidrome rows while the active source was already Plex, which is
+     * how a Navidrome id reached Plex's transcoder and 400'd there once a
+     * minute forever; the same window sent a Navidrome cover id to Plex's photo
+     * endpoint, which tried to resolve it as a hostname. Both are the same
+     * mistake — answering for a source we have left — and both are closed by
+     * refusing to answer at all until the new source can.
+     *
+     * The cost is a blink of empty lists on a source switch, which is the
+     * truth: the old source's music is not this source's music, and everything
+     * else about the switch already says so.
+     */
+    private fun <T> observing(empty: T, select: (LibraryDao) -> Flow<T>): Flow<T> =
+        daos.flatMapLatest { current ->
+            current?.let { dao -> select(dao).onStart { emit(empty) } } ?: emptyFlow()
+        }
 
     /**
      * The downloads table, read once for everything that needs it.
@@ -110,7 +134,7 @@ class LibraryRepository(
      * Lyrics stay out — see [LibraryDao.observeDownloads].
      */
     val downloadFiles: StateFlow<List<DownloadFile>> =
-        observing { it.observeDownloads() }
+        observing(emptyList()) { it.observeDownloads() }
             .onEach { downloadsLoaded.value = true }
             .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
@@ -168,7 +192,7 @@ class LibraryRepository(
      * is on the disk regardless of which library is being browsed.
      */
     private val trackRows: StateFlow<List<Track>> =
-        observing { it.observeTracks() }.map { rows -> rows.map { row -> row.toTrack() } }
+        observing(emptyList()) { it.observeTracks() }.map { rows -> rows.map { row -> row.toTrack() } }
             .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     /** Which of the server's libraries is chosen, or null for all of them. */
@@ -189,7 +213,7 @@ class LibraryRepository(
      */
     /** The album table as stored, library tags and all. */
     private val albumRows: StateFlow<List<AlbumEntity>> =
-        observing { it.observeAlbums() }.stateIn(scope, SharingStarted.Eagerly, emptyList())
+        observing(emptyList()) { it.observeAlbums() }.stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     private val allAlbums: StateFlow<List<Album>> =
         combine(albumRows, selectedLibrary) { rows, library ->
@@ -216,47 +240,14 @@ class LibraryRepository(
     /**
      * The whole cached library, ignoring the offline view filter.
      *
-     * Downloading has to work from this, never from [tracks]: in Wi-Fi Only mode
-     * (or whenever the server is unreachable) [tracks] narrows to what is already
-     * downloaded, so feeding it to the downloader asks it to fetch the things it
-     * has already fetched — the queue comes out empty and downloads stop dead.
+     * The download top-up is triggered off this, never off [tracks]: in Wi-Fi
+     * Only mode (or whenever the server is unreachable) [tracks] narrows to what
+     * is already downloaded, so a trigger keyed on it would fire on the wrong
+     * changes. What the top-up actually *fetches* it reads from each source's
+     * own tables — see App.topUpDownloads — since it runs for every source, not
+     * only the one these lists follow.
      */
     val fullTracks: StateFlow<List<Track>> get() = allTracks
-
-    /** The same libraries' albums — see [downloadableTracks]. */
-    val downloadableAlbums: StateFlow<List<Album>> =
-        combine(albumRows, settings.activeSource) { rows, source ->
-            val hidden = source?.hiddenLibraryIds?.filterNotNull()?.toSet().orEmpty()
-            rows.asSequence()
-                .filter { hidden.isEmpty() || it.libraryId == null || it.libraryId !in hidden }
-                .map { it.toAlbum() }
-                .toList()
-        }.stateIn(scope, SharingStarted.Eagerly, emptyList())
-
-    /**
-     * Everything in the libraries kept on the Sources page — what the downloader
-     * works from.
-     *
-     * Downloads used to have a library setting of their own, which restated a
-     * choice already made a level up and could disagree with it. Hiding a
-     * library there says you are not interested in it; fetching it anyway, in
-     * the background, onto a phone with a size limit, is not a reading of that.
-     *
-     * Not [allTracks]: that narrows to the one library being browsed, and what
-     * to *keep* is a wider question than what to look at right now.
-     */
-    val downloadableTracks: StateFlow<List<Track>> =
-        combine(trackRows, albumRows, settings.activeSource) { rows, albums, source ->
-            val hidden = source?.hiddenLibraryIds?.filterNotNull()?.toSet().orEmpty()
-            if (hidden.isEmpty()) {
-                rows
-            } else {
-                val allowed = albums.asSequence()
-                    .filter { it.libraryId == null || it.libraryId !in hidden }
-                    .mapTo(HashSet()) { it.id }
-                rows.filter { it.albumId == null || it.albumId in allowed }
-            }
-        }.stateIn(scope, SharingStarted.Eagerly, emptyList())
     val fullAlbums: StateFlow<List<Album>> get() = allAlbums
 
     /**
@@ -427,11 +418,11 @@ class LibraryRepository(
      *
      * Deliberately not derived from [artists], which narrows with the offline
      * view and the chosen library: whether you have starred someone is not a
-     * fact about what is on screen. The downloader reads this for that reason —
-     * see App.topUpDownloads.
+     * fact about what is on screen. The download top-up reads the same table
+     * directly, for the same reason — see App.topUpDownloads.
      */
     val likedArtistNames: StateFlow<Set<String>> =
-        observing { it.observeLikedArtists() }.map { names -> names.toSet() }
+        observing(emptyList()) { it.observeLikedArtists() }.map { names -> names.toSet() }
             .stateIn(scope, SharingStarted.Eagerly, emptySet())
 
     /**
@@ -667,24 +658,69 @@ class LibraryRepository(
 
     private suspend fun fetchPlaylistTracks(id: String): List<Track> {
         if (playlistsAreLocal()) return getTracksByIds(LocalPlaylists.trackIds(id))
-        serverClient.value?.let { client ->
-            runCatching { client.getPlaylistTracks(id) }.getOrNull()?.let { return it }
+        // The list of playlists and their membership both wait for a connection
+        // the mode allows; opening one asked the server regardless, which made
+        // Wi-Fi Only mean something different depending on which way in you
+        // took. The fallback below needs no network and was already written —
+        // it was simply never reached until the request had failed.
+        if (metadataAllowed()) {
+            serverClient.value?.let { client ->
+                runCatching { client.getPlaylistTracks(id) }.getOrNull()?.let { return it }
+            }
         }
         val ids = (_playlists.value.firstOrNull { it.id == id } ?: return emptyList()).trackIds
         return getTracksByIds(ids)
     }
 
     /**
-     * Fills the membership cache for [id] if it isn't already known.
+     * Primes currently running, by playlist id.
+     *
+     * The "already known" check below can only see work that has *finished*,
+     * and on launch two callers arrive about three seconds apart — App.boot and
+     * the library shell composing. Both looked, both found nothing, and both
+     * fetched: for an 8,293-track playlist that was the same 1.3 MB answer
+     * twice, one copy of it abandoned half-transferred when its screen went
+     * away. Knowing what is in flight is what the guard was missing.
+     */
+    private val playlistPrimes = mutableMapOf<String, Deferred<Unit>>()
+    private val playlistPrimeLock = Mutex()
+
+    /**
+     * Fills the membership cache for [id] if it isn't already known or on its
+     * way, and otherwise waits for the fetch already running.
      *
      * Talks to the server directly rather than through [playlistTracks], and
      * skips the cache write on failure — [playlistTracks]'s offline rebuild is
      * the right fallback for a screen that must show *something*, but caching
      * that guess here would freeze a transient failure as "confirmed empty"
-     * for good, since this only ever runs once per id.
+     * for the rest of the session.
      */
     suspend fun primePlaylistTrackIds(id: String) {
         if (id in _playlistTrackIds.value) return
+        val prime = playlistPrimeLock.withLock {
+            // Re-read inside the lock: the fetch this caller would have started
+            // may have finished while it waited for the lock.
+            if (id in _playlistTrackIds.value) return
+            val running = playlistPrimes[id]
+            // A finished prime is not a running one. It may have failed, and
+            // the next caller deserves a fresh attempt rather than a share of
+            // that empty answer — which is also why nothing has to be swept up
+            // afterwards: a stale entry is simply never reused.
+            if (running != null && running.isActive) {
+                running
+            } else {
+                // In the repository's scope, not the caller's, so a screen
+                // going away mid-fetch no longer throws the download out with
+                // it. The work is shared; whoever is still waiting gets it.
+                scope.async { primePlaylistOnce(id) }.also { playlistPrimes[id] = it }
+            }
+        }
+        // Deliberately unguarded: this caller being cancelled should cancel
+        // this caller, and leave the shared fetch running for the others.
+        prime.await()
+    }
+
+    private suspend fun primePlaylistOnce(id: String) {
         if (playlistsAreLocal() || serverClient.value == null) {
             playlistTracks(id)
             return
@@ -840,6 +876,17 @@ class LibraryRepository(
         syncJob = null
     }
 
+    /**
+     * Put back a `syncing` claim that [runSync] turned out to have no work for.
+     *
+     * Only clears the flag: an error already set here by an earlier run is
+     * left to stand, since nothing about "there was nothing to sync" makes it
+     * untrue.
+     */
+    private fun releaseSyncClaim() {
+        _syncState.value = _syncState.value.copy(syncing = false, phase = "")
+    }
+
     /** The actual scoped sync (null = all libraries); callers serialize via [syncMutex]. */
     /**
      * A sync failure in words the person holding the phone can act on.
@@ -906,7 +953,14 @@ class LibraryRepository(
         // Pinned before anything is written — see the note below; the local
         // scan needs the same guarantee, a switch away mid-scan would
         // otherwise write this phone's files into a server's library.
-        val dao = daos.value ?: return
+        // Each early return below clears the claim its caller staked, because
+        // the callers now set `syncing` before launching so a duplicate can be
+        // turned away while this one is still awaiting its first suspend. A
+        // return that left the flag standing would turn away every later sync
+        // too, not just the duplicate — the library would go quiet for the
+        // life of the process. runLocalScan is exempt: it owns the flag across
+        // its whole run.
+        val dao = daos.value ?: return releaseSyncClaim()
         // The phone's own music has no server to ask; it is read off the disk.
         if (source?.kind == SourceKind.LOCAL) {
             runLocalScan(dao)
@@ -914,13 +968,13 @@ class LibraryRepository(
         }
         // Wi-Fi Only off Wi-Fi means no network — and a sync is hundreds of
         // requests, plus the download top-up it triggers on success.
-        if (!metadataAllowed()) return
+        if (!metadataAllowed()) return releaseSyncClaim()
         // A build that changed how a track is read has to refill the cache once,
         // because the incremental filter below can only see what the *server*
         // changed — see MusicSource.parserGeneration.
         val refillForParser =
             source != null && source.parserGeneration != TRACK_PARSER_GENERATION
-        val client = serverClient.value ?: return
+        val client = serverClient.value ?: return releaseSyncClaim()
         // `dao` above is pinned for the run, exactly as the client is. The
         // property of that name re-reads whichever database is current, so a
         // source switched while this was in flight moved the writes onto the
@@ -1071,19 +1125,62 @@ class LibraryRepository(
             // against the album cache then skips them forever and the library never
             // recovers. Checking the real per-album track count makes it self-heal.
             val cachedTrackCounts = dao.trackCountsByAlbum().associate { it.albumId to it.tracks }
+            // Why each album was chosen, counted: a sync that walks the whole
+            // library is indistinguishable in the server's log from one that
+            // legitimately has everything to fetch, and telling those apart is
+            // what found the bug below.
+            val reasons = mutableMapOf<String, Int>()
+            var unchanged = 0
             val toFetch = if (refillForParser) serverAlbums else serverAlbums.filter { album ->
                 val prev = cached[album.id]
                 val cachedCount = cachedTrackCounts[album.id] ?: 0
-                prev == null ||
-                    prev.songCount != album.songCount ||
-                    cachedCount != album.songCount ||
-                    // A server that doesn't tell us how many songs an album has
-                    // (Plex often leaves leafCount off) would otherwise match 0
-                    // against 0 for ever, and those albums would stay empty no
-                    // matter how many times the library was synced. Nothing
-                    // cached always means fetch.
-                    cachedCount == 0
+                val why = when {
+                    prev == null -> "new album"
+                    cachedCount == 0 -> "no songs cached"
+                    // A count the server didn't send is not a count of zero, and
+                    // comparing against it as though it were is a test nothing
+                    // can pass. Plex leaves leafCount off the album listing, so
+                    // every one of its albums reported 0 against a cache holding
+                    // the real number, every album looked changed, and the whole
+                    // library — 708 of them — was re-fetched on every sync, every
+                    // half hour, for ever.
+                    //
+                    // Where there is no count, ask the other question the server
+                    // does answer: when did it last touch this album. Plex moves
+                    // updatedAt whenever the album's contents change, so a track
+                    // added to a record already in the library is seen, without
+                    // asking about the 707 that didn't move. A server that sends
+                    // neither leaves both sides at 0, which compares equal and
+                    // keeps the cache — the same and only safe answer.
+                    //
+                    // Rows written before this column existed hold 0, so the
+                    // first sync after the upgrade disagrees with every album
+                    // and walks the library once. That is the intended cost: it
+                    // is also the catch-up for anything missed while the count
+                    // was the only test.
+                    album.songCount == 0 ->
+                        if (album.updatedMs != prev.updatedMs) {
+                            "album changed on the server"
+                        } else {
+                            unchanged++
+                            null
+                        }
+                    prev.songCount != album.songCount -> "server's count changed"
+                    cachedCount != album.songCount -> "cache short of the count"
+                    else -> null
+                }
+                if (why != null) reasons[why] = (reasons[why] ?: 0) + 1
+                why != null
             }
+            android.util.Log.i(
+                "AmpSync",
+                if (refillForParser) {
+                    "parser refill: fetching songs for all ${serverAlbums.size} albums"
+                } else {
+                    "fetching songs for ${toFetch.size} of ${serverAlbums.size} albums $reasons" +
+                        if (unchanged > 0) "; $unchanged uncounted and untouched, cache kept" else ""
+                },
+            )
 
             // Counted in albums, because that is what it is walking — one
             // request per album for its songs. Labelled "Songs" it read as a
@@ -1249,6 +1346,29 @@ class LibraryRepository(
     }
 
     fun syncInBackground() {
+        // Claimed before the launch, for the reason spelled out in
+        // scanAndSyncInBackground: runSync only says "syncing" once it holds
+        // the mutex and has awaited the active source, so a second call
+        // arriving before that isn't turned away — it queues a whole second
+        // sync behind the first on the mutex.
+        //
+        // Which matters because the caller is a LaunchedEffect on the boot
+        // screen, and every re-entry into that composition asks again. Six
+        // minutes of ordinary navigating fetched the album list seven times
+        // over a metered link, measured 2026-09-03: ~400 KB a page, for one
+        // library that had not changed between the first fetch and the last.
+        if (_syncState.value.syncing) return
+        // And a floor between runs. The claim above stops them overlapping; it
+        // does nothing about them repeating, and they did: four full syncs in
+        // seventy seconds, measured 2026-09-03, each fetching the same 709
+        // albums and then reporting "0 of 709 albums; cache kept". A sync that
+        // finds nothing is also what re-runs the download top-up, so the
+        // repetition was not free even once the bytes were back on Wi-Fi.
+        //
+        // Sync Now is deliberately exempt — see scanAndSyncInBackground. Asking
+        // by hand is asking to go now, whatever this would have said.
+        if (System.currentTimeMillis() - _syncState.value.lastSyncedMs < SYNC_MIN_INTERVAL_MS) return
+        _syncState.value = _syncState.value.copy(syncing = true, error = null, phase = "Connecting")
         syncJob = scope.launch { sync() }
     }
 
@@ -1462,6 +1582,19 @@ class LibraryRepository(
     // --- Likes ---------------------------------------------------------------
 
     /**
+     * The server, when it may be spoken to *and* the mode allows the bytes.
+     *
+     * Null in both cases, so that every caller which already queues its action
+     * when there is no server queues it when there is no allowance either. A
+     * like or a rating is the user's, durable, and worth keeping — the same
+     * reasoning as a play, which PlaybackController queues for the same reason.
+     * What must not happen is sending it now: Wi-Fi Only meant Wi-Fi only, and
+     * these were the last things still going out over cellular regardless.
+     */
+    private fun reachableClient(): MusicServer? =
+        if (metadataAllowed()) serverClient.value else null
+
+    /**
      * Like or unlike a song.
      *
      * The local row is the truth the moment it's tapped, and stays that way even
@@ -1470,7 +1603,7 @@ class LibraryRepository(
      */
     suspend fun setTrackLiked(track: Track, liked: Boolean) {
         dao.setTrackLiked(track.id, liked)
-        val client = serverClient.value
+        val client = reachableClient()
         val kind = if (liked) PendingAction.Kind.STAR_SONG else PendingAction.Kind.UNSTAR_SONG
         if (client == null) {
             pending.add(PendingAction(kind, track.id))
@@ -1491,7 +1624,7 @@ class LibraryRepository(
     suspend fun setArtistLiked(name: String, liked: Boolean) {
         if (liked) dao.likeArtists(listOf(LikedArtistEntity(name))) else dao.unlikeArtist(name)
         val kind = if (liked) PendingAction.Kind.STAR_ARTIST else PendingAction.Kind.UNSTAR_ARTIST
-        val client = serverClient.value
+        val client = reachableClient()
         if (client == null) {
             pending.add(PendingAction(kind, name))
             return
@@ -1515,7 +1648,7 @@ class LibraryRepository(
     suspend fun setAlbumLiked(album: Album, liked: Boolean) {
         dao.setAlbumLiked(album.id, liked)
         val kind = if (liked) PendingAction.Kind.STAR_ALBUM else PendingAction.Kind.UNSTAR_ALBUM
-        val client = serverClient.value
+        val client = reachableClient()
         if (client == null) {
             pending.add(PendingAction(kind, album.id))
             return
@@ -1576,7 +1709,7 @@ class LibraryRepository(
     suspend fun setRating(id: String, stars: Int, isAlbum: Boolean): Boolean {
         if (isAlbum) dao.setAlbumRating(id, stars) else dao.setTrackRating(id, stars)
         val kind = if (isAlbum) PendingAction.Kind.RATE_ALBUM else PendingAction.Kind.RATE_SONG
-        val client = serverClient.value
+        val client = reachableClient()
         if (client == null || !client.setRating(id, stars)) {
             pending.add(PendingAction(kind, id, value = stars))
         }
@@ -1595,9 +1728,15 @@ class LibraryRepository(
         dao.markPlayed(trackId, System.currentTimeMillis())
     }
 
-    /** Send everything that happened while the server was unreachable. */
+    /**
+     * Send everything that happened while the server couldn't be told.
+     *
+     * Through [reachableClient], so a queue built up in Wi-Fi Only is not
+     * emptied over cellular the moment something calls this — which would send
+     * exactly the requests the queue exists to have held back.
+     */
     suspend fun flushPending(): Int {
-        val client = serverClient.value ?: return 0
+        val client = reachableClient() ?: return 0
         return pending.flush(client) { name -> runCatching { artistIdFor(name, client) }.getOrNull() }
     }
 
@@ -1712,6 +1851,14 @@ class LibraryRepository(
 }
 
 /** How many songs a radio asks the server for — Subsonic's own default. */
+/**
+ * How long an automatic sync waits after the last one finished.
+ *
+ * Only [LibraryRepository.syncInBackground] consults it — the periodic job and
+ * Sync Now both mean "now".
+ */
+private const val SYNC_MIN_INTERVAL_MS = 5L * 60 * 1000
+
 private const val RADIO_LENGTH = 50
 
 /** How long a stored popular-songs list is served before being refreshed. */

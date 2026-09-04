@@ -2,7 +2,7 @@
 
 **A music player** for the Light Phone III.
 
-Plays your own library — a Subsonic server, Plex, or files on the phone — and is
+Plays your own library — a Subsonic server, Plex, Jellyfin or files on the phone — and is
 built on Light's SDK, so it looks like it belongs there.
 
 <p align="center">
@@ -28,7 +28,12 @@ built on Light's SDK, so it looks like it belongs there.
   streaming — change it in Settings if you'd rather it streamed.
 - Synced lyrics.
 - Play counts, ratings, likes and playlist edits sync back to the server.
-- Cast to a DLNA speaker or receiver.
+- Cast to a DLNA speaker or receiver, or — on a Plex source — to another Plex
+  player such as the Apple TV app. A Plex player fetches the music from your
+  server itself, so the quality is settled between those two: Amp's streaming
+  setting doesn't apply, and lossless depends on the player's own quality
+  setting. The player also needs "Remote Control: Advertise as Player" turned
+  on.
 - Artwork can be turned off completely.
 
 ## Installing
@@ -72,18 +77,22 @@ switching the phone's greyscale filter needs a one-time grant:
 adb shell pm grant com.sublunar.amp android.permission.WRITE_SECURE_SETTINGS
 ```
 
-Then turn off **Settings → Monochrome Artwork**.
+Colour then simply follows the artwork setting — artwork on means colour on.
 
 ## Building
 
-This repo is [lightphone/light-sdk](https://github.com/lightphone/light-sdk) with
-the app in its `tool/` module, which is the shape a LightOS tool takes.
+Light's SDK comes in as the `light-sdk` submodule; Amp is the `tool/` module
+built against it, which is the shape a LightOS tool takes. Every change Amp
+makes to the SDK itself is a patch file in [`light-sdk-patch/`](light-sdk-patch/),
+and the build applies the set to the pristine submodule for you.
 
 ```bash
+git submodule update --init
 ./gradlew :tool:assembleRelease
 ```
 
 ## Licence
 
-MIT. The app is © Amp contributors; the rest is Light's SDK, © The Light Phone,
-carried here with our changes on top. See [LICENSE](LICENSE).
+MIT. The app is © Amp contributors; Light's SDK, © The Light Phone, comes in
+as a submodule, with our changes carried as patches on top. See
+[LICENSE](LICENSE).

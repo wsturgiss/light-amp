@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.6.1
+
+### Fixed
+
+- Switching source could leave the library looking empty for a long while,
+  or narrowed by a filter chosen on the previous server. The genre, composer
+  and liked filters now clear on a switch, a narrowed page says so in its
+  title, and a set filter can always be cleared from More.
+- Large Plex playlists were fetched as one response the phone couldn't hold,
+  which failed in the background on every download check. They are fetched a
+  page at a time now, and a playlist that won't answer is left alone for a
+  while rather than asked again immediately.
+- Download checks wait a few seconds after a source switch, so the screen
+  refills before the background work starts.
+
+## 0.6.0
+
+### Added
+
+- Cast to Plex players from the Output page when the active source is Plex.
+  The player plays the queue itself; Amp steers and mirrors, and takes
+  playback back where the player left it.
+- Replay Gain, under Settings → Playback, on by default. Navidrome, Jellyfin
+  and the phone's own files; Plex has nothing to read yet. Only ever turns a
+  track down.
+
+### Changed
+
+- Background audio uses the SDK's own detached audio service. A paused queue
+  winds down after 15 minutes.
+- Downloads run for every source at once, whichever source you're browsing.
+  Each server's Auto-Download setting applies to that server, and switching
+  source no longer clears the queue.
+- The keyboard follows the phone's keyboard settings: swipe typing, key
+  animation. No emoji key.
+- SDK updated to 0.1.1. Audio-focus handling (ducking, resuming after a call)
+  now comes from Media3.
+
+### Fixed
+
+- Likes, ratings, lyrics, timelines and now-playing reports went out on
+  cellular in Wi-Fi Only. They wait for Wi-Fi now, like plays.
+- Streamed tracks around the edges: a restored track read 0:00, Previous
+  couldn't reach the previous track, a streamed queue didn't park at its start,
+  and repeat could stop playback.
+- Switching source could leave downloads asking the new server for the old
+  one's tracks, and retrying forever.
+- Downloaded MP3s from Plex showed the wrong length, played on in silence past
+  the end and seeked to the wrong place. Existing downloads are repaired at
+  the next launch.
+- A Plex library was re-fetched in full on every sync.
+- Lyrics were never stored with a downloaded Plex track.
+- Every playlist's contents were fetched twice at launch.
+- The Downloads page sat still while songs were downloading.
+- Downloading an album fetched its cover with artwork turned off.
+- The Output page searched for players with Wi-Fi off.
+- Stopping the queue while casting to a Plex player left it subscribed.
+
 ## 0.5.0
 
 ### Fixed

@@ -416,6 +416,31 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
      * the first sweep after this would start deleting music that was within its
      * limit yesterday.
      */
+    /**
+     * Whether the one-time repair of downloaded mp3s still has to run.
+     *
+     * TEMPORARY — DELETE THIS, [markMp3IndexRepaired], their caller, and
+     * DownloadStore.indexMp3s before the tool is submitted for community
+     * review. See DownloadStore.indexMp3s for the full removal list and the
+     * reasoning; this pair is only the record of having run.
+     */
+    suspend fun mp3IndexRepairNeeded(): Boolean =
+        dataStore.data.first()[MP3_INDEX_REPAIRED] != true
+
+    /**
+     * Record that the repair finished — called *after* the walk, never before.
+     *
+     * Marking it done up front would be cheaper by one walk and wrong: a repair
+     * killed half-way would count as complete, and the files it never reached
+     * would keep their wrong duration for good. Nothing else would ever fix
+     * them, because the indexer that runs at download time only sees tracks
+     * being downloaded now, not ones already on the phone. Repeating a
+     * one-second walk after an interrupted launch is the cheaper mistake.
+     */
+    suspend fun markMp3IndexRepaired() {
+        dataStore.edit { it[MP3_INDEX_REPAIRED] = true }
+    }
+
     suspend fun migrateDownloadLimit() {
         val p = dataStore.data.first()
         if (p[DOWNLOAD_LIMIT] != null) return
@@ -431,6 +456,14 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
     val invertColors: Flow<Boolean> = boolFlow(INVERT_COLORS, false)
     val karaokeLyrics: Flow<Boolean> = boolFlow(KARAOKE_LYRICS, true)
+
+    /**
+     * Even out the volume between tracks, from the loudness the server
+     * measured. On by default — with it off, a remaster can be 10 dB louder
+     * than the record before it. Attenuate-only, so it never adds clipping;
+     * a library with no measurements plays exactly as it does today.
+     */
+    val replayGain: Flow<Boolean> = boolFlow(REPLAY_GAIN, true)
 
 
     /** Whether to use the simplified or standard layout mode. */
@@ -558,6 +591,24 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     suspend fun setLikedSongsOnly(value: Boolean) = putBool(LIKED_SONGS_ONLY, value)
     suspend fun setLikedArtistsOnly(value: Boolean) = putBool(LIKED_ARTISTS_ONLY, value)
 
+    /**
+     * Drop every narrowing of the library lists — the liked switches and the
+     * genre and composer filters — in one write. See App.swapSource: these
+     * are facts about one library, and a genre chosen on one server applied
+     * to the next empties its lists with nothing on screen to say why.
+     */
+    suspend fun clearLibraryFilters() {
+        dataStore.edit { p ->
+            p.remove(LIKED_ALBUMS_ONLY)
+            p.remove(LIKED_SONGS_ONLY)
+            p.remove(LIKED_ARTISTS_ONLY)
+            p.remove(ALBUMS_GENRE)
+            p.remove(ALBUMS_COMPOSER)
+            p.remove(SONGS_GENRE)
+            p.remove(SONGS_COMPOSER)
+        }
+    }
+
     suspend fun setAlbumSortReversed(value: Boolean) = putBool(ALBUM_SORT_REV, value)
     suspend fun setSongSortReversed(value: Boolean) = putBool(SONG_SORT_REV, value)
     suspend fun setArtistSortReversed(value: Boolean) = putBool(ARTIST_SORT_REV, value)
@@ -569,6 +620,7 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     suspend fun setArtistAlbumGrid(value: Boolean) = putBool(ARTIST_ALBUM_GRID, value)
     suspend fun setHideArtistImages(value: Boolean) = putBool(HIDE_ARTIST_IMAGES, value)
     suspend fun setHideDownloadIcons(value: Boolean) = putBool(HIDE_DOWNLOAD_ICONS, value)
+    suspend fun setReplayGain(value: Boolean) = putBool(REPLAY_GAIN, value)
 
     suspend fun setArtwork(value: ArtworkMode) = putString(ARTWORK, value.name)
     suspend fun setDownloadsPaused(value: Boolean) = putBool(DOWNLOADS_PAUSED, value)
@@ -615,6 +667,9 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         private val SONGS_GENRE = stringPreferencesKey("pref.songsGenre")
         private val SONGS_COMPOSER = stringPreferencesKey("pref.songsComposer")
 
+        /** TEMPORARY — see [mp3IndexRepairNeeded]; goes with it. */
+        private val MP3_INDEX_REPAIRED = booleanPreferencesKey("pref.mp3IndexRepaired")
+
         private val LIKED_ALBUMS_ONLY = booleanPreferencesKey("pref.likedAlbumsOnly")
         private val LIKED_SONGS_ONLY = booleanPreferencesKey("pref.likedSongsOnly")
         private val LIKED_ARTISTS_ONLY = booleanPreferencesKey("pref.likedArtistsOnly")
@@ -627,6 +682,7 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
         private val INVERT_COLORS = booleanPreferencesKey("pref.invertColors")
         private val KARAOKE_LYRICS = booleanPreferencesKey("pref.karaokeLyrics")
+        private val REPLAY_GAIN = booleanPreferencesKey("pref.replayGain")
         private val ALBUM_GRID = booleanPreferencesKey("pref.albumGrid")
         private val ARTIST_ALBUM_GRID = booleanPreferencesKey("pref.artistAlbumGrid")
         private val HIDE_ARTIST_IMAGES = booleanPreferencesKey("pref.hideArtistImages")

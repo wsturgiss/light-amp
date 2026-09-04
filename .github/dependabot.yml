@@ -1,0 +1,9 @@
+# Watches the light-sdk submodule and opens a PR when upstream moves.
+# The PR's CI run then answers the only question that matters: do our
+# patches in light-sdk-patch/ still apply?
+version: 2
+updates:
+  - package-ecosystem: "gitsubmodule"
+    directory: "/"
+    schedule:
+      interval: "daily"

@@ -4,14 +4,11 @@ import android.view.KeyEvent
 import com.sublunar.amp.App
 import androidx.compose.foundation.text.input.rememberTextFieldState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.remember
 import com.sublunar.amp.ui.PlayerTheme
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightIconConfiguration
 import com.thelightphone.sdk.ui.LightTextInputEditor
-import com.thelightphone.sdk.ui.defaultKeyboardOptions
-import kotlinx.coroutines.flow.MutableStateFlow
 
 /**
  * Full-screen text entry backed by the LP3 keyboard. Returns the submitted text
@@ -34,7 +31,7 @@ class TextEntryScreen(
     override fun Content() {
         PlayerTheme {
             val state = rememberTextFieldState(initial)
-            val options = remember { MutableStateFlow(defaultKeyboardOptions()) }
+            val options = rememberPhoneKeyboardOptions()
             LightTextInputEditor(
                 title = title,
                 state = state,
