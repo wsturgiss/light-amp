@@ -115,6 +115,12 @@ the data-mode gates.
 Already written as patches; see [SDK-PATCHES.md](SDK-PATCHES.md), which is the
 authority. None were upstream as of `3df3c24` (0.1.1).
 
+**Plan (2026-09-03, not yet done):** offer these upstream as **one PR** rather
+than nine issues — they are written and working, so the PR is the ask. The
+exception is **Room migrations**, which should go in on its own and as a *bug*:
+without a migration path every schema change wipes the user's library cache and
+download index, which is data loss rather than a missing convenience.
+
 | Gap | Why |
 |---|---|
 | `popToRoot()` | A tab bar visible on nested screens has to unwind to the root. Without it, tapping a tab three levels deep only goes back one. |
@@ -132,6 +138,15 @@ authority. None were upstream as of `3df3c24` (0.1.1).
 - **Physical buttons.** The side buttons and dimmer wheel are behind a LightOS
   token trust-gate. A side-loaded tool cannot bind them and no SDK patch changes
   that.
-- **The stock Music tool's library.** It lives in `com.lightos` private storage
-  and does not appear in MediaStore, so a tool cannot offer to play it. Amp reads
-  its own folder, which is why local files go in `Music/Amp`.
+- **The stock Music tool's library.** Not the storage — the metadata. Corrected
+  2026-09-03, having actually looked: the files sit in
+  `/storage/emulated/0/Download/Persisted/Music/` (shared storage, alongside a
+  `Podcasts/` sibling) and *are* indexed in MediaStore, so reading them is
+  probably possible today. What is missing is anything to show. The filenames
+  are UUIDs, the files carry no real tags (only ffmpeg's `TSSE`/`TXXX`
+  leftovers — no `TIT2`, `TPE1` or `TALB`), and MediaStore holds
+  `title=<the UUID>, artist=<unknown>, album=Music`. The real titles live only
+  in `com.lightos`'s private database. So a tool could list six tracks named
+  after their UUIDs, which is not a library. Amp reads its own folder, which is
+  why local files go in `Music/Amp`. Worth re-checking after the Music tool
+  rework: if it starts writing real tags, this closes by itself.

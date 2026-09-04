@@ -170,6 +170,78 @@ class DownloadStore(
         }
 
     /**
+     * TEMPORARY MIGRATION — DELETE BEFORE SUBMITTING THE TOOL FOR COMMUNITY
+     * REVIEW.
+     *
+     * ## What this is
+     *
+     * Index every mp3 on disk that lacks one — see [Mp3VbrIndex] for what an
+     * index is and why a streamed mp3 arrives without one. Amp downloaded mp3s
+     * without writing that index until 2026-09-03. This repairs the files
+     * already on people's phones, once, so that a fix shipped in an update does
+     * not require re-fetching a library to take effect.
+     *
+     * ## Why it is temporary
+     *
+     * Everything downloaded since that date is indexed as it lands, by the call
+     * in [Downloader]'s download loop. That is the real mechanism and it is
+     * permanent. This walk exists only for files that predate it, so it is
+     * dead weight the moment those files are gone — and it is not free: it
+     * reads the first frame of every downloaded mp3 in every source's folder,
+     * which for a large offline library is tens of megabytes of disk at
+     * startup to discover there is nothing to do. It is gated to run once per
+     * install ([AppSettings.mp3IndexRepairNeeded]) so that cost is paid once,
+     * but the code should not outlive the installs that need it.
+     *
+     * ## How to remove it (all of it)
+     *
+     * 1. This function.
+     * 2. Its caller in `App.boot` — the `scope.launch(Dispatchers.IO)` block
+     *    marked TEMPORARY, which claims the flag and calls this.
+     * 3. [AppSettings.mp3IndexRepairNeeded], [AppSettings.markMp3IndexRepaired]
+     *    and their `MP3_INDEX_REPAIRED` key.
+     *
+     * Keep [Mp3VbrIndex] itself and the call in [Downloader]. Those are not
+     * part of this migration — without them, every mp3 downloaded from a
+     * server that transcodes as a stream goes back to reporting a length that
+     * can be wrong by a factor of seven, playing silence past its end, and
+     * seeking to the wrong place.
+     *
+     * ## When it is safe to remove
+     *
+     * When it is reasonable to expect that anyone still using downloads made
+     * before 2026-09-03 has launched a version carrying this at least once.
+     * Nothing breaks for a straggler who has not: their old files keep the
+     * wrong duration until re-downloaded, which is the state they were already
+     * in. No data is lost either way.
+     *
+     * ## One detail, if you are reading this to change it
+     *
+     * The downloads table's `bytes` for a repaired file is left as it was, a
+     * few hundred bytes short of the truth. That is deliberate: the storage
+     * figure the user sees is read off the disk rather than the table, and the
+     * table lives in one source's database while this covers every source.
+     */
+    fun indexMp3s(): Int {
+        var written = 0
+        allRoots().forEach { root ->
+            root.listFiles().orEmpty()
+                .filter { it.isFile && it.name.endsWith(".${StreamFormat.MP3.suffix}") }
+                .forEach { file ->
+                    runCatching { Mp3VbrIndex.index(file) }
+                        .onSuccess {
+                            if (it is Mp3VbrIndex.Outcome.Written) {
+                                written++
+                                Log.i("AmpMp3", "indexed ${file.name}: ${it.frames} frames")
+                            }
+                        }
+                        .onFailure { Log.w("AmpMp3", "couldn't index ${file.name}", it) }
+                }
+        }
+        return written
+    }
+
+    /**
      * The largest limit the user may choose.
      *
      * The SDK imposes no quota of its own — downloads go to ordinary app-private

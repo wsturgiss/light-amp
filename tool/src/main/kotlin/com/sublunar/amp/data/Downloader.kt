@@ -78,6 +78,16 @@ class Downloader(
     private val manualQueue = LinkedHashMap<String, Track>()
     private val autoQueue = LinkedHashMap<String, Track>()
 
+    /**
+     * Consecutive failures per track, so one the server will never serve stops
+     * holding up everything behind it — see the requeue in [drain].
+     *
+     * Not [failures], which counts failed transfers in a row whoever they were
+     * for and decides how long to wait; this counts them per track and decides
+     * where the track goes back to.
+     */
+    private val strikesByTrack = HashMap<String, Int>()
+
     private val queuedCount: Int get() = manualQueue.size + autoQueue.size
     private val lock = Mutex()
     private var worker: Job? = null
@@ -92,8 +102,11 @@ class Downloader(
      */
     suspend fun clearQueue() {
         lock.withLock {
+            // AmpDl: temporary — chasing a Navidrome id reaching Plex (2026-09-03).
+            android.util.Log.i("AmpDl", "clearQueue: dropping manual=${manualQueue.size} auto=${autoQueue.size}")
             manualQueue.clear()
             autoQueue.clear()
+            strikesByTrack.clear()
             _progress.value = _progress.value.copy(pending = 0, currentTitle = null)
         }
     }
@@ -176,6 +189,12 @@ class Downloader(
             // over a ten-thousand-track library fired ten thousand point selects,
             // and it did so while holding the lock.
             val already = dao.downloadedIds().toHashSet()
+            // AmpDl: temporary — who is queueing what, against which server.
+            android.util.Log.i(
+                "AmpDl",
+                "enqueue manual=$manual n=${tracks.size} client=${serverClient.value?.let { it::class.simpleName }} " +
+                    "first=${tracks.take(3).map { it.id }}",
+            )
             lock.withLock {
                 tracks.forEach { track ->
                     if (track.id in already) return@forEach
@@ -354,6 +373,13 @@ class Downloader(
         /** How many lyric refills one pass will attempt — see refillMissingLyrics. */
         private const val LYRICS_REFILL_PER_RUN = 200
 
+        /**
+         * Failures a track gets at the front of its lane before it is sent to
+         * the back — see the requeue in [drain]. Three is enough to ride out a
+         * server restart without letting one bad id wedge the queue.
+         */
+        private const val FAILURES_BEFORE_BACK = 3
+
         private const val RETRY_BASE_MS = 2_000L
         private const val RETRY_MAX_MS = 60_000L
     }
@@ -464,6 +490,8 @@ class Downloader(
             )
 
             val client = serverClient.value
+            // AmpDl: temporary — the id about to be asked for, and of whom.
+            android.util.Log.i("AmpDl", "fetching ${next.id} \"${next.title}\" manual=$wasManual via ${client?.let { it::class.simpleName }}")
             if (client == null) {
                 _progress.value = _progress.value.copy(error = "Not connected")
                 // Put it back: the queue is the record of what still has to be
@@ -489,11 +517,19 @@ class Downloader(
                 holdingService = true
             }
             val file = store.download(
-                client.streamUrl(next, format, estimateContentLength = false),
+                client.downloadUrl(next, format),
                 next.id,
                 format,
             )
             if (file != null) {
+                // An mp3 that came down as a stream has no index, and every
+                // player that opens it has to guess its length — see
+                // Mp3VbrIndex. Written now, before anything records the size.
+                if (format == StreamFormat.MP3) {
+                    runCatching { Mp3VbrIndex.index(file) }
+                        .onSuccess { if (it is Mp3VbrIndex.Outcome.Written) android.util.Log.i("AmpMp3", "indexed ${file.name}: ${it.frames} frames") }
+                        .onFailure { android.util.Log.w("AmpMp3", "couldn't index ${file.name}", it) }
+                }
                 // The sleeve is part of having the record offline.
                 runCatching { App.artwork.prefetch(next.coverArtId) }
                 // Always: the words are a few kilobytes beside a song, and an
@@ -513,19 +549,48 @@ class Downloader(
                 )
                 completed++
                 clearBackOff()
+                lock.withLock { strikesByTrack.remove(next.id) }
             } else {
-                _progress.value = _progress.value.copy(error = store.lastError)
                 // A failed transfer is the server's problem more often than the
                 // track's: hold the queue and let the next reachability check
                 // start it again, rather than failing all ten thousand in a row.
                 // Back to the front of its own lane, not the back: an outage
                 // shouldn't cost a track the place it had earned.
+                //
+                // Unless it keeps failing. A track the server can never serve —
+                // a foreign id that reached the queue across a source switch, a
+                // file deleted since the last sync — went to the front every
+                // time and was picked again immediately, so nothing behind it
+                // ever ran. Measured 2026-09-03: one Navidrome id in a Plex
+                // queue held 8,303 downloads for as long as the app was open.
+                // After [FAILURES_BEFORE_BACK] tries it goes to the back
+                // instead. The outage case is unharmed — everything is failing,
+                // so everything moves and the relative order is what it was.
+                val strikes = lock.withLock {
+                    val n = (strikesByTrack[next.id] ?: 0) + 1
+                    strikesByTrack[next.id] = n
+                    n
+                }
+                val toBack = strikes >= FAILURES_BEFORE_BACK
+                // AmpDl: temporary — a failure and where it goes back to.
+                android.util.Log.w(
+                    "AmpDl",
+                    "failed ${next.id} (#$strikes): ${store.lastError} — to the " +
+                        "${if (toBack) "back" else "front"} of the ${if (wasManual) "manual" else "auto"} lane",
+                )
+                _progress.value = _progress.value.copy(error = store.lastError)
                 lock.withLock {
                     val lane = if (wasManual) manualQueue else autoQueue
-                    val rest = LinkedHashMap(lane)
-                    lane.clear()
-                    lane[next.id] = next
-                    lane.putAll(rest)
+                    if (toBack) {
+                        // Taken off the lane when it was picked, so putting it
+                        // back appends: the back is where a re-put already goes.
+                        lane[next.id] = next
+                    } else {
+                        val rest = LinkedHashMap(lane)
+                        lane.clear()
+                        lane[next.id] = next
+                        lane.putAll(rest)
+                    }
                 }
                 backOff()
                 continue

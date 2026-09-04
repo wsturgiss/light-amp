@@ -298,6 +298,22 @@ class JellyfinClient(
      * `startTimeTicks` is the same trick the other backends use for seeking
      * inside a transcode: the stream begins that far in.
      */
+    /**
+     * A copy to keep — see [SubsonicClient.downloadUrl], which this mirrors.
+     *
+     * `/Items/{id}/Download` is the endpoint for taking a file away, and unlike
+     * `/Audio/{id}/stream` it opens no playback session for a track nobody is
+     * listening to. It serves the original only, so a smaller copy still comes
+     * from the streaming transcode — sound while Jellyfin encodes mp3 at a
+     * constant bitrate, for the reasons set out on the Subsonic one.
+     */
+    override fun downloadUrl(track: Track, format: StreamFormat): String =
+        if (format == StreamFormat.RAW) {
+            url("/Items/${track.id}/Download", listOf("api_key" to token))
+        } else {
+            streamUrl(track, format, estimateContentLength = false)
+        }
+
     override fun streamUrl(
         songId: String,
         format: StreamFormat,
@@ -582,7 +598,8 @@ class JellyfinClient(
          * artist — the fields are cheap, and their absence is silent.
          */
         private const val FIELDS =
-            "Genres,DateCreated,PremiereDate,ChildCount,AlbumArtists,ArtistItems,People"
+            "Genres,DateCreated,PremiereDate,ChildCount,AlbumArtists,ArtistItems,People," +
+                "NormalizationGain"
 
         private const val MP3_CONTAINER = "mp3"
         private const val COVER_QUALITY = 90
@@ -707,6 +724,7 @@ internal fun JellyfinItem.toTrack(): Track = Track(
     composer = people.filter { it.type.equals("Composer", ignoreCase = true) }
         .joinToString("; ") { it.name }
         .trim(),
+    gainDb = normalizationGain,
 )
 
 class JellyfinException(message: String) : Exception(message)

@@ -524,6 +524,26 @@ class PlexClient(
     }
 
     /**
+     * A copy to keep, rather than a stream to play.
+     *
+     * The original needs no transcode and is already served whole, so that path
+     * is unchanged. For anything else `download=1` asks Plex's transcoder for a
+     * complete file instead of the segmented live encode `start.mp3` produces —
+     * the latter has no Xing header, so nothing downstream can know how long it
+     * is: ExoPlayer falls back to size ÷ the first frame's bitrate, and on a
+     * variable-rate encode that read a 3:07 song as 22:57 and then played
+     * silence for the difference.
+     */
+    override fun downloadUrl(track: Track, format: StreamFormat): String {
+        if (format == StreamFormat.RAW && track.streamPath.isNotBlank()) {
+            return streamUrl(track, format, estimateContentLength = false)
+        }
+        val query = (transcodeParams(track.id, format, 0, null) + ("download" to "1"))
+            .joinToString("&") { (k, v) -> "$k=${enc(v)}" }
+        return baseUrl.trimEnd('/') + "/music/:/transcode/universal/start.mp3?$query"
+    }
+
+    /**
      * Words for a song, where the library has them.
      *
      * Plex imports an `.lrc` sitting beside a track the way it imports a
@@ -540,7 +560,17 @@ class PlexClient(
             it.streamType == LYRIC_STREAM && !it.key.isNullOrBlank()
         } ?: return null
         val raw = runCatching {
-            val response = http.get(baseUrl.trimEnd('/') + stream.key) { plexHeaders() }
+            val response = http.get(baseUrl.trimEnd('/') + stream.key) {
+                // Not plexHeaders(): that asks for `application/json`, which is
+                // right for every endpoint that answers with a MediaContainer
+                // and wrong for this one — it serves the lyric file itself.
+                // Plex took the mismatch as nothing to serve and answered 404
+                // for every track, so a downloaded song stored no words and
+                // each download spent a request finding that out.
+                header("X-Plex-Token", token)
+                header("Accept", "*/*")
+                identityHeaders.forEach { (k, v) -> header(k, v) }
+            }
             if (response.status.isSuccess()) response.bodyAsText() else null
         }.getOrNull()
         if (raw.isNullOrBlank()) return null
@@ -778,6 +808,9 @@ class PlexClient(
         year = year,
         releaseDate = originallyAvailableAt?.replace("-", "")?.toLongOrNull() ?: 0L,
         createdMs = (addedAt ?: 0L) * 1000L,
+        // Plex leaves leafCount off this listing, so this is the only
+        // thing that says an album changed. Seconds on the wire.
+        updatedMs = (updatedAt ?: 0L) * 1000L,
         playCount = viewCount ?: 0,
         lastPlayedMs = (lastViewedAt ?: 0L) * 1000L,
         rating = starsFrom(userRating),

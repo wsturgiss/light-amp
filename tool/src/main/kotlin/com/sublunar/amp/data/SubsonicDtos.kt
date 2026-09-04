@@ -214,6 +214,17 @@ data class SongDto(
      * and so why the Composers page never appeared.
      */
     val displayComposer: String? = null,
+    /**
+     * OpenSubsonic ReplayGain, sent when the file is tagged. Gains are dB
+     * relative to reference loudness — negative for loud masters.
+     */
+    val replayGain: ReplayGainDto? = null,
+)
+
+@Serializable
+data class ReplayGainDto(
+    val trackGain: Float? = null,
+    val albumGain: Float? = null,
 )
 
 @Serializable

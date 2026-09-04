@@ -125,9 +125,15 @@ data class PlexPart(
 )
 
 /**
- * One track of media inside a file. `streamType` is 1 for video, 2 for audio
- * and 3 for subtitles — which is where Plex files lyrics, since an `.lrc`
- * beside the song is imported the same way a subtitle is.
+ * One track of media inside a file: `streamType` is 1 for video, 2 for audio,
+ * 3 for subtitles and 4 for lyrics.
+ *
+ * Lyrics are not necessarily a file beside the song. Plex's own LyricFind agent
+ * supplies most of them, and those carry no path on disk — measured 2026-09-03,
+ * where every lyric stream that served fine reported `provider=lyricfind` and no
+ * `file`. So there is nothing in a stream's fields that tells a fetchable one
+ * from a dud: the occasional 404 from `/library/streams/{id}` is the server
+ * missing content it indexed, and the only way to find out is to ask.
  */
 @Serializable
 data class PlexStream(

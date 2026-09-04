@@ -41,22 +41,48 @@ object LyricsRepository {
         data class Found(val lyrics: Lyrics) : Outcome
         data object None : Outcome
         data object Unavailable : Outcome
+
+        /** Nothing stored, and the caller said not to go looking for more. */
+        data object NotFetched : Outcome
     }
 
     /** Settled answers only — a failed lookup is never remembered. */
     private val cache = ConcurrentHashMap<String, Outcome>()
 
-    suspend fun forTrack(track: Track, client: MusicServer?): Outcome {
+    /**
+     * [allowNetwork] is the caller's answer to "may this spend data" — see
+     * App.metadataAllowed. False still returns anything downloaded with the
+     * song; it only stops the two lookups that would go out and ask.
+     */
+    suspend fun forTrack(
+        track: Track,
+        client: MusicServer?,
+        allowNetwork: Boolean = true,
+    ): Outcome {
         cache[track.id]?.let { return it }
-        val resolved = resolve(track, client)
-        if (resolved != Outcome.Unavailable) cache[track.id] = resolved
+        val resolved = resolve(track, client, allowNetwork)
+        // Neither of these is a settled answer: one is an outage, the other is
+        // a question never asked. Remembering either would outlive its reason.
+        if (resolved != Outcome.Unavailable && resolved != Outcome.NotFetched) {
+            cache[track.id] = resolved
+        }
         return resolved
     }
 
-    private suspend fun resolve(track: Track, client: MusicServer?): Outcome {
+    private suspend fun resolve(
+        track: Track,
+        client: MusicServer?,
+        allowNetwork: Boolean,
+    ): Outcome {
         // Downloaded lyrics first: they cost nothing and work with no network.
         val cached = runCatching { App.downloader.cachedLyrics(track.id) }.getOrNull()
-        parseStored(cached)?.let { if (it.synced) return Outcome.Found(it) }
+        val stored = parseStored(cached)
+        stored?.let { if (it.synced) return Outcome.Found(it) }
+
+        // Everything past here is bytes. A mode that forbids them must not also
+        // hide the copy already on the phone — having it offline is the entire
+        // point of having downloaded it.
+        if (!allowNetwork) return stored?.let { Outcome.Found(it) } ?: Outcome.NotFetched
 
         val server = runCatching { client?.getLyrics(track.id) }
         val fromServer = server.getOrNull()

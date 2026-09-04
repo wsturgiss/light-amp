@@ -53,6 +53,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import com.sublunar.amp.App
 import com.sublunar.amp.data.ArtworkMode
+import com.sublunar.amp.data.Connectivity
+import com.sublunar.amp.data.DataMode
 import com.sublunar.amp.data.LyricLine
 import com.sublunar.amp.data.LyricsRepository
 import com.sublunar.amp.data.LastSection
@@ -243,9 +245,24 @@ class NowPlayingScreen(
         val position by App.playback.positionMs.collectAsState()
         var outcome by remember(current.id) { mutableStateOf<LyricsRepository.Outcome?>(null) }
         var loading by remember(current.id) { mutableStateOf(true) }
-        LaunchedEffect(current.id) {
+        // Looking lyrics up is two network calls — the server, then lrclib.net
+        // when the server has none — for something nobody explicitly asked to
+        // download, so Wi-Fi Only doesn't. Words downloaded with the song are
+        // read either way; the decision is passed down rather than applied
+        // here, so the free copy is never withheld along with the paid one.
+        //
+        // The rule itself stays in App.metadataAllowed; collecting what it
+        // depends on is only what makes the answer re-read when the connection
+        // or the mode changes, so turning Wi-Fi on fetches them there and then.
+        val dataMode by App.settings.dataMode.collectAsState(initial = DataMode.WIFI_ONLY)
+        val unmetered by Connectivity.unmetered.collectAsState(initial = false)
+        LaunchedEffect(current.id, dataMode, unmetered) {
             loading = true
-            outcome = LyricsRepository.forTrack(current, App.serverClient.value)
+            outcome = LyricsRepository.forTrack(
+                current,
+                App.serverClient.value,
+                allowNetwork = App.metadataAllowed(),
+            )
             loading = false
         }
         val lyrics = (outcome as? LyricsRepository.Outcome.Found)?.lyrics
@@ -256,6 +273,8 @@ class NowPlayingScreen(
         Box(modifier = modifier.fillMaxWidth().background(scrim)) {
             when {
                 loading -> CenteredText("Loading lyrics…")
+                outcome == LyricsRepository.Outcome.NotFetched ->
+                    CenteredText("Lyrics wait for Wi-Fi")
                 outcome == LyricsRepository.Outcome.Unavailable ->
                     CenteredText("Couldn't reach the lyrics service")
                 lines.isEmpty() -> CenteredText("No lyrics")

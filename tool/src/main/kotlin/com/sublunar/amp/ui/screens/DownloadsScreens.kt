@@ -14,6 +14,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.sublunar.amp.App
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import com.sublunar.amp.ui.PlayerTheme
 import com.sublunar.amp.data.AppSettings
 import com.sublunar.amp.data.DataMode
@@ -78,12 +80,19 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
     @Composable
     override fun Content() {
         // Every source's downloads, not the active one's — see
-        // App.downloadsBySource. Read once when the page opens rather than
-        // observed: it reaches into databases the app is not otherwise holding
-        // open, and this is a page you look at rather than one that changes
-        // under you.
+        // App.downloadsBySource. Read again each time the active source's set
+        // of completed downloads changes, which is what makes a song landing
+        // appear here while you are watching it happen; it used to be read once
+        // when the page opened and then sat still, so a download finishing was
+        // invisible until you left and came back.
+        //
+        // Keyed on that set rather than observing every source: this read
+        // reaches into databases the app is not otherwise holding open, and
+        // this way it opens them for a moment instead of holding all of them
+        // open for as long as the page is up. Nothing is lost by it — only the
+        // active source downloads, so the others cannot change while you look.
+        val downloadedIds by App.library.downloadedTrackIds.collectAsState()
         var bySource by remember { mutableStateOf<List<Pair<String, List<Track>>>>(emptyList()) }
-        LaunchedEffect(Unit) { bySource = App.downloadsBySource() }
         // The song lists' own order, chosen from the header — this page used to
         // be stuck with whatever order the store handed back.
         val sort by App.songSort.collectAsState()
@@ -95,7 +104,19 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
         val named = sorted.size > 1
         // Across every source, off the disk: this page is about what the phone
         // is holding, and the budget it is measured against covers all of it.
-        val bytes = remember { App.downloads.usedBytesEverywhere() }
+        // Read alongside the lists, so the figure and the songs it counts can
+        // never disagree.
+        var bytes by remember { mutableStateOf(0L) }
+        LaunchedEffect(downloadedIds) {
+            // Both of these touch the disk, and neither belongs on the frame
+            // this page is drawn on. A change arriving mid-read cancels it and
+            // starts again, so the newest answer is the one that lands.
+            val read = withContext(Dispatchers.IO) {
+                App.downloadsBySource() to App.downloads.usedBytesEverywhere()
+            }
+            bySource = read.first
+            bytes = read.second
+        }
         val limit by App.settings.downloadLimit.collectAsState(
             initial = AppSettings.DEFAULT_DOWNLOAD_LIMIT,
         )

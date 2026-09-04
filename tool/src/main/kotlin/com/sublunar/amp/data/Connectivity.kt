@@ -44,10 +44,32 @@ object Connectivity {
 
     val network: StateFlow<NetworkStatus> = status
 
+    /**
+     * Whether there is a local network to speak to at all.
+     *
+     * Distinct from [isUnmetered], and the two must not be confused: a phone
+     * hotspot is Wi-Fi and metered, so it costs money *and* has neighbours.
+     * This is the question a LAN broadcast asks — is anyone there to hear it —
+     * where the gates ask what the bytes cost.
+     */
+    fun isOnWifi(): Boolean = status.value.isConnected && status.value.isWifi
+
     /** Bytes are free here: Wi-Fi, or any other unmetered connection. */
     fun isUnmetered(): Boolean =
         status.value.isConnected && !status.value.isMetered
 
     val unmetered: Flow<Boolean> =
         status.map { it.isConnected && !it.isMetered }.distinctUntilChanged()
+
+    /**
+     * Emits whenever the connection becomes something different — coming back
+     * after an outage, or changing what it costs.
+     *
+     * Both matter, and neither alone is enough. Going from cellular to Wi-Fi
+     * never stops being *connected*, so watching connectivity alone would miss
+     * the moment Wi-Fi Only starts allowing things again; watching the price
+     * alone would miss a plane landing with the mode set to Make it Hurt.
+     */
+    val changed: Flow<Pair<Boolean, Boolean>> =
+        status.map { it.isConnected to it.isMetered }.distinctUntilChanged()
 }

@@ -29,6 +29,12 @@ data class Track(
      * metadata. Blank means "ask by id", which is what every other server wants.
      */
     val streamPath: String = "",
+    /**
+     * Loudness-normalisation gain in dB, when the server knows one — Navidrome
+     * sends ReplayGain track gain, Jellyfin its own LUFS-based measurement.
+     * Null means the source offered nothing and the track plays untouched.
+     */
+    val gainDb: Float? = null,
 )
 
 /**
@@ -102,6 +108,14 @@ data class Album(
     // Ordering a discography needs finer granularity than the year alone.
     val releaseDate: Long = 0L,
     val createdMs: Long = 0L,
+    /**
+     * When the *server* last changed this album, 0 where it doesn't say.
+     *
+     * The only handle on "has this album changed" for a server that doesn't
+     * report a song count — see LibraryRepository's sync filter, and
+     * PlexClient.toAlbum, which is where it actually arrives.
+     */
+    val updatedMs: Long = 0L,
     val playCount: Int = 0,
     val lastPlayedMs: Long = 0L,
     val liked: Boolean = false,

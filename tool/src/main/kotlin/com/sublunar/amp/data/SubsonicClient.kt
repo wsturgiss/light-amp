@@ -81,6 +81,30 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
             }
         }
 
+    /**
+     * A copy to keep, rather than something to play.
+     *
+     * At original quality that is `download`, which is the endpoint for exactly
+     * this and hands back the stored file untouched. `stream` would serve the
+     * same bytes, but it is a *playback* endpoint — a Subsonic server is
+     * entitled to treat a request to it as a play, and filling the phone with a
+     * library should not rewrite its play counts.
+     *
+     * At any other quality there is nothing to switch to: `download` never
+     * transcodes, so the streaming endpoint is the only way to a smaller file.
+     * That is sound here in a way it was not on Plex — Navidrome and friends
+     * transcode mp3 at a constant bitrate, where a player's size ÷ bitrate
+     * fallback is arithmetic rather than a guess, so the missing duration
+     * header costs nothing. A server configured for a *variable* rate would
+     * land in Plex's hole, and this is the seam where that would be fixed.
+     */
+    override fun downloadUrl(track: Track, format: StreamFormat): String =
+        if (format == StreamFormat.RAW) {
+            restUrl("download", listOf("id" to track.id))
+        } else {
+            streamUrl(track, format, estimateContentLength = false)
+        }
+
     /** Streaming URL for a song in the given format, with optional server-side time seek. */
     override fun streamUrl(
         songId: String,
@@ -520,6 +544,8 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
             rating = userRating ?: 0,
             genre = genre.orEmpty(),
             composer = displayComposer?.takeIf { it.isNotBlank() } ?: composer.orEmpty(),
+            // Track gain first; a file tagged only album-wise still normalises.
+            gainDb = replayGain?.trackGain ?: replayGain?.albumGain,
         )
     }
 

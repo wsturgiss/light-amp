@@ -1,5 +1,5 @@
 diff --git a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
-index 74f1e76..48b1a79 100644
+index 74f1e76..e4db889 100644
 --- a/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 +++ b/sdk/client/src/main/kotlin/com/thelightphone/sdk/audio/LightAudioPlayer.kt
 @@ -2,8 +2,10 @@ package com.thelightphone.sdk.audio
@@ -21,7 +21,7 @@ index 74f1e76..48b1a79 100644
  import kotlinx.coroutines.CoroutineScope
  import kotlinx.coroutines.Dispatchers
  import kotlinx.coroutines.Job
-@@ -72,12 +75,45 @@ class LightAudioPlayer internal constructor(
+@@ -72,12 +75,61 @@ class LightAudioPlayer internal constructor(
      /** Connection and command-acceptance lifecycle of this player. */
      val availability: StateFlow<LightAudioPlayerAvailability> = commands.availability
  
@@ -45,6 +45,22 @@ index 74f1e76..48b1a79 100644
 +     * See the transition listener for why a tool needs to hear about it.
 +     */
 +    var onItemRepeated: (() -> Unit)? = null
++
++    /**
++     * SDK PATCH (additive, upstreamable): per-track playback gain as a 0..1
++     * linear factor, multiplied into the platform player's own volume.
++     *
++     * Distinct from the device volume (the phone's media level, which the user
++     * owns) and from focus ducking (which media3 composes with this value
++     * internally). Loudness normalisation — ReplayGain and its relatives —
++     * needs exactly this surface and nothing else exposes it. Clamped to at
++     * most 1: the player can only attenuate; boosting would clip.
++     */
++    var playbackGain: Float = 1f
++        set(value) {
++            field = value.coerceIn(0f, 1f)
++            player?.volume = field
++        }
 +
      init {
 +        updateDeviceVolume()
@@ -70,7 +86,16 @@ index 74f1e76..48b1a79 100644
              )
              LightAudioPlayback.Detached -> connectDetachedPlayer(context, usage)
          }
-@@ -96,6 +132,15 @@ class LightAudioPlayer internal constructor(
+@@ -89,6 +141,8 @@ class LightAudioPlayer internal constructor(
+             return
+         }
+         player = connectedPlayer
++        // A gain set before the (possibly async) connect must not be lost.
++        connectedPlayer.volume = playbackGain
+         connectedPlayer.addListener(object : Player.Listener {
+             override fun onMediaItemTransition(mediaItem: MediaItem?, reason: Int) {
+                 _currentMediaItemIndex.value = if (mediaItem == null) {
+@@ -96,6 +150,15 @@ class LightAudioPlayer internal constructor(
                  } else {
                      connectedPlayer.currentMediaItemIndex
                  }
@@ -86,7 +111,7 @@ index 74f1e76..48b1a79 100644
              }
  
              override fun onIsPlayingChanged(isPlaying: Boolean) {
-@@ -119,6 +164,32 @@ class LightAudioPlayer internal constructor(
+@@ -119,6 +182,32 @@ class LightAudioPlayer internal constructor(
              override fun onPlayerErrorChanged(error: PlaybackException?) {
                  _error.value = error?.toLightAudioError(connectedPlayer.currentMediaItemIndex)
              }
@@ -119,7 +144,7 @@ index 74f1e76..48b1a79 100644
          })
          val state = connectedPlayer.snapshotState()
          _currentMediaItemIndex.value = state.currentMediaItemIndex
-@@ -132,9 +203,31 @@ class LightAudioPlayer internal constructor(
+@@ -132,9 +221,31 @@ class LightAudioPlayer internal constructor(
          } else {
              stopPositionUpdates()
          }
@@ -151,7 +176,7 @@ index 74f1e76..48b1a79 100644
      private fun connectDetachedPlayer(context: Context, usage: LightAudioUsage) {
          val token = SessionToken(context, ComponentName(context, LightAudioService::class.java))
          val future = MediaController.Builder(context, token)
-@@ -202,6 +295,32 @@ class LightAudioPlayer internal constructor(
+@@ -202,6 +313,32 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -184,7 +209,7 @@ index 74f1e76..48b1a79 100644
      /**
       * Start or resume playback if audio focus is available.
       *
-@@ -225,6 +344,26 @@ class LightAudioPlayer internal constructor(
+@@ -225,6 +362,26 @@ class LightAudioPlayer internal constructor(
          }
      }
  
@@ -211,7 +236,7 @@ index 74f1e76..48b1a79 100644
      /** Seeks to [ms], clamped to the resolved duration. Unknown duration clamps to zero. */
      fun seekTo(ms: Long) {
          commands.dispatch { player ->
-@@ -253,6 +392,91 @@ class LightAudioPlayer internal constructor(
+@@ -253,6 +410,91 @@ class LightAudioPlayer internal constructor(
          commands.dispatch(Player::seekToPreviousMediaItem)
      }
  
@@ -303,7 +328,7 @@ index 74f1e76..48b1a79 100644
      /** Waits for connection, returning `false` if this player is released first. */
      suspend fun awaitReady(): Boolean = awaitPlayerReady(availability)
  
-@@ -284,6 +508,10 @@ class LightAudioPlayer internal constructor(
+@@ -284,6 +526,10 @@ class LightAudioPlayer internal constructor(
                      updatePosition(it)
                      updateDuration(it)
                  }

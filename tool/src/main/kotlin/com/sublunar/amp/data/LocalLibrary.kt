@@ -79,8 +79,20 @@ object LocalLibrary {
         runCatching { File("/storage/emulated/0/$FOLDER").mkdirs() }
     }
 
-    private val AUDIO_EXTENSIONS =
-        setOf("mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "wma", "mp4", "aiff", "aif")
+    /**
+     * What the phone can actually play, by extension.
+     *
+     * Deliberately not everything with audio in it: `ape`, `wv` and `dsf` have
+     * no decoder here, so listing them would put tracks in the library that
+     * fail the moment they are pressed — a silent substitute of a different
+     * kind. `oga` and `mka` are here because they are ordinary Ogg and
+     * Matroska audio under names some rippers prefer, and `m4b` because an
+     * audiobook is an MP4 the phone plays like any other.
+     */
+    private val AUDIO_EXTENSIONS = setOf(
+        "mp3", "flac", "m4a", "m4b", "aac", "ogg", "oga", "opus",
+        "wav", "wma", "mp4", "mka", "aiff", "aif",
+    )
 
     /** How deep to walk. Deep enough for Artist/Album/Disc, shallow enough to end. */
     private const val MAX_DEPTH = 6
@@ -228,6 +240,9 @@ object LocalLibrary {
             lastPlayedMs = 0L,
             genre = tags.genre?.trim().orEmpty(),
             composer = tags.composer?.trim().orEmpty(),
+            // The retriever cannot see a custom tag, and ReplayGain is always
+            // one — read separately, off the same file. See ReplayGainTags.
+            gainDb = ReplayGainTags.gainDb(file),
         )
     }
 

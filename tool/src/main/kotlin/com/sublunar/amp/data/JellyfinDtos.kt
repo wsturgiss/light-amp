@@ -58,6 +58,12 @@ data class JellyfinItem(
     @SerialName("ArtistItems") val artistItems: List<JellyfinNamed> = emptyList(),
     @SerialName("Genres") val genres: List<String> = emptyList(),
     /**
+     * Jellyfin's loudness measurement in dB (10.9+), computed by its audio
+     * normalisation task — its stand-in for ReplayGain. Absent until the
+     * server has run that scan.
+     */
+    @SerialName("NormalizationGain") val normalizationGain: Float? = null,
+    /**
      * Everyone credited on the track, composers among them.
      *
      * Jellyfin has no composer field of its own: a composer is a person with

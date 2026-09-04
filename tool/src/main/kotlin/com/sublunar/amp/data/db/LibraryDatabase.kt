@@ -5,6 +5,7 @@ import androidx.room.Database
 import androidx.room.OnConflictStrategy
 import androidx.room.Insert
 import androidx.room.AutoMigration
+import androidx.room.ColumnInfo
 import androidx.room.Entity
 import androidx.room.PrimaryKey
 import androidx.room.Query
@@ -37,6 +38,8 @@ data class TrackEntity(
     val composer: String = "",
     /** Plex hands out a file path for original-quality playback; see [Track]. */
     val streamPath: String = "",
+    /** Loudness-normalisation gain in dB from the server; see [Track.gainDb]. */
+    val gainDb: Float? = null,
 )
 
 @Entity(tableName = "albums")
@@ -50,6 +53,15 @@ data class AlbumEntity(
     val year: Int?,
     val releaseDate: Long,
     val createdMs: Long,
+    /**
+     * The server's own last-changed stamp; see [Album.updatedMs].
+     *
+     * The SQL default is what lets this arrive as an auto-migration: rows
+     * written before it existed read 0, which the sync filter treats as
+     * "never heard a stamp for this one" and re-fetches once.
+     */
+    @ColumnInfo(defaultValue = "0")
+    val updatedMs: Long = 0,
     val playCount: Int,
     val lastPlayedMs: Long,
     val liked: Boolean,
@@ -404,13 +416,17 @@ interface LibraryDao {
         DownloadEntity::class,
         TopSongEntity::class,
     ],
-    version = 10,
+    version = 12,
     exportSchema = true,
     // Generated from the committed schemas (tool/schemas), so existing installs
     // keep their libraries and downloads across the bump. Every schema change
     // from here on should add a step here rather than lean on the SDK's
     // drop-everything fallback.
-    autoMigrations = [AutoMigration(from = 9, to = 10)],
+    autoMigrations = [
+        AutoMigration(from = 9, to = 10),
+        AutoMigration(from = 10, to = 11),
+        AutoMigration(from = 11, to = 12),
+    ],
 )
 abstract class LibraryDatabase : RoomDatabase() {
     abstract fun libraryDao(): LibraryDao
@@ -437,6 +453,7 @@ fun TrackEntity.toTrack(): Track = Track(
     genre = genre,
     composer = composer,
     streamPath = streamPath,
+    gainDb = gainDb,
 )
 
 fun Track.toEntity(): TrackEntity = TrackEntity(
@@ -458,6 +475,7 @@ fun Track.toEntity(): TrackEntity = TrackEntity(
     genre = genre,
     composer = composer,
     streamPath = streamPath,
+    gainDb = gainDb,
 )
 
 fun AlbumEntity.toAlbum(): Album = Album(
@@ -470,6 +488,7 @@ fun AlbumEntity.toAlbum(): Album = Album(
     year = year,
     releaseDate = releaseDate,
     createdMs = createdMs,
+    updatedMs = updatedMs,
     playCount = playCount,
     lastPlayedMs = lastPlayedMs,
     liked = liked,
@@ -488,6 +507,7 @@ fun Album.toEntity(libraryId: String? = null): AlbumEntity = AlbumEntity(
     year = year,
     releaseDate = releaseDate,
     createdMs = createdMs,
+    updatedMs = updatedMs,
     playCount = playCount,
     lastPlayedMs = lastPlayedMs,
     liked = liked,

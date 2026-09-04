@@ -32,6 +32,14 @@ class ArtworkLoader(
     /** Whether a cover may be fetched over the network now — see App.heavyDataAllowed. */
     private val fetchAllowed: () -> Boolean = { true },
     /**
+     * Whether covers are switched off entirely — see App.hideArtwork.
+     *
+     * Only [prefetch] asks. The drawing path is already stopped a level up, in
+     * rememberArtwork, which is where switching covers off stops them being
+     * fetched and decoded; this is the other way in, and it had no such gate.
+     */
+    private val artworkOff: () -> Boolean = { false },
+    /**
      * Which source a cover belongs to, read at the moment it is asked for.
      *
      * Cover ids are only unique *within* a server, and [serverClient] is
@@ -95,6 +103,10 @@ class ArtworkLoader(
      */
     suspend fun prefetch(coverArtId: String?) {
         if (coverArtId.isNullOrBlank()) return
+        // Downloading an album pulled its sleeve down even with artwork turned
+        // off — a quarter-megabyte per record, for a picture the app had been
+        // told never to draw.
+        if (artworkOff()) return
         withContext(Dispatchers.IO) {
             if (diskFile(coverArtId).let { it.exists() && it.length() > 0 }) return@withContext
             fetch(coverArtId)?.let { writeDisk(coverArtId, it) }

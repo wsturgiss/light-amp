@@ -32,6 +32,114 @@
 
 ### Fixed
 
+- Switching source left the app holding one server's identity and another's
+  music for a few seconds. Three separate watchers of the active source each
+  changed part of the world — one the client, one the database, one the
+  downloads — and nothing ordered them, so the source flipped first and the
+  rest caught up afterwards. Anything running in that gap asked the new server
+  for the old one's ids: a download top-up queued sixteen thousand Navidrome
+  tracks against Plex, which rejected each one and put it back at the front of
+  the queue to be retried every minute forever, and cover art from one server
+  was fetched from the other, which tried to resolve the id as a hostname.
+  The change is now one ordered operation — client, then database, then the
+  source that everything else keys on — and the lists that follow the database
+  empty the moment it changes rather than answering for a source already left.
+  The playing queue goes with them: it was cleared a moment later than the
+  switch itself, and in that moment the tracks in it were rebuilt against the
+  server that had just arrived, which refused ids it had never heard of.
+
+- Likes and ratings were sent to the server on cellular even in Wi-Fi Only.
+  They had a queue already, for when the server can't be reached, but nothing
+  asked whether the connection was allowed — so the one thing still going out
+  regardless of the setting was the thing the user had just tapped. They now
+  join that queue and reach the server when Wi-Fi does, the same way a play
+  does — and the queue now empties as soon as the connection changes into one
+  that allows it, rather than waiting for the next thing that happened to talk
+  to the server. That could be half an hour after Wi-Fi came back, with
+  nothing on screen to say anything was waiting.
+
+- The Output page searched the local network for players even with Wi-Fi off,
+  where there is no local network to search and nothing that could answer. It
+  cost no data, only the wait for its own timeout on a page that could not
+  find anything. Note that this asks whether there is a network to speak to,
+  which is a different question from whether its bytes are free: a phone
+  hotspot is Wi-Fi and metered, and still has neighbours worth asking.
+
+- Lyrics were never stored with a downloaded Plex track, and every download
+  spent a request discovering it. Amp asked for the lyric file with a header
+  saying it wanted JSON — right for every other Plex endpoint, wrong for the
+  one that serves the file itself — and Plex answered 404 every time.
+
+- Downloaded MP3s from Plex showed the wrong length, played on in silence past
+  their end, and seeked to the wrong place. Plex transcodes to MP3 as a live
+  stream, and a stream can't carry the index — a frame at the front stating
+  how many frames follow and where each percent begins — that an encoder
+  writing to a file adds last, by seeking back. Without it the player guessed
+  the length from the file size and the *first* frame's bitrate, which on a
+  variable-rate encode was out by up to sevenfold: a 3:07 song read as 22:57,
+  the clock running on through a phantom remainder with nothing to play, and
+  every seek landing early. Amp now finishes the encoder's job: after a
+  download it walks the frames, counts them, and writes the index LAME would
+  have. Not one audio byte moves, and the result is what any decoder expects
+  an MP3 to be. Downloads already on the phone are repaired at the next
+  launch, once, in place — nothing is re-fetched. Navidrome and Jellyfin
+  were never affected: they encode MP3 at a constant rate, where the guess
+  happens to be right.
+
+- Downloading an album fetched its cover even with artwork turned off — a
+  quarter of a megabyte per record, for a picture the app had been told never
+  to draw. Browsing already knew not to; downloading was the other way in.
+
+- Wi-Fi Only let three things through. Lyrics were fetched on any connection —
+  from the server and, failing that, from lrclib.net — and the timeline and
+  now-playing reports that accompany a track carried on over cellular even
+  while playing a song already on the phone. All three now respect the mode.
+  Low Data is unchanged: it has always been about downloads and artwork, and
+  still allows all of this.
+
+  A play is treated differently from the rest, because it is durable where the
+  others are momentary: rather than being dropped it joins the queue that
+  already holds likes and ratings made out of reach, stamped with when it
+  happened, and reaches the server when Wi-Fi does. A timeline heartbeat says
+  where playback is *now* and is simply skipped — replaying a stale one later
+  would be worse than sending nothing.
+
+- The Downloads page sat still while songs were downloading. It read the list
+  and the storage figure once, when the page opened, on the assumption that
+  nothing would change while you looked at it — which is untrue in the one
+  case you are most likely to have it open. Both now follow the downloads as
+  they land.
+
+- Opening the app fetched every playlist's contents twice. The membership each
+  playlist needs for its download badge is fetched once and remembered, but the
+  check for "already have it" could only see finished work — and two callers
+  start it about three seconds apart at launch, so both looked, both found
+  nothing, and both asked. On an 8,000-track playlist that was over a megabyte
+  of the same answer twice, one copy of it abandoned half-way when its screen
+  went away. A fetch already running is now shared, and it survives the screen
+  that started it.
+
+- Stopping the queue while casting to a Plex player left the player subscribed.
+  Every other way out of a cast closes the subscription; this one sent the stop
+  and walked away, so the player went on pushing its timeline to the phone —
+  at a socket nobody was reading, and then at a dead port once the app closed.
+  Nothing could tidy up afterwards either, since the player's own "stopped"
+  push is handled by a path that returns as soon as the cast is forgotten.
+
+- A Plex library was re-fetched in full on every sync. Only new or changed
+  albums are meant to have their songs fetched, and "changed" was decided by
+  comparing the server's song count against the cached one — but Plex leaves
+  that count off its album listing, so every album reported zero against a
+  cache holding the real number, every album looked changed, and all 708 of
+  them were walked again. Once at every launch, and again every half hour for
+  as long as the app was running, which with background audio is the whole
+  time music is playing. A count the server didn't send is no longer read as
+  a count of zero; where there is none, Amp compares the album's own
+  modification time instead, which Plex does send and does move when a record
+  gains a track. A steady library now costs two requests to sync rather than
+  seven hundred and ten. The first sync after updating still walks the
+  library once, to learn those times and pick up anything missed.
+
 - Streamed tracks behave like downloaded ones again around the edges.
   A reopened app showed the restored track with a full bar and a total of
   0:00; Previous could only ever restart the song — from the wrong place —
