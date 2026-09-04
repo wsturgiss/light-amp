@@ -4,44 +4,44 @@
 
 ### Added
 
-- Cast to Plex players, the Apple TV app among them, from the Output page when
-  the active source is Plex. The player plays the queue itself; Amp steers and
-  mirrors, and takes playback back where the player left it.
-- Replay Gain, under Settings → Playback. Navidrome, Jellyfin and the phone's
-  own files; Plex has nothing to read yet. Only ever turns a track down.
+- Replay Gain, under Settings → Playback, on by default. Navidrome, Jellyfin
+  and the phone's own files; Plex has nothing to read yet. Only ever turns a
+  track down.
+- Cast to Plex players from the Output page when the active source is Plex.
+  The player plays the queue itself; Amp steers and mirrors, and takes
+  playback back where the player left it.
 
 ### Changed
 
+- Background audio uses the SDK's own detached audio service. A paused queue
+  winds down after 15 minutes.
 - Downloads run for every source at once, whichever source you're browsing.
   Each server's Auto-Download setting applies to that server, and switching
   source no longer clears the queue.
-- Background audio uses the SDK's own detached audio service. A paused queue
-  winds down after 15 minutes.
 - The keyboard follows the phone's keyboard settings: swipe typing, key
   animation. No emoji key.
-- Light's SDK is the `light-sdk` submodule, updated 0.0.12 → 0.1.1, with Amp's
-  changes as patch files. Audio-focus handling (ducking, resuming after a
-  call) now comes from Media3.
+- SDK updated to 0.1.1. Audio-focus handling (ducking, resuming after a call)
+  now comes from Media3.
 
 ### Fixed
 
-- Switching source could ask the new server for the old one's ids; one
-  Navidrome id retried against Plex every minute, forever.
 - Likes, ratings, lyrics, timelines and now-playing reports went out on
   cellular in Wi-Fi Only. They wait for Wi-Fi now, like plays.
-- The Output page searched for players with Wi-Fi off.
-- Lyrics were never stored with a downloaded Plex track.
-- Downloaded MP3s from Plex showed the wrong length, played on in silence past
-  the end and seeked to the wrong place. Existing downloads are repaired at
-  the next launch.
-- Downloading an album fetched its cover with artwork turned off.
-- The Downloads page sat still while songs were downloading.
-- Every playlist's contents were fetched twice at launch.
-- Stopping the queue while casting to a Plex player left it subscribed.
-- A Plex library was re-fetched in full on every sync.
 - Streamed tracks around the edges: a restored track read 0:00, Previous
   couldn't reach the previous track, a streamed queue didn't park at its start,
   and repeat could stop playback.
+- Switching source could leave downloads asking the new server for the old
+  one's tracks, and retrying forever.
+- Downloaded MP3s from Plex showed the wrong length, played on in silence past
+  the end and seeked to the wrong place. Existing downloads are repaired at
+  the next launch.
+- A Plex library was re-fetched in full on every sync.
+- Lyrics were never stored with a downloaded Plex track.
+- Every playlist's contents were fetched twice at launch.
+- The Downloads page sat still while songs were downloading.
+- Downloading an album fetched its cover with artwork turned off.
+- The Output page searched for players with Wi-Fi off.
+- Stopping the queue while casting to a Plex player left it subscribed.
 
 ## 0.5.0
 
