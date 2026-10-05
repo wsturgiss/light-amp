@@ -74,6 +74,7 @@ import kotlin.time.Duration.Companion.minutes
 import com.sublunar.amp.data.NetworkGate
 import com.thelightphone.sdk.audio.LightAudioNetworkPolicy
 import com.sublunar.amp.data.LinkRules
+import com.sublunar.amp.data.LogFile
 import com.sublunar.amp.data.Reachability
 import com.sublunar.amp.data.StreamProxy
 import kotlinx.coroutines.withTimeoutOrNull
@@ -531,6 +532,8 @@ object App {
 
     fun boot(sealedActivity: SealedLightActivity, context: SealedLightContext) {
         if (!coreReady) {
+            // First, so the boot itself is in it — see LogFile.
+            LogFile.start(context.filesDir)
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             settings = AppSettings(context.dataStore)
             lightContext = context

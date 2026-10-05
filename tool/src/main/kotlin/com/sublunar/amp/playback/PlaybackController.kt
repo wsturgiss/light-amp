@@ -780,6 +780,7 @@ class PlaybackController(
         // the same moment the library and the queue view do. See LinkRules.
         scope.launch {
             App.rules.collect { rules ->
+                val lostFreeBytes = unmetered && !rules.unmetered
                 unmetered = rules.unmetered
                 if (rules.mayStream) {
                     // Streaming is allowed again, so nothing learnt while it
@@ -791,7 +792,7 @@ class PlaybackController(
                     retriedTrackId = null
                     streamFailed.clear()
                 }
-                reresolveQueue()
+                reresolveQueue(includeCurrent = lostFreeBytes)
                 if (!rules.mayUseLan && _castRenderer.value != null) {
                     // Off Wi-Fi the speaker is out of reach: the cast is over
                     // here, whatever the speaker goes on doing at home. Nothing
@@ -3110,8 +3111,15 @@ class PlaybackController(
      * the track under the listener, which is a worse thing to do than letting
      * one track finish on the source it began with — everything after it is
      * corrected, which is where the stalls were.
+     *
+     * Except when [includeCurrent] — the bytes just stopped being free — and
+     * the playing item is a stream of a track whose file is on the phone. That
+     * is an upgrade chosen because Wi-Fi made it free, and finishing it would
+     * spend the rest of a song's worth of cellular data on audio already here.
+     * A file seeks natively, so it is picked up at the same position rather
+     * than from the start.
      */
-    private fun reresolveQueue() {
+    private fun reresolveQueue(includeCurrent: Boolean = false) {
         val p = player ?: return
         if (isCasting) return
         val tracks = _queue.value
@@ -3121,7 +3129,25 @@ class PlaybackController(
         // download that completes, and most of them change no answers at all.
         val rebuilt = tracks.map { it.source() }
         if (rebuilt == queuedSources) return
+        val wasStreaming = queuedSources.getOrNull(current) is LightAudioSource.UrlSource
         queuedSources = rebuilt
+        if (includeCurrent && wasStreaming && rebuilt[current] is LightAudioSource.FileSource) {
+            scope.launch(Dispatchers.Main.immediate) {
+                // The user may have moved on while this was queued.
+                if (_index.value != current || _queue.value !== tracks) return@launch
+                val at = _positionMs.value
+                android.util.Log.i("AmpNet", "Wi-Fi gone — current track moves to its file at $at")
+                val wanted = p.playWhenReady
+                rebuildQueueAt(p, tracks, current, at)
+                if (wanted) {
+                    starting(current)
+                    p.play()
+                } else {
+                    p.pause()
+                }
+            }
+            return
+        }
         // ExoPlayer's looper is Main and it enforces that — see restoreState.
         scope.launch(Dispatchers.Main.immediate) {
             if (current > 0) {
