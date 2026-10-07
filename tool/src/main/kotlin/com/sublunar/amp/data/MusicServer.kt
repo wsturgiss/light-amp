@@ -259,7 +259,16 @@ interface MusicServer {
     suspend fun createPlaylist(name: String, songIds: List<String> = emptyList()): String? = null
     suspend fun renamePlaylist(id: String, name: String) = Unit
     suspend fun deletePlaylist(id: String) = Unit
-    suspend fun addToPlaylist(id: String, songId: String) = Unit
+    /**
+     * Append one song. Whether the server took it — see [removeFromPlaylistAt]
+     * for why the answer has to be the server's own rather than the absence of
+     * a throw, and false rather than true by default.
+     *
+     * The caller records the addition against its stored copy of the playlist's
+     * contents, so a refusal that read as success would leave a song listed
+     * there that the server has never held.
+     */
+    suspend fun addToPlaylist(id: String, songId: String): Boolean = false
     /**
      * Remove the entries [at] these positions — in the playlist as the server
      * holds it, all of them read against the list as it stands before any is

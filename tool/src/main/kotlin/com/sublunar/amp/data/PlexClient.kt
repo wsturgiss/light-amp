@@ -792,9 +792,9 @@ class PlexClient(
         send("DELETE", "/playlists/$id")
     }
 
-    override suspend fun addToPlaylist(id: String, songId: String) {
-        send("PUT", "/playlists/$id/items", listOf("uri" to itemUri(songId)))
-    }
+    /** [sendChecked], not [send]: an addition the caller records has to be one the server took. */
+    override suspend fun addToPlaylist(id: String, songId: String): Boolean =
+        sendChecked("/playlists/$id/items", listOf("uri" to itemUri(songId)), method = "PUT")
 
     /**
      * Plex removes a playlist entry by its own id, not the song's — the same

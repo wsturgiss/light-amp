@@ -554,9 +554,8 @@ class JellyfinClient(
         send("DELETE", "/Items/$id")
     }
 
-    override suspend fun addToPlaylist(id: String, songId: String) {
+    override suspend fun addToPlaylist(id: String, songId: String): Boolean =
         send("POST", "/Playlists/$id/Items", listOf("ids" to songId, "userId" to userId))
-    }
 
     /**
      * Jellyfin removes a playlist entry by the entry's own id, not the song's —

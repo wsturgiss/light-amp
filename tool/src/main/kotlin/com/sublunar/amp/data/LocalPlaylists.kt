@@ -108,12 +108,12 @@ object LocalPlaylists {
         if (file.isFile && !file.delete()) Log.w(TAG, "couldn't delete ${file.name}")
     }
 
-    suspend fun add(id: String, trackId: String) = withContext(Dispatchers.IO) {
-        val file = fileOf(id) ?: return@withContext
+    /** Whether the edit reached the file — see [removeAt]. */
+    suspend fun add(id: String, trackId: String): Boolean = withContext(Dispatchers.IO) {
+        val file = fileOf(id) ?: return@withContext false
         // Appending duplicates is allowed on purpose: a playlist is an ordered
         // list, and the same song twice is a decision someone might mean.
         writeIds(file, readIds(file) + trackId)
-        Unit
     }
 
     /** Whether the edit reached the file — callers take it back off the screen if it didn't. */

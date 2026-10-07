@@ -456,8 +456,10 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
         request("deletePlaylist", listOf("id" to id))
     }
 
-    override suspend fun addToPlaylist(id: String, songId: String) {
+    /** A refusal throws out of [request]; the caller reads that as false. */
+    override suspend fun addToPlaylist(id: String, songId: String): Boolean {
         request("updatePlaylist", listOf("playlistId" to id, "songIdToAdd" to songId))
+        return true
     }
 
     /**

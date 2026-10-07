@@ -1008,14 +1008,45 @@ class LibraryRepository(
      * Append one track. Sequential by contract: the server's update appends, so
      * concurrent calls would race the order. [playlistMutex] is what makes that
      * contract hold across calls, not just within a single caller's loop.
+     *
+     * Whether it landed — see [removeFromPlaylistAt]. Nothing shows this yet;
+     * it is here because stored membership must not record a song the server
+     * refused.
      */
-    suspend fun addToPlaylist(id: String, trackId: String) = playlistWrite {
+    suspend fun addToPlaylist(id: String, trackId: String): Boolean = playlistWrite {
         if (playlistsAreLocal()) {
             LocalPlaylists.add(id, trackId)
         } else {
-            runCatching { serverClient.value?.addToPlaylist(id, trackId) }
+            // See removeFromPlaylistAt: the client's own answer, not merely
+            // "it didn't throw" — Jellyfin and Plex both swallow their
+            // transport errors, so an unchecked call reads as success for a
+            // write the server never took.
+            runCatching { serverClient.value?.addToPlaylist(id, trackId) ?: false }
+                .onFailure { android.util.Log.w("AmpSync", "addToPlaylist($id) failed: ${it.message}", it) }
+                .getOrDefault(false)
+        }.also { ok ->
+            if (ok) {
+                editMembership(id) { it + trackId }
+                return@also
+            }
+            // Marked rather than written, and marked rather than dropped.
+            //
+            // Writing it would be the old bug made permanent: the optimistic
+            // copy is filed under the pre-edit stamp and relies on the server's
+            // own stamp moving to contradict it, which is exactly what doesn't
+            // happen when the server never took the edit. The phantom song
+            // would then sit in the table until the age backstop, telling the
+            // badge the playlist has a track it doesn't.
+            //
+            // Dropping would be too much. A refusal usually means the stored
+            // copy is still right — the song never went on — so throwing it
+            // away costs a 1.3 MB refetch, and offline leaves the playlist
+            // opening empty over an edit that never happened. But "usually"
+            // isn't "always": the write can land and the answer be lost coming
+            // back, leaving us a copy that is short a song. Marking covers both
+            // — what we hold keeps serving, and the next prime re-reads it.
+            markMembershipStale(id)
         }
-        editMembership(id) { it + trackId }
     }
 
     /**
