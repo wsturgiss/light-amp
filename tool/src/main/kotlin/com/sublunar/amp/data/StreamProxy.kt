@@ -4,29 +4,23 @@ import java.io.ByteArrayOutputStream
 import java.io.IOException
 import java.io.InputStream
 import java.io.OutputStream
+import java.net.HttpURLConnection
 import java.net.InetAddress
 import java.net.ServerSocket
 import java.net.Socket
 import java.net.URL
-import java.security.KeyStore
 import java.security.SecureRandom
-import java.security.cert.X509Certificate
 import java.util.concurrent.ArrayBlockingQueue
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
-import javax.net.ssl.HttpsURLConnection
-import javax.net.ssl.KeyManagerFactory
-import javax.net.ssl.SSLContext
-import javax.net.ssl.SSLEngine
-import javax.net.ssl.TrustManagerFactory
-import javax.net.ssl.X509ExtendedTrustManager
-import javax.net.ssl.X509TrustManager
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.Call
 import okhttp3.OkHttpClient
 import okhttp3.Request
@@ -41,7 +35,7 @@ import okhttp3.Response
  * on whatever network the phone is then using, and after the user backs out of
  * the tool it goes on playing its queue with no tool code left to stop it. The
  * SDK gives a tool no say in any of that (see tool/docs/SDK-GAPS.md). So the
- * player is handed addresses on this phone instead — `https://127.0.0.1:port/…`
+ * player is handed addresses on this phone instead — `http://127.0.0.1:port/…`
  * — and what answers there is this class, which fetches the real bytes through
  * the gated client like everything else in the app. The rule is asked when
  * each request arrives and all the while it is served, under the rules in
@@ -49,12 +43,10 @@ import okhttp3.Response
  * network or a data mode changed. It lives in the app's process scope, not the
  * activity's, so it is still standing when the screens are gone.
  *
- * **Why TLS.** A store build gets only the manifest Light's plugin generates,
- * and that permits no cleartext HTTP — not even to this phone. So the door
- * speaks TLS, with an identity made at launch ([LoopbackCert]) and trusted by
- * exactly one addition to the process's default trust for `HttpsURLConnection`
- * (which is what the player uses, and OkHttp does not): every other
- * certificate is judged by the platform's own trust manager, untouched.
+ * **Plain HTTP.** The door never leaves this phone, and the SDK's
+ * `cleartext-http` capability, which Amp declares, lets every build speak plain
+ * HTTP to it. (Until SDK 0.2.0 a store build could not, so the door spoke TLS
+ * with a certificate made at launch.)
  *
  * **Fail-safe.** None of this is assumed to work. At start the proxy fetches
  * from itself the way the player will; only if that succeeds does [wrap] hand
@@ -98,22 +90,31 @@ class StreamProxy(
      * for a broken link and picked its stream up again, which killed the new
      * one, whose feeder did the same — two streams of one song trading resets
      * for twenty seconds after every seek.
+     *
+     * [prepare] is asked, and waited for within a limit, each time the player
+     * asks for the stream and before the server is: what the server needs
+     * settled first, at the moment the fetch really happens. The player
+     * fetches ahead and on its own — the next song while this one plays, a
+     * retry — so nothing in front of it can know when that is. Not for the
+     * door's own pickups after a break, which continue a request already
+     * settled. A [url] handed back unwrapped has nobody to ask it, so the
+     * caller should only count on it when [isOn].
      */
-    fun wrap(url: String, group: String? = null): String {
+    fun wrap(url: String, group: String? = null, prepare: (suspend () -> Unit)? = null): String {
         if (url.isEmpty()) return url
         val on = _state.value as? State.On ?: return url
-        return "https://$HOST:${on.port}$STREAM_PATH${tokens.tokenFor(url, group)}"
+        return "http://$HOST:${on.port}$STREAM_PATH${tokens.tokenFor(url, group, prepare)}"
     }
+
+    /** Whether [wrap] is handing out this door's addresses, rather than the server's own. */
+    val isOn: Boolean get() = _state.value is State.On
 
     /** Bring the door up and prove it, off the calling thread. Idempotent. */
     fun start(scope: CoroutineScope) {
         if (server != null) return
         scope.launch(Dispatchers.IO) {
             try {
-                val identity = LoopbackCert.create()
-                trustForThisProcess(identity.certificate)
-                val socket = serverContext(identity).serverSocketFactory
-                    .createServerSocket(0, BACKLOG, InetAddress.getByName(HOST))
+                val socket = ServerSocket(0, BACKLOG, InetAddress.getByName(HOST))
                 server = socket
                 scope.launch(Dispatchers.IO) { acceptLoop(scope, socket) }
                 selfTest(socket.localPort)
@@ -134,82 +135,9 @@ class StreamProxy(
         _state.value = State.Off("stopped")
     }
 
-    // --- TLS -----------------------------------------------------------------
-
-    private fun serverContext(identity: LoopbackCert): SSLContext {
-        val password = CharArray(0)
-        val keys = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
-            load(null, null)
-            setKeyEntry("amp", identity.keyPair.private, password, arrayOf(identity.certificate))
-        }
-        val managers = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm())
-            .apply { init(keys, password) }
-        return SSLContext.getInstance("TLS").apply { init(managers.keyManagers, null, SecureRandom()) }
-    }
-
-    /**
-     * Add [ours] to what `HttpsURLConnection` trusts in this process — and
-     * nothing else. Every other chain goes to the platform's own trust
-     * manager, the one that enforces the network security config, exactly as
-     * before; this only answers first for the one certificate made a moment
-     * ago in this process. The hostname check is left entirely alone: the
-     * certificate names 127.0.0.1, so the standard verifier passes it there
-     * and nowhere else.
-     */
-    private fun trustForThisProcess(ours: X509Certificate) {
-        val platform = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm())
-            .apply { init(null as KeyStore?) }
-            .trustManagers.filterIsInstance<X509TrustManager>().first()
-        val context = SSLContext.getInstance("TLS")
-        context.init(null, arrayOf(PlusOne(platform, ours)), SecureRandom())
-        HttpsURLConnection.setDefaultSSLSocketFactory(context.socketFactory)
-    }
-
-    private class PlusOne(
-        private val platform: X509TrustManager,
-        private val ours: X509Certificate,
-    ) : X509ExtendedTrustManager() {
-        private val extended = platform as? X509ExtendedTrustManager
-        private val oursEncoded = ours.encoded
-
-        private fun isOurs(chain: Array<out X509Certificate>?): Boolean =
-            chain != null && chain.size == 1 && chain[0].encoded.contentEquals(oursEncoded)
-
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
-            if (!isOurs(chain)) platform.checkServerTrusted(chain, authType)
-        }
-
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: Socket?) {
-            if (isOurs(chain)) return
-            if (extended != null) extended.checkServerTrusted(chain, authType, socket)
-            else platform.checkServerTrusted(chain, authType)
-        }
-
-        override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: SSLEngine?) {
-            if (isOurs(chain)) return
-            if (extended != null) extended.checkServerTrusted(chain, authType, engine)
-            else platform.checkServerTrusted(chain, authType)
-        }
-
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) =
-            platform.checkClientTrusted(chain, authType)
-
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, socket: Socket?) {
-            if (extended != null) extended.checkClientTrusted(chain, authType, socket)
-            else platform.checkClientTrusted(chain, authType)
-        }
-
-        override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?, engine: SSLEngine?) {
-            if (extended != null) extended.checkClientTrusted(chain, authType, engine)
-            else platform.checkClientTrusted(chain, authType)
-        }
-
-        override fun getAcceptedIssuers(): Array<X509Certificate> = platform.acceptedIssuers
-    }
-
     /** Fetch from ourselves the way the player will. Throws unless the answer is exactly right. */
     private fun selfTest(port: Int) {
-        val connection = URL("https://$HOST:$port$SELF_TEST_PATH").openConnection() as HttpsURLConnection
+        val connection = URL("http://$HOST:$port$SELF_TEST_PATH").openConnection() as HttpURLConnection
         connection.connectTimeout = SELF_TEST_TIMEOUT_MS
         connection.readTimeout = SELF_TEST_TIMEOUT_MS
         try {
@@ -245,7 +173,7 @@ class StreamProxy(
                     client.soTimeout = CLIENT_READ_TIMEOUT_MS
                     serve(client)
                 } catch (_: Exception) {
-                    // A player that hung up, a handshake that failed: nothing
+                    // A player that hung up, a request cut short: nothing
                     // to tell anyone. The socket is closed below either way.
                 } finally {
                     runCatching { client.close() }
@@ -270,7 +198,7 @@ class StreamProxy(
             ?: return respond(output, 404, "Not Found")
         val range = lines.drop(1).firstOrNull { it.startsWith("Range:", ignoreCase = true) }
             ?.substringAfter(':')?.trim()
-        stream(target.url, target.group, range, headOnly = method == "HEAD", output)
+        stream(target, range, headOnly = method == "HEAD", output)
     }
 
     /**
@@ -294,7 +222,9 @@ class StreamProxy(
      * shown a broken connection it would wait for its buffer to run dry and
      * then start the song again from the top.
      */
-    private fun stream(url: String, group: String?, range: String?, headOnly: Boolean, output: OutputStream) {
+    private fun stream(target: Target, range: String?, headOnly: Boolean, output: OutputStream) {
+        val url = target.url
+        val group = target.group
         if (!gateOpen()) return respond(output, GATE_STATUS, "Waiting")
         // Before anything is asked of the server: whatever was still feeding
         // this track is finished. Its upstream is closed *first*, so the
@@ -305,8 +235,24 @@ class StreamProxy(
                 it.cancel()
             }
         }
+        // Then whatever the server wants settled for this stream — see wrap.
+        // Bounded, and the stream is asked for whatever the answer: a server
+        // that won't settle may still serve, and silence is the worse failure.
+        if (!headOnly) {
+            target.prepare?.let { prepare ->
+                runCatching { runBlocking { withTimeoutOrNull(PREPARE_TIMEOUT_MS) { prepare() } } }
+            }
+        }
         val firstCall = request(url, range)
-        val first: Response = firstCall.execute() // an IOException here drops the connection — see above
+        val first: Response = try {
+            firstCall.execute()
+        } catch (e: IOException) {
+            // Dropping the connection is the answer — see above — but the
+            // player only ever learns "network error", so the cause is said here.
+            log("upstream unreachable for ${firstCall.request().url.encodedPath}: $e")
+            throw e
+        }
+        if (!first.isSuccessful) log("upstream ${first.code} for ${first.request.url.encodedPath}")
         // The player only ever asks for the body; a HEAD, or a server's "no",
         // gets the status and headers and nothing else — and the upstream
         // body, which was opened all the same, is let go at once.
@@ -679,8 +625,8 @@ class StreamProxy(
     private fun rangeStart(contentRange: String): Long? =
         contentRange.substringAfter("bytes ", "").substringBefore('-').trim().toLongOrNull()
 
-    /** Where a token leads, and what it is a stream of. */
-    private class Target(val url: String, val group: String?)
+    /** Where a token leads, what it is a stream of, and what to settle before fetching it — see [wrap]. */
+    private class Target(val url: String, val group: String?, val prepare: (suspend () -> Unit)?)
 
     /** Unguessable names for upstream URLs, stable per URL so an unchanged queue stays unchanged. */
     private class TokenTable {
@@ -695,9 +641,9 @@ class StreamProxy(
         private val random = SecureRandom()
 
         @Synchronized
-        fun tokenFor(url: String, group: String?): String = byUrl.getOrPut(url) {
+        fun tokenFor(url: String, group: String?, prepare: (suspend () -> Unit)?): String = byUrl.getOrPut(url) {
             ByteArray(16).also(random::nextBytes).joinToString("") { "%02x".format(it) }
-                .also { byToken[it] = Target(url, group) }
+                .also { byToken[it] = Target(url, group, prepare) }
         }
 
         @Synchronized
@@ -727,6 +673,8 @@ class StreamProxy(
         const val READ_AHEAD_METERED_BYTES = 512 * 1024
         private const val POLL_MS = 200L
         private const val FEEDER_JOIN_MS = 2_000L
+        /** The longest a stream waits on what [wrap]'s prepare settles — the same as a press of play waits. */
+        private const val PREPARE_TIMEOUT_MS = 2_000L
         private val END = ByteArray(0)
         private val PASSED_ON = listOf("Content-Type", "Content-Range", "Accept-Ranges")
         private val CRLF = "\r\n".toByteArray(Charsets.ISO_8859_1)

@@ -102,6 +102,7 @@ class DownloadStore(private val filesDir: File) {
      */
     suspend fun download(sourceId: String, url: String, trackId: String, format: StreamFormat): File? =
         withContext(Dispatchers.IO) {
+            lastStatus = null
             val target = fileFor(sourceId, trackId, format)
             val partial = File(target.parentFile, "${target.name}$PART_SUFFIX")
             try {
@@ -122,6 +123,9 @@ class DownloadStore(private val filesDir: File) {
                 try {
                     call.execute().use { response ->
                         if (!response.isSuccessful) {
+                            // The path only: the query can carry the token.
+                            Log.w(TAG, "download $trackId: HTTP ${response.code} for ${response.request.url.encodedPath}")
+                            lastStatus = response.code
                             lastError = "Server said ${response.code}"
                             return@withContext null
                         }
@@ -130,7 +134,8 @@ class DownloadStore(private val filesDir: File) {
                         // song" from then on: a file that never plays and is never
                         // fetched again.
                         val type = response.body.contentType()
-                        if (type != null && (type.type == "text" || type.subtype in NOT_AUDIO_SUBTYPES)) {
+                        if (type != null && (type.type == "text" || isDocumentSubtype(type.subtype))) {
+                            Log.w(TAG, "download $trackId: $type, not audio, from ${response.request.url.encodedPath}")
                             lastError = "Server sent $type instead of audio"
                             return@withContext null
                         }
@@ -176,6 +181,11 @@ class DownloadStore(private val filesDir: File) {
     /** Reason the most recent download failed, for surfacing in the UI. */
     @Volatile
     var lastError: String? = null
+        private set
+
+    /** The HTTP status the last download was refused with; null when it wasn't one. */
+    @Volatile
+    var lastStatus: Int? = null
         private set
 
     suspend fun delete(sourceId: String, fileName: String) = withContext(Dispatchers.IO) {
@@ -310,7 +320,6 @@ class DownloadStore(private val filesDir: File) {
         private const val READ_TIMEOUT_MS = 30_000
         private const val PART_SUFFIX = ".part"
         /** Content types that are an answer *about* a track, never the track. */
-        private val NOT_AUDIO_SUBTYPES = setOf("json", "xml", "html")
         // 64 GB is reachable on the LP3's 128 GB of storage only if we're willing
         // to claim more than half of what's free, so the share goes up with the
         // ceiling; a quarter of free space still stays behind for the OS and the
@@ -358,3 +367,13 @@ fun formatBytes(bytes: Long): String {
     val mb = bytes / 1024.0 / 1024.0
     return "${mb.toInt()} MB"
 }
+
+/**
+ * Whether an answer of this `application/` subtype is a document rather than a
+ * song — and a playlist of segments is one too: an HLS (`vnd.apple.mpegurl`) or
+ * DASH (`dash+xml`) answer saved under the track's name is a few lines of text
+ * that will never play.
+ */
+internal fun isDocumentSubtype(subtype: String): Boolean =
+    subtype in setOf("json", "xml", "html", "javascript") ||
+        subtype.endsWith("+xml") || subtype.endsWith("+json") || "mpegurl" in subtype

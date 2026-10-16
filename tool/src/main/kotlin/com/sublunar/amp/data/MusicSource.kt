@@ -110,6 +110,18 @@ data class MusicSource(
     /** Plex's server id, needed to build the URIs that fill a playlist. */
     val machineIdentifier: String = "",
     /**
+     * The device a sign-in was made as, and its [token] belongs to: Jellyfin's
+     * DeviceId, Plex's `X-Plex-Client-Identifier`.
+     *
+     * One per sign-in, because Jellyfin keeps one sign-in per device and user
+     * and ends the old one when the same device signs in again, and because
+     * Plex ties a token to the device it was issued to and shows each device
+     * as one player. Blank on sources signed in before this existed, which go
+     * on as [JellyfinClient.LEGACY_DEVICE_ID] or [PlexClient.LEGACY_CLIENT_ID]
+     * — the id their tokens were issued to.
+     */
+    val deviceId: String = "",
+    /**
      * Which build's track parsing this source's cache was filled by.
      *
      * A sync only refetches an album whose song count changed, so a fix to how a
@@ -133,12 +145,17 @@ data class MusicSource(
      */
     val libraries: List<SourceLibrary> = emptyList(),
     /**
-     * Libraries kept off the Sources page, by id — `null` being the "All
-     * Libraries" row rather than any one of them.
+     * Libraries the user hid, by id. Hidden everywhere: off the Sources page,
+     * out of All Libraries and every list and search, and not fetched by a
+     * sync; their cached rows stay, so showing one again is instant.
      *
      * Stored as what to *hide* rather than what to show, so a library the server
      * gains later turns up on its own instead of staying invisible until someone
      * thinks to go and tick it.
+     *
+     * Nullable only for what older builds stored: `null` was the All Libraries
+     * row, which could once be hidden too and is now never a choice — see
+     * [showsAllLibraries]. Anything reading this skips it.
      */
     val hiddenLibraryIds: List<String?> = emptyList(),
     /**
@@ -199,9 +216,13 @@ data class MusicSource(
      */
     val downloadFormat: StreamFormat get() = supported(downloadFormatId)
 
-    /** Whether this server can serve [downloadFormat] — false only for an Original it has no call for. */
+    /**
+     * Whether this server can serve [downloadFormat] — false for an Original
+     * it has no call for, and for anything at all on an account it won't let
+     * keep copies ([downloadsRefused]).
+     */
     val downloadFormatAvailable: Boolean get() =
-        downloadFormats.isEmpty() || downloadFormat in downloadFormats
+        !downloadsRefused && (downloadFormats.isEmpty() || downloadFormat in downloadFormats)
 
     val offlineMode: OfflineMode
         get() = offlineModeName?.let { name ->
@@ -212,8 +233,37 @@ data class MusicSource(
     val visibleLibraries: List<SourceLibrary>
         get() = libraries.filterNot { it.id in hiddenLibraryIds }
 
-    /** Whether the whole-server row is offered alongside the individual ones. */
-    val showsAllLibraries: Boolean get() = null !in hiddenLibraryIds
+    /**
+     * This source with [libraryId] shown or hidden.
+     *
+     * Refuses to hide the last library: the rows under a source are the only
+     * way to switch to it. Hiding the library being browsed moves the browsing
+     * to All Libraries, rather than leaving it on a library that no longer
+     * shows — and so does hiding down to one, where All Libraries *is* that one
+     * and the single row left under the source is the one to tick. Older
+     * builds could hide the All Libraries row too, as a null; that is no
+     * longer a choice, so it goes on the next change.
+     */
+    fun withLibraryShown(libraryId: String, shown: Boolean): MusicSource {
+        val hidden = hiddenLibraryIds.filterNotNull().toMutableList()
+        if (shown) return copy(hiddenLibraryIds = hidden - libraryId)
+        if (libraryId in hidden) return copy(hiddenLibraryIds = hidden)
+        val visible = libraries.count { it.id !in hidden }
+        if (visible <= 1) return this
+        val left = visible - 1
+        return copy(
+            hiddenLibraryIds = hidden + libraryId,
+            libraryId = if (left <= 1 || this.libraryId == libraryId) null else this.libraryId,
+        )
+    }
+
+    /**
+     * Whether the All Libraries row is offered: whenever two or more libraries
+     * are shown, and never as a setting. With one it would be a second row for
+     * the same music, and as a tick box beside the real libraries it read as one
+     * more of them — tick it, untick the rest, and expect it to hold something.
+     */
+    val showsAllLibraries: Boolean get() = visibleLibraries.size >= 2
 
 
     private fun supported(id: String?): StreamFormat {
@@ -232,15 +282,24 @@ data class MusicSource(
             if (baseUrl.isBlank() || token.isBlank()) {
                 null
             } else {
-                PlexClient(baseUrl, token, machineIdentifier, playerName.ifBlank { null })
+                PlexClient(baseUrl, token, machineIdentifier, playerName.ifBlank { null }, plexClientIdentifier)
             }
         SourceKind.JELLYFIN ->
             if (baseUrl.isBlank() || token.isBlank() || userId.isBlank()) {
                 null
             } else {
-                JellyfinClient(baseUrl, token, userId, playerName.ifBlank { null })
+                JellyfinClient(
+                    baseUrl,
+                    token,
+                    userId,
+                    playerName.ifBlank { null },
+                    deviceId.ifBlank { JellyfinClient.LEGACY_DEVICE_ID },
+                )
             }
     }
+
+    /** Who a Plex link says it is — see [deviceId]. */
+    val plexClientIdentifier: String get() = deviceId.ifBlank { PlexClient.LEGACY_CLIENT_ID }
 
     /** Null unless this is a Subsonic server with somewhere to point. */
     fun toConfig(): SubsonicConfig? =
@@ -293,8 +352,25 @@ data class MusicSource(
     val supportsEmptyPlaylists: Boolean get() = kind != SourceKind.PLEX
 
 
-    /** Downloading only means something when the audio is somewhere else. */
+    /**
+     * Downloading only means something when the audio is somewhere else.
+     *
+     * Whether this source *has* downloads, which it may still have where new
+     * ones aren't allowed — see [mayDownload].
+     */
     val supportsDownloads: Boolean get() = kind != SourceKind.LOCAL
+
+    /**
+     * Whether the server won't let this account keep copies — see
+     * ServerFeatures.KEEP_COPIES. Respected rather than routed round: Jellyfin
+     * has a call that hands over the file without asking, and using it would
+     * be overruling the person who runs the server. What is already on the
+     * phone stays, and plays.
+     */
+    val downloadsRefused: Boolean get() = !implements(ServerFeatures.KEEP_COPIES)
+
+    /** Whether a new download may be started here — the Download rows show only where it may. */
+    val mayDownload: Boolean get() = supportsDownloads && !downloadsRefused
 
     /**
      * Whether a download can keep the original file.

@@ -35,6 +35,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -108,6 +109,11 @@ class LibraryRepository(
     private val yieldToPlayback: suspend () -> Unit = {},
     /** Where likes and ratings go when the server can't be told about them. */
     private val pending: PendingActions,
+    /**
+     * Puts a line in front of the user for a moment — a write the server
+     * refused, after the screen that made it has already gone. See App.tell.
+     */
+    private val tell: (String) -> Unit = {},
     /** For the handful of things cached in preferences rather than in a table. */
     private val settings: AppSettings,
     private val scope: CoroutineScope,
@@ -246,6 +252,18 @@ class LibraryRepository(
         libraryId.stateIn(scope, SharingStarted.Eagerly, null)
 
     /**
+     * The libraries the user hid, which are hidden everywhere: not on the
+     * Sources page, not under All Libraries, not in search, the tabs or a
+     * playlist, and not fetched by a sync. Their rows stay cached, so showing
+     * one again is instant — see MusicSource.hiddenLibraryIds.
+     */
+    private val hiddenLibraries: StateFlow<Set<String>> =
+        settings.activeSource
+            .map { it?.hiddenLibraryIds?.filterNotNull()?.toSet().orEmpty() }
+            .distinctUntilChanged()
+            .stateIn(scope, SharingStarted.Eagerly, emptySet())
+
+    /**
      * The chosen library's albums, filtered out of the cache rather than fetched.
      *
      * Every library the source has stays cached at once, and choosing one is a
@@ -264,9 +282,12 @@ class LibraryRepository(
             .stateIn(scope, SharingStarted.Eagerly, emptyList())
 
     private val allAlbums: StateFlow<List<Album>> =
-        combine(albumRows, selectedLibrary) { rows, library ->
+        combine(albumRows, selectedLibrary, hiddenLibraries) { rows, library, hidden ->
             rows.asSequence()
                 .filter { library == null || it.libraryId == null || it.libraryId == library }
+                // Tracks, artists, search and the liked filters all narrow from
+                // here, so this one line hides a library everywhere they look.
+                .filter { it.libraryId == null || it.libraryId !in hidden }
                 .map { it.toAlbum() }
                 .toList()
         }.stateIn(scope, SharingStarted.Eagerly, emptyList())
@@ -847,12 +868,20 @@ class LibraryRepository(
                 _playlistTrackIds.update { it + (id to ids) }
             }
         }
-        if (!offline.value) return PlaylistView(tracks, whole)
+        // A hidden library's songs leave the page too. Marked incomplete when
+        // any did, which keeps the playlist from being edited here: an edit
+        // writes back the list as shown, and would delete them from the server.
+        val hiddenAlbums = hiddenLibraries.value.takeIf { it.isNotEmpty() }?.let { hidden ->
+            albumRows.value.asSequence().filter { it.libraryId in hidden }.map { it.id }.toSet()
+        }.orEmpty()
+        val shown = if (hiddenAlbums.isEmpty()) tracks else tracks.filterNot { it.albumId in hiddenAlbums }
+        val wholeShown = whole && shown.size == tracks.size
+        if (!offline.value) return PlaylistView(shown, wholeShown)
         // A song from the phone's own folder needs no server, so it stays whatever
         // the connection is.
         val downloaded = downloadedTrackIds.value
-        val playable = tracks.filter { it.id in downloaded || LocalLibrary.isLocal(it.id) }
-        return PlaylistView(playable, whole && playable.size == tracks.size)
+        val playable = shown.filter { it.id in downloaded || LocalLibrary.isLocal(it.id) }
+        return PlaylistView(playable, wholeShown && playable.size == shown.size)
     }
 
     /** The songs, and whether they're the playlist entire rather than what could be recovered. */
@@ -988,38 +1017,44 @@ class LibraryRepository(
             }
         }.stateIn(scope, SharingStarted.Eagerly, emptySet())
 
-    suspend fun createPlaylist(name: String) = createPlaylist(name, emptyList())
+    suspend fun createPlaylist(name: String): WriteResult = createPlaylist(name, emptyList())
 
     /**
      * [trackIds] are the playlist's opening contents, not a hint — see
      * [MusicServer.createPlaylist]. Callers must not add them again.
+     *
+     * This and the edits after it say when they didn't land — see [said] —
+     * and answer how it went, for a caller with more to do after.
      */
-    suspend fun createPlaylist(name: String, trackIds: List<String>) = playlistMutex.withLock {
-        if (playlistsAreLocal()) {
-            LocalPlaylists.create(name.trim(), trackIds)
+    suspend fun createPlaylist(name: String, trackIds: List<String>): WriteResult = playlistMutex.withLock {
+        val result = if (playlistsAreLocal()) {
+            fileWrite(LocalPlaylists.create(name.trim(), trackIds) != null)
         } else {
-            runCatching { serverClient.value?.createPlaylist(name.trim(), trackIds) }
+            serverWrite { it.createPlaylist(name.trim(), trackIds) }
         }
         refreshPlaylists()
+        said("createPlaylist", result)
     }
 
-    suspend fun renamePlaylist(id: String, name: String) = playlistWrite {
-        if (playlistsAreLocal()) {
-            LocalPlaylists.rename(id, name.trim())
+    suspend fun renamePlaylist(id: String, name: String): WriteResult = playlistWrite {
+        val result = if (playlistsAreLocal()) {
+            fileWrite(LocalPlaylists.rename(id, name.trim()))
         } else {
-            runCatching { serverClient.value?.renamePlaylist(id, name.trim()) }
+            serverWrite { it.renamePlaylist(id, name.trim()) }
         }
         refreshPlaylists()
+        said("renamePlaylist($id)", result)
     }
 
-    suspend fun deletePlaylist(id: String) = playlistWrite {
-        if (playlistsAreLocal()) {
-            LocalPlaylists.delete(id)
+    suspend fun deletePlaylist(id: String): WriteResult = playlistWrite {
+        val result = if (playlistsAreLocal()) {
+            fileWrite(LocalPlaylists.delete(id))
         } else {
-            runCatching { serverClient.value?.deletePlaylist(id) }
+            serverWrite { it.deletePlaylist(id) }
         }
         dropMembership(id)
         refreshPlaylists()
+        said("deletePlaylist($id)", result)
     }
 
     /**
@@ -1027,13 +1062,38 @@ class LibraryRepository(
      * concurrent calls would race the order. [playlistMutex] is what makes that
      * contract hold across calls, not just within a single caller's loop.
      */
-    suspend fun addToPlaylist(id: String, trackId: String) = playlistWrite {
-        if (playlistsAreLocal()) {
-            LocalPlaylists.add(id, trackId)
+    suspend fun addToPlaylist(id: String, trackId: String): WriteResult = playlistWrite {
+        val result = if (playlistsAreLocal()) {
+            fileWrite(LocalPlaylists.add(id, trackId))
         } else {
-            runCatching { serverClient.value?.addToPlaylist(id, trackId) }
+            serverWrite { it.addToPlaylist(id, trackId) }
         }
-        editMembership(id) { it + trackId }
+        if (result == WriteResult.Saved) editMembership(id) { it + trackId } else dropMembership(id)
+        said("addToPlaylist($id)", result)
+    }
+
+    /** No client at all is a server that can't be reached, not one that said no. */
+    private suspend fun serverWrite(block: suspend (MusicServer) -> Unit): WriteResult =
+        serverClient.value?.let { client -> attemptWrite { block(client) } } ?: WriteResult.Unreachable(UNREACHABLE)
+
+    /** The phone's own playlists are files, and a file that wouldn't change is the only way one fails. */
+    private fun fileWrite(done: Boolean): WriteResult =
+        if (done) WriteResult.Saved else WriteResult.Refused("Couldn't change the playlist file")
+
+    /**
+     * A playlist write that didn't land is said, and that is all: none of
+     * these show their change before the server has it, so there is nothing on
+     * screen to take back.
+     */
+    private fun said(what: String, result: WriteResult): WriteResult {
+        val reason = when (result) {
+            WriteResult.Saved -> return result
+            is WriteResult.Unreachable -> result.reason
+            is WriteResult.Refused -> result.reason
+        }
+        android.util.Log.w("AmpSync", "$what → $result")
+        tell("Couldn't save\n$reason")
+        return result
     }
 
     /**
@@ -1128,6 +1188,22 @@ class LibraryRepository(
     }
 
     /**
+     * Start the sync state over for the source just switched to, from the time
+     * it last finished a sync.
+     *
+     * There is one state for the whole app, and it used to carry straight
+     * across a switch: the source just added read "last synced 2 minutes ago"
+     * — the previous one's time — and, worse, its first sync was turned away by
+     * the floor in [syncInBackground], which asked that same clock, so a new
+     * server sat empty until minutes later something asked again. The last
+     * one's error and its refusal to scan were inherited the same way.
+     */
+    fun adoptSource(lastSyncedMs: Long) {
+        scanRefused = false
+        _syncState.value = SyncState(lastSyncedMs = lastSyncedMs)
+    }
+
+    /**
      * Put back a `syncing` claim that [runSync] turned out to have no work for.
      *
      * Only clears the flag: an error already set here by an earlier run is
@@ -1180,7 +1256,7 @@ class LibraryRepository(
             // 52x are Cloudflare's: it answered, the server behind it didn't.
             code in 520..529 -> "Your server isn't responding ($code)"
             code in 500..599 -> "The server had an error ($code)"
-            code == 401 || code == 403 -> "The server refused the login"
+            code == 401 || code == 403 -> "The server refused the login. Sign in again in Sources."
             code == 404 -> "That library isn't on the server any more"
             else -> "The server said $code"
         }
@@ -1202,7 +1278,7 @@ class LibraryRepository(
         val source = settings.activeSource.first() ?: return false
         if (source.kind != SourceKind.PLEX || source.connections.isEmpty()) return false
         val ordered = (source.connections - source.baseUrl) + source.baseUrl
-        val found = PlexAccount.firstReachable(ordered, source.token) ?: return false
+        val found = PlexAccount.firstReachable(ordered, source.token, source.plexClientIdentifier) ?: return false
         if (found == source.baseUrl) return false
         android.util.Log.i("AmpSync", "plex moved: ${source.baseUrl} -> $found")
         settings.saveSource(source.copy(baseUrl = found))
@@ -1295,13 +1371,23 @@ class LibraryRepository(
             // "All libraries" has to be fanned out per folder and merged: an
             // unscoped getAlbumList2 returns only the server's default library,
             // so asking once would silently hide every other library.
+            //
+            // A hidden library is left out: hidden means not wanted on this
+            // phone, which includes the minutes and the data a big one costs.
+            val hidden = source?.hiddenLibraryIds?.filterNotNull()?.toSet().orEmpty()
             val folderIds: List<String?> = if (musicFolderId != null) {
                 listOf(musicFolderId)
             } else {
-                client.getMusicFolders().map { it.id }.ifEmpty { listOf(null) }
+                client.getMusicFolders().map { it.id }.filterNot { it in hidden }.ifEmpty { listOf(null) }
             }
 
-            val starred = folderIds.map { client.getStarred(it) }.mergeStarred()
+            // Null when the server didn't answer: likes then stay as they are,
+            // rather than being reconciled against an empty answer — which
+            // unliked everything — or failing the whole sync over them.
+            val starred = runCatching { folderIds.map { client.getStarred(it) }.mergeStarred() }
+                .onFailure { android.util.Log.w("AmpSync", "favourites unread, likes kept: $it") }
+                .getOrNull()
+            val cached = dao.allAlbumsSnapshot().associateBy { it.id }
 
             _syncState.value = _syncState.value.copy(phase = "Fetching albums")
             // Which folder each album came from is kept, not merged away: it is
@@ -1320,12 +1406,11 @@ class LibraryRepository(
                 }
                 .distinctBy { (album, _) -> album.id }
             val serverAlbums = fetched.map { (album, _) ->
-                album.copy(liked = album.id in starred.albumIds)
+                album.copy(liked = starred?.let { album.id in it.albumIds } ?: cached[album.id]?.liked ?: album.liked)
             }
             val libraryOf = fetched.associate { (album, folder) -> album.id to folder }
             val serverAlbumById = serverAlbums.associateBy { it.id }
 
-            val cached = dao.allAlbumsSnapshot().associateBy { it.id }
             android.util.Log.i(
                 "AmpSync",
                 "scope=$musicFolderId cached rows by library tag: " +
@@ -1354,8 +1439,11 @@ class LibraryRepository(
                 // rest — which is what made switching library a re-download.
                 // Rows with no library recorded are left alone: they predate
                 // this and no fetch can speak for them.
+                //
+                // Nor a hidden library's rows, which were never asked about:
+                // they are kept, so showing it again needs no fetch to appear.
                 val inScope = if (musicFolderId == null) {
-                    cached
+                    cached.filterValues { it.libraryId == null || it.libraryId !in hidden }
                 } else {
                     cached.filterValues { it.libraryId == musicFolderId }
                 }
@@ -1435,13 +1523,38 @@ class LibraryRepository(
                 if (why != null) reasons[why] = (reasons[why] ?: 0) + 1
                 why != null
             }
+            // And the albums whose songs changed without their count moving —
+            // a re-tag, or tags a server finished reading after this album was
+            // first synced — as far as the server can say. See songChangesSince.
+            val songCheck = source?.let { settings.songCheck(it.id) }
+            // Asked on a refill too, which reads every album anyway: it is
+            // what hands over the first mark, so the next sync needn't.
+            val changes = if (songCheck == null) {
+                null
+            } else {
+                runCatching { client.songChangesSince(songCheck.mark, folderIds) }
+                    .onFailure { android.util.Log.w("AmpSync", "song changes: couldn't ask: $it") }
+                    .getOrNull()
+            }
+            val reread = songCheck?.let {
+                rereadFor(
+                    changes, it, serverAlbums,
+                    whole = musicFolderId == null, bulk = bulkAllowed(), nowMs = System.currentTimeMillis(),
+                )
+            }
+            val already = toFetch.mapTo(HashSet()) { it.id }
+            val more = reread?.albums.orEmpty().filter { already.add(it.id) }
+            if (more.isNotEmpty()) reasons[reread!!.why] = more.size
+            val albumsToFetch = toFetch + more
+
             android.util.Log.i(
                 "AmpSync",
                 if (refillForParser) {
                     "parser refill: fetching songs for all ${serverAlbums.size} albums"
                 } else {
-                    "fetching songs for ${toFetch.size} of ${serverAlbums.size} albums $reasons" +
-                        if (unchanged > 0) "; $unchanged uncounted and untouched, cache kept" else ""
+                    "fetching songs for ${albumsToFetch.size} of ${serverAlbums.size} albums $reasons" +
+                        (if (unchanged > 0) "; $unchanged uncounted and untouched, cache kept" else "") +
+                        "; song changes: ${changes?.let { it::class.simpleName } ?: "not asked"}"
                 },
             )
 
@@ -1449,13 +1562,19 @@ class LibraryRepository(
             // request per album for its songs. Labelled "Songs" it read as a
             // song count, and a library with more songs than albums then looks
             // like it is being cut short.
-            _syncState.value = _syncState.value.copy(phase = "Albums 0/${toFetch.size}")
-            fetchAndStoreSongs(dao, client, toFetch, starred.songIds, libraryOf)
+            _syncState.value = _syncState.value.copy(phase = "Albums 0/${albumsToFetch.size}")
+            val likedSongs = starred?.songIds ?: dao.likedTrackIds().toHashSet()
+            val unread = fetchAndStoreSongs(dao, client, albumsToFetch, likedSongs, libraryOf)
+            // Settled only once every album it covers is read: one that failed
+            // keeps the old mark, so it is asked about again next time.
+            if (source != null && reread != null && unread == 0 && reread.next != songCheck) {
+                settings.setSongCheck(source.id, reread.next)
+            }
 
             // Reconcile track likes across the whole library (cheap two-query pass).
-            dao.replaceTrackLikes(starred.songIds.toList())
+            if (starred != null) dao.replaceTrackLikes(starred.songIds.toList())
 
-            dao.replaceLikedArtists(starred.artistNames.map { LikedArtistEntity(it) })
+            if (starred != null) dao.replaceLikedArtists(starred.artistNames.map { LikedArtistEntity(it) })
 
             // Only now: a run that threw part-way leaves the old number in place
             // so the refill is attempted again rather than being marked done.
@@ -1477,7 +1596,9 @@ class LibraryRepository(
                 syncing = false,
                 lastSyncedMs = finishedAt,
             )
-            runCatching { settings.activeSource.first()?.id?.let { settings.setLastSyncedMs(it, finishedAt) } }
+            // The source this ran for, not whichever is active by now: a switch
+            // made while it ran would otherwise be told it had just synced.
+            runCatching { source?.id?.let { settings.setLastSyncedMs(it, finishedAt) } }
             learnServerFeatures(dao, client, source)
             onSyncSucceeded?.invoke()
         } catch (e: CancellationException) {
@@ -1494,14 +1615,7 @@ class LibraryRepository(
             }
             _syncState.value = _syncState.value.copy(
                 syncing = false,
-                // A source saved as plain http://, which this build can't speak
-                // — see Cleartext. "Couldn't reach the server" would send the
-                // user looking for a fault in a server that is fine.
-                error = if (source != null && Cleartext.refuses(source.baseUrl)) {
-                    Cleartext.REFUSED_BRIEF
-                } else {
-                    syncErrorMessage(e)
-                },
+                error = syncErrorMessage(e),
             )
             onSyncFailed?.invoke(isAuthFailure(e))
         }
@@ -1578,7 +1692,7 @@ class LibraryRepository(
                 syncing = false,
                 lastSyncedMs = finishedAt,
             )
-            runCatching { settings.activeSource.first()?.id?.let { settings.setLastSyncedMs(it, finishedAt) } }
+            runCatching { settings.setLastSyncedMs(sourceId, finishedAt) }
             onSyncSucceeded?.invoke()
         } catch (e: CancellationException) {
             _syncState.value = _syncState.value.copy(syncing = false)
@@ -1654,9 +1768,10 @@ class LibraryRepository(
         starredSongIds: Set<String>,
         /** Which library each album came from — see the count write-back below. */
         libraryOf: Map<String, String?>,
-    ) = coroutineScope {
+    ): Int = coroutineScope {
         val gate = Semaphore(SYNC_CONCURRENCY)
         val done = AtomicInteger(0)
+        var unread = 0
         // Fetch concurrently, but write in batches: one transaction per album meant
         // ~1300 invalidations of the tracks table across a full sync, each one
         // re-running every observer's whole-table query while rows moved underneath
@@ -1666,11 +1781,16 @@ class LibraryRepository(
                 async {
                     gate.withPermit {
                         yieldToPlayback()
+                        // Null when the server didn't answer — which is not an
+                        // album with no songs. Read as one, a passing failure
+                        // deleted the album's songs until a later sync noticed.
                         val songs = try {
                             client.getAlbumTracks(album.id)
+                        } catch (e: CancellationException) {
+                            throw e
                         } catch (_: Exception) {
-                            emptyList()
-                        }.map { it.copy(liked = it.id in starredSongIds) }
+                            null
+                        }?.map { it.copy(liked = it.id in starredSongIds) }
                         val n = done.incrementAndGet()
                         if (n % 10 == 0 || n == albums.size) {
                             _syncState.value =
@@ -1683,9 +1803,11 @@ class LibraryRepository(
             // A switch away cancels this sync; a batch already fetched must
             // not be written on the way out.
             ensureActive()
+            val read = batch.indices.filter { fetched[it] != null }
+            unread += batch.size - read.size
             dao.replaceAlbumTracks(
-                batch.map { it.id },
-                fetched.flatten().map { it.toEntity() },
+                read.map { batch[it].id },
+                read.flatMap { fetched[it].orEmpty() }.map { it.toEntity() },
             )
             // Write back the count we actually got for any album whose server
             // didn't provide one, so the next sync has something to compare
@@ -1699,9 +1821,10 @@ class LibraryRepository(
             // in every library — see allAlbums.
             if (counted.isNotEmpty()) dao.upsertAlbums(counted.map { it.toEntity(libraryOf[it.id]) })
         }
+        unread
     }
 
-    fun syncInBackground() {
+    fun syncInBackground(force: Boolean = false) {
         // Claimed before the launch, for the reason spelled out in
         // scanAndSyncInBackground: runSync only says "syncing" once it holds
         // the mutex and has awaited the active source, so a second call
@@ -1726,7 +1849,10 @@ class LibraryRepository(
         // "in 0 until", not "<": a time in the future — a sync recorded while the
         // clock was wrong — is not a recent sync, and would otherwise switch
         // automatic syncing off until the clock caught up.
-        if (System.currentTimeMillis() - _syncState.value.lastSyncedMs in 0 until SYNC_MIN_INTERVAL_MS) return
+        //
+        // [force] skips the floors, for a library just shown again: until it
+        // is fetched it may have nothing to show at all.
+        if (!force && System.currentTimeMillis() - _syncState.value.lastSyncedMs in 0 until SYNC_MIN_INTERVAL_MS) return
         _syncState.value = _syncState.value.copy(syncing = true, error = null, phase = "Connecting")
         syncJob = scope.launch {
           try {
@@ -1740,7 +1866,7 @@ class LibraryRepository(
                 settings.activeSource.first()?.id?.let { settings.lastSyncedMs(it) }
             }.getOrNull() ?: 0L
             val floor = if (bulkAllowed()) SYNC_MIN_INTERVAL_MS else SYNC_MIN_INTERVAL_METERED_MS
-            if (System.currentTimeMillis() - last in 0 until floor) {
+            if (!force && System.currentTimeMillis() - last in 0 until floor) {
                 android.util.Log.i("AmpSync", "launch sync skipped: last one ${(System.currentTimeMillis() - last) / 60_000} min ago")
                 _syncState.value = _syncState.value.copy(syncing = false, phase = "", lastSyncedMs = last)
                 return@launch
@@ -1835,6 +1961,30 @@ class LibraryRepository(
         val fresh = client.getAlbumTracks(albumId)
         dao.upsertTracks(fresh.map { it.toEntity() })
         return narrowedToDownloads(fresh).sortedWith(TRACK_ORDER)
+    }
+
+    /**
+     * An album's songs read again from its server, and stored — what opening
+     * its page does, so a record someone is looking at is never older than the
+     * server, whatever a sync has or hasn't noticed. Null where the server
+     * can't be asked or didn't answer, and the page keeps what it had.
+     *
+     * Likes stay as this phone has them: one made offline may not have reached
+     * the server yet, and a sync reconciles the rest.
+     */
+    suspend fun refreshAlbumTracks(albumId: String): List<Track>? {
+        if (!metadataAllowed() || offline.value) return null
+        // Both ends pinned, and the write dropped if the source changed while
+        // the server was answering — see runSync.
+        val dao = daos.value ?: return null
+        val client = serverClient.value ?: return null
+        val fresh = runCatching { client.getAlbumTracks(albumId) }.getOrNull()
+            ?.takeIf { it.isNotEmpty() } ?: return null
+        val liked = dao.tracksForAlbum(albumId).associate { it.id to it.liked }
+        val merged = fresh.map { it.copy(liked = liked[it.id] ?: it.liked) }
+        if (daos.value !== dao) return null
+        dao.replaceAlbumTracks(listOf(albumId), merged.map { it.toEntity() })
+        return narrowedToDownloads(merged).sortedWith(TRACK_ORDER)
     }
 
     /**
@@ -1991,70 +2141,126 @@ class LibraryRepository(
     private fun reachableClient(): MusicServer? =
         if (metadataAllowed()) serverClient.value else null
 
+    // One like or rating at a time, in the order they were tapped: launched
+    // side by side, two taps on the same heart could reach the server the
+    // wrong way round and leave it holding the first.
+    private val likeWrites = Mutex()
+
+    /** How many times each thing has been liked or rated — see [mirror]. */
+    private val taps = ConcurrentHashMap<String, Int>()
+
+    /**
+     * The server's half of a like or a rating the phone already shows.
+     *
+     * Saved: anything older still queued for the same thing is dropped, since
+     * sent later it would undo this. Unreachable: queued, to be sent when the
+     * server is back. Refused: the server will never hold it, so the phone's
+     * half is taken back with [undo] — the next sync would do the same, minutes
+     * later and without a word — and said, when [say]. Only while no later tap
+     * on the same thing has replaced this one: taking back a refusal must not
+     * take back the tap after it.
+     *
+     * [client] is the one that was there at the tap, like the dao [undo] writes
+     * to: a source switched away from meanwhile still gets its own answer.
+     */
+    private suspend fun mirror(
+        action: PendingAction,
+        client: MusicServer?,
+        say: Boolean,
+        send: suspend (MusicServer) -> Unit,
+        undo: suspend () -> Unit,
+    ): WriteResult {
+        val key = "${action.sourceId}:${action.kind.group()}:${action.id}"
+        val tap = taps.merge(key, 1, Int::plus)!!
+        return likeWrites.withLock {
+            if (client == null) return@withLock WriteResult.Unreachable(UNREACHABLE).also { pending.add(action) }
+            val result = attemptWrite { send(client) }
+            if (result != WriteResult.Saved) android.util.Log.w("AmpSync", "${action.kind} ${action.id} → $result")
+            when (result) {
+                WriteResult.Saved -> pending.forget(action)
+                is WriteResult.Unreachable -> pending.add(action)
+                is WriteResult.Refused -> if (taps[key] == tap) {
+                    undo()
+                    if (say) tell("Couldn't save\n${result.reason}")
+                }
+            }
+            result
+        }
+    }
+
     /**
      * Like or unlike a song.
      *
      * The local row is the truth the moment it's tapped, and stays that way even
      * if the server can't be told: undoing the user's action because the train
-     * went into a tunnel is worse than telling Navidrome about it later.
+     * went into a tunnel is worse than telling Navidrome about it later. A
+     * server that answers no is a different thing from one that can't be
+     * reached, and that like is taken back and said — see [mirror].
      */
     suspend fun setTrackLiked(track: Track, liked: Boolean) {
-        dao.setTrackLiked(track.id, liked)
+        val pinned = dao
         val client = reachableClient()
+        pinned.setTrackLiked(track.id, liked)
+        val source = settings.activeSource.first()?.id
         val kind = if (liked) PendingAction.Kind.STAR_SONG else PendingAction.Kind.UNSTAR_SONG
-        if (client == null) {
-            pending.add(PendingAction(kind, track.id))
-            return
-        }
-        try {
-            if (liked) client.starSong(track.id) else client.unstarSong(track.id)
-        } catch (_: Exception) {
-            pending.add(PendingAction(kind, track.id))
-        }
+        mirror(
+            PendingAction(kind, track.id, sourceId = source), client, say = true,
+            send = { if (liked) it.starSong(track.id) else it.unstarSong(track.id) },
+            undo = { pinned.setTrackLiked(track.id, !liked) },
+        )
     }
 
     /**
      * Like an artist. Stored locally by name (our Artist rows are derived from
      * track tags), and mirrored to the server when that name resolves to a real
-     * server-side artist so other clients see the same favourites.
+     * server-side artist so other clients see the same favourites. A name the
+     * server has no artist for — a featured guest, a tag-only spelling — is
+     * refused: it could never be told, and the next sync would drop it unseen.
      */
     suspend fun setArtistLiked(name: String, liked: Boolean) {
-        if (liked) dao.likeArtists(listOf(LikedArtistEntity(name))) else dao.unlikeArtist(name)
-        val kind = if (liked) PendingAction.Kind.STAR_ARTIST else PendingAction.Kind.UNSTAR_ARTIST
+        val pinned = dao
         val client = reachableClient()
-        if (client == null) {
-            pending.add(PendingAction(kind, name))
-            return
-        }
-        try {
-            val id = artistIdFor(name, client) ?: return
-            if (liked) client.starArtist(id) else client.unstarArtist(id)
-        } catch (_: Exception) {
-            pending.add(PendingAction(kind, name))
-        }
+        if (liked) pinned.likeArtists(listOf(LikedArtistEntity(name))) else pinned.unlikeArtist(name)
+        val source = settings.activeSource.first()?.id
+        val kind = if (liked) PendingAction.Kind.STAR_ARTIST else PendingAction.Kind.UNSTAR_ARTIST
+        mirror(
+            PendingAction(kind, name, sourceId = source), client, say = true,
+            send = {
+                val id = artistIdFor(name, it) ?: throw RefusedWrite(NO_SUCH_ARTIST)
+                if (liked) it.starArtist(id) else it.unstarArtist(id)
+            },
+            undo = { if (liked) pinned.unlikeArtist(name) else pinned.likeArtists(listOf(LikedArtistEntity(name))) },
+        )
     }
 
-    /** Server-side id for a display name, from a lazily built index. */
+    /**
+     * Server-side id for a display name, from a lazily built index.
+     *
+     * A name the stored index lacks has it read again, once: the artist may be
+     * newer than the index. A failed read throws, so it counts as a server that
+     * couldn't be reached rather than as one without the artist. The index is
+     * the active source's — a write still finishing for a source switched away
+     * from asks its own server and leaves it alone.
+     */
     private suspend fun artistIdFor(name: String, client: MusicServer): String? {
-        val ids = artistIds ?: client.getArtistIndex()
-            .associate { it.name to it.id }
-            .also { artistIds = it }
-        return ids[name]
+        val current = client === serverClient.value
+        if (current) artistIds?.get(name)?.let { return it }
+        val fresh = client.getArtistIndex().associate { it.name to it.id }
+        if (current && fresh.isNotEmpty()) artistIds = fresh
+        return fresh[name]
     }
 
     suspend fun setAlbumLiked(album: Album, liked: Boolean) {
-        dao.setAlbumLiked(album.id, liked)
-        val kind = if (liked) PendingAction.Kind.STAR_ALBUM else PendingAction.Kind.UNSTAR_ALBUM
+        val pinned = dao
         val client = reachableClient()
-        if (client == null) {
-            pending.add(PendingAction(kind, album.id))
-            return
-        }
-        try {
-            if (liked) client.starAlbum(album.id) else client.unstarAlbum(album.id)
-        } catch (_: Exception) {
-            pending.add(PendingAction(kind, album.id))
-        }
+        pinned.setAlbumLiked(album.id, liked)
+        val source = settings.activeSource.first()?.id
+        val kind = if (liked) PendingAction.Kind.STAR_ALBUM else PendingAction.Kind.UNSTAR_ALBUM
+        mirror(
+            PendingAction(kind, album.id, sourceId = source), client, say = true,
+            send = { if (liked) it.starAlbum(album.id) else it.unstarAlbum(album.id) },
+            undo = { pinned.setAlbumLiked(album.id, !liked) },
+        )
     }
 
     // --- Search --------------------------------------------------------------
@@ -2100,17 +2306,23 @@ class LibraryRepository(
     /**
      * Rate a song or album, 0 to clear.
      *
-     * Applied locally either way and queued when the server can't be reached, so
-     * rating a record on a plane behaves like liking one does.
+     * Applied locally at once and queued when the server can't be reached, so
+     * rating a record on a plane behaves like liking one does. One the server
+     * refuses goes back to [previous], and the answer is the caller's to say —
+     * see [mirror].
      */
-    suspend fun setRating(id: String, stars: Int, isAlbum: Boolean): Boolean {
-        if (isAlbum) dao.setAlbumRating(id, stars) else dao.setTrackRating(id, stars)
-        val kind = if (isAlbum) PendingAction.Kind.RATE_ALBUM else PendingAction.Kind.RATE_SONG
+    suspend fun setRating(id: String, stars: Int, isAlbum: Boolean, previous: Int): WriteResult {
+        val pinned = dao
         val client = reachableClient()
-        if (client == null || !client.setRating(id, stars)) {
-            pending.add(PendingAction(kind, id, value = stars))
-        }
-        return true
+        val store: suspend (Int) -> Unit = { if (isAlbum) pinned.setAlbumRating(id, it) else pinned.setTrackRating(id, it) }
+        store(stars)
+        val source = settings.activeSource.first()?.id
+        val kind = if (isAlbum) PendingAction.Kind.RATE_ALBUM else PendingAction.Kind.RATE_SONG
+        return mirror(
+            PendingAction(kind, id, value = stars, sourceId = source), client, say = false,
+            send = { it.setRating(id, stars) },
+            undo = { store(previous) },
+        )
     }
 
     /**
@@ -2131,10 +2343,21 @@ class LibraryRepository(
      * Through [reachableClient], so a queue built up in Wi-Fi Only is not
      * emptied over cellular the moment something calls this — which would send
      * exactly the requests the queue exists to have held back.
+     *
+     * Only this source's: the queue holds every source's, and a like sent to a
+     * server that never had the song would be refused and lost. What the server
+     * refuses is said once, however many it was — one line is enough to know
+     * something didn't take, and the log has the rest.
      */
-    suspend fun flushPending(): Int {
-        val client = reachableClient() ?: return 0
-        return pending.flush(client) { name -> runCatching { artistIdFor(name, client) }.getOrNull() }
+    suspend fun flushPending() {
+        val client = reachableClient() ?: return
+        val source = settings.activeSource.first()?.id ?: return
+        // Behind any like still on its way, so neither overtakes the other.
+        val refused = likeWrites.withLock {
+            pending.flush(client, source) { name -> artistIdFor(name, client) }
+        }
+        refused.forEach { android.util.Log.w("AmpSync", "offline write refused: $it") }
+        refused.firstOrNull()?.let { tell("Couldn't save something done offline\n$it") }
     }
 
     suspend fun clearCache() {
@@ -2276,3 +2499,107 @@ private const val TOP_SONGS_TTL_MS = 7L * 24 * 60 * 60 * 1000
  * an unmetered link" is strictly less traffic than shipping today.
  */
 private const val PLAYLIST_MEMBERSHIP_TTL_MS = 24L * 60 * 60 * 1000
+
+/**
+ * The next [size] of [ordered] after [after], and where the walk got to — null
+ * once it has reached the end, so the next one starts from the beginning.
+ */
+internal fun nextWalk(ordered: List<String>, after: String?, size: Int): Pair<List<String>, String?> {
+    val rest = if (after == null) ordered else ordered.filter { it > after }
+    val batch = rest.take(size)
+    return batch to if (rest.size > size) batch.last() else null
+}
+
+/** What a sync re-reads beyond new and re-counted albums, why, and the [SongCheck] to keep after. */
+internal class Reread(val albums: List<Album>, val why: String, val next: SongCheck)
+
+/**
+ * Turns a server's [SongChanges] into albums to re-read.
+ *
+ * Only a sync of every library ([whole]) may settle a mark: one scoped to a
+ * single library would mark as read the changes in the others. Re-reading
+ * every album, or walking, is bulk — left for a link that allows it ([bulk]),
+ * with the check kept where it was so a later sync does it instead.
+ *
+ * A walk that has gone round rests for [WALK_REST_MS] before the next begins.
+ * A server that can't say anything at all — or one that scans on a schedule,
+ * which reads as "something may have changed" every time — would otherwise
+ * keep one going for ever.
+ *
+ * A server that names what changed but misses some of it asks for a walk as
+ * well ([SongChanges.Albums.alsoWalk]). Its named albums are read on every
+ * sync, as anyone's are, and its mark moves with them; the walk goes on beside
+ * that, on its own cursor and rest, and settles no mark of its own — the two
+ * share one [SongCheck] without either undoing the other.
+ */
+internal fun rereadFor(
+    changes: SongChanges?,
+    check: SongCheck,
+    albums: List<Album>,
+    whole: Boolean,
+    bulk: Boolean,
+    nowMs: Long,
+): Reread? {
+    val settled = { mark: String -> if (whole) SongCheck(mark = mark) else check }
+    return when (changes) {
+        null -> null
+        is SongChanges.Nothing -> Reread(emptyList(), "", settled(changes.mark))
+        is SongChanges.Albums -> {
+            val named = albums.filter { it.id in changes.ids }
+            if (!changes.alsoWalk) return Reread(named, "server says changed", settled(changes.mark))
+            val marked = if (whole) check.copy(mark = changes.mark) else check
+            if (!whole || !bulk) return Reread(named, "server says changed", marked)
+            val (picked, cursor) = walkOn(check, albums, nowMs)
+                ?: return Reread(named, "server says changed", marked)
+            val next = if (cursor == null) {
+                marked.copy(walkCursor = null, walkedMs = nowMs)
+            } else {
+                marked.copy(walkCursor = cursor)
+            }
+            Reread(
+                albums.filter { it.id in changes.ids || it.id in picked },
+                if (named.isEmpty()) "walk" else "server says changed, and walk",
+                next,
+            )
+        }
+        is SongChanges.Everything -> when {
+            !bulk -> null
+            // Every album read is a walk gone round, so one that follows rests from here.
+            whole -> Reread(albums, "read once, to compare from", SongCheck(mark = changes.mark, walkedMs = nowMs))
+            else -> Reread(albums, "read once, to compare from", check)
+        }
+        is SongChanges.Unknown -> {
+            if (!whole || !bulk) return null
+            val (picked, cursor) = walkOn(check, albums, nowMs) ?: return Reread(emptyList(), "", check)
+            // A walk covers changes up to the mark it began under; a scan
+            // during the walk is caught by the next one.
+            val walkMark = check.walkMark ?: changes.mark
+            val next = if (cursor == null) {
+                SongCheck(mark = walkMark, walkedMs = nowMs)
+            } else {
+                check.copy(walkMark = walkMark, walkCursor = cursor)
+            }
+            Reread(albums.filter { it.id in picked }, "walk", next)
+        }
+    }
+}
+
+/**
+ * The ids of the walk's next batch from where [check] left it, and the cursor
+ * to keep after — or null while a walk that has gone round rests.
+ */
+private fun walkOn(check: SongCheck, albums: List<Album>, nowMs: Long): Pair<Set<String>, String?>? {
+    if (check.walkCursor == null && nowMs - check.walkedMs in 0 until WALK_REST_MS) return null
+    val (ids, cursor) = nextWalk(albums.map { it.id }.sorted(), check.walkCursor, WALK_BATCH)
+    return ids.toHashSet() to cursor
+}
+
+/**
+ * Albums a walk re-reads per sync, where the server can't say which changed,
+ * or can't say all of it — see [rereadFor]. A 1,400-album library goes round
+ * in about fifty syncs on Wi-Fi: a day or so, for thirty small requests each.
+ */
+internal const val WALK_BATCH = 30
+
+/** How long a finished walk rests before another may start — see [rereadFor]. */
+internal const val WALK_REST_MS = 12 * 60 * 60 * 1000L

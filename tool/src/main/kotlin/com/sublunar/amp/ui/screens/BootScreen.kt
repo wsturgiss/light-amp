@@ -71,11 +71,30 @@ class BootViewModel : LightViewModel<Unit>() {
  * on top of this one, so the home menu is always the base of the back stack.
  */
 @InitialScreen
-class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>(sealed) {
+class BootScreen(private val sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>(sealed) {
 
     init {
         App.boot(sealed, lightContext)
     }
+
+    /**
+     * Whether this window has settled where it opens — see the landing in
+     * [Content].
+     *
+     * Held on the screen, not by a composition effect's key: the root leaves
+     * composition whenever a screen is pushed over it and re-enters when that
+     * screen pops, so a `LaunchedEffect(Unit)` there runs again on every
+     * return. Coming back from the keyboard with a query typed, that landed you
+     * on the index with search closed — the results were one tap away and
+     * looked like the search had been thrown away.
+     *
+     * And once per window, not once per process as it was: a window Android
+     * rebuilt while the app ran on — having closed the old one in the
+     * background — skipped the landing and opened on the library's last tab,
+     * whichever of the three it had been left on. Each window makes one of
+     * these screens, so this is that window's own.
+     */
+    private var landed = false
 
     override val viewModelClass: Class<BootViewModel> get() = BootViewModel::class.java
 
@@ -86,8 +105,10 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
         App.playback.handleVolumeKey(keyCode) || super.onKeyDown(keyCode, event)
 
+    // Named on the way out: a newer activity may have taken the player over
+    // by then, and this back-out must not release it — see App.shutdown.
     override fun onScreenDestroy() {
-        App.shutdown()
+        App.shutdown(sealed)
     }
 
     private fun createPlaylistFlow() {
@@ -138,10 +159,11 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
                 val tab by viewModel.currentTab.collectAsState()
                 // Reopen where the app was left: one of the bar's three
                 // destinations, never the page beneath it — see LastSection.
-                // Once per run, guarded by LibraryNav, because this composable
+                // Once per window, guarded by [landed], because this composable
                 // re-enters every time a pushed screen pops off it.
                 LaunchedEffect(Unit) {
-                    if (!LibraryNav.claimFirstLanding()) return@LaunchedEffect
+                    if (landed) return@LaunchedEffect
+                    landed = true
                     when (App.settings.lastSection.first()) {
                         LastSection.SEARCH -> LibraryNav.openSearch()
                         LastSection.NOW_PLAYING -> {

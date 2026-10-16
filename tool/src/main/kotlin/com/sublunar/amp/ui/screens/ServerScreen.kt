@@ -10,9 +10,9 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.sublunar.amp.App
-import com.sublunar.amp.data.Cleartext
 import com.sublunar.amp.data.MusicSource
 import com.sublunar.amp.data.SourceKind
+import com.sublunar.amp.data.SourceLibrary
 import com.sublunar.amp.data.newSourceId
 import com.sublunar.amp.data.SubsonicClient
 import com.sublunar.amp.data.SubsonicConfig
@@ -29,10 +29,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.SerializationException
-import java.net.ConnectException
-import java.net.SocketTimeoutException
-import java.net.UnknownHostException
-import javax.net.ssl.SSLException
 
 /**
  * Edit the server connection in place.
@@ -124,7 +120,7 @@ class ServerScreen(
             title = source?.name ?: if (bandcamp) "Add Bandcamp" else "Add Source",
         ) {
             ScrollableList(modifier = Modifier.fillMaxSize()) {
-                item { SectionLabel(status ?: if (bandcamp) BANDCAMP_HINT else "Tap a field to change it") }
+                item { SectionLabel(status ?: "Tap a field to change it") }
                 if (source == null) {
                     // Required, and first: with several sources the list is read
                     // by name, and "navidrome.example.com" twice tells you
@@ -159,6 +155,11 @@ class ServerScreen(
                         onClick = { edit("Address", address) { url = it } },
                     )
                 }
+                // Right above the fields it is about: the Bandcamp login is the
+                // wrong answer here, and the place to say so is where someone is
+                // about to type it — not at the top, where a status line replaces
+                // it the moment Save is tapped.
+                if (bandcamp) item { SectionLabel(BANDCAMP_HINT) }
                 item {
                     TextRow(
                         title = "Username",
@@ -235,8 +236,7 @@ class ServerScreen(
                                     // that they should press back. Go where they
                                     // were headed.
                                     is SaveOutcome.Added -> withContext(Dispatchers.Main) {
-                                        LibraryNav.selectTab(LibraryTab.ALBUMS)
-                                        popToRoot()
+                                        finishAddingSource(outcome.sourceId, outcome.libraryCount)
                                     }
                                     is SaveOutcome.Said -> {
                                         status = outcome.text
@@ -286,13 +286,8 @@ class ServerScreen(
         if (address.isBlank() || username.isBlank()) {
             return SaveOutcome.Said("Enter an address and username.")
         }
-        // A plain http:// spelling this build may not send is not tried: the
-        // platform would refuse it in words meant for a developer. Without a
-        // scheme the https:// try is still made, and its failure explained.
-        val candidates = SubsonicConfig.candidates(address).filterNot { Cleartext.refuses(it) }
-        if (candidates.isEmpty()) return SaveOutcome.Said(Cleartext.REFUSED)
         var lastError: Throwable? = null
-        for (candidate in candidates) {
+        for (candidate in SubsonicConfig.candidates(address)) {
             val config = SubsonicConfig(candidate, username, password)
             val client = SubsonicClient(config)
             val ok = runCatching { client.ping() }
@@ -302,11 +297,8 @@ class ServerScreen(
             // generated, forty characters of them, which is exactly the kind
             // there is a typo in. So the address is settled by the ping and the
             // account by a read that needs one.
-            val refused = if (ok.isSuccess) {
-                runCatching { client.getMusicFolders() }.exceptionOrNull()
-            } else {
-                null
-            }
+            val folders = if (ok.isSuccess) runCatching { client.getMusicFolders() } else null
+            val refused = folders?.exceptionOrNull()
             client.close()
             if (ok.isFailure) {
                 val error = ok.exceptionOrNull()
@@ -350,19 +342,22 @@ class ServerScreen(
                 kind = SourceKind.SUBSONIC,
                 name = nickname,
             )
+            // The libraries the login check just read, kept for a source being
+            // added: with two or more, the user picks which to show before the
+            // first sync — see SaveOutcome.ChooseLibraries.
+            val libraries = folders?.getOrNull().orEmpty().map { SourceLibrary(it.id, it.name) }
             App.settings.saveSource(
                 existing.copy(
                     baseUrl = candidate,
                     username = username,
                     password = password,
+                    libraries = if (source == null && libraries.isNotEmpty()) libraries else existing.libraries,
                 ),
             )
-            // A source added from here becomes the one being browsed: adding it
-            // is asking for it.
-            if (source == null) {
-                App.settings.setActiveSource(existing.id)
-                return SaveOutcome.Added
-            }
+            // A source added from here becomes the one being browsed — adding it
+            // is asking for it — once its libraries are chosen: see
+            // finishAddingSource.
+            if (source == null) return SaveOutcome.Added(existing.id, libraries.size)
             return SaveOutcome.Said(if (movedServer) "Saved — reloading library" else "Saved")
         }
         return SaveOutcome.Said(explain(lastError))
@@ -372,18 +367,22 @@ class ServerScreen(
 /** Bandcamp's Subsonic server — the same for every account. */
 private const val BANDCAMP_ADDRESS = "https://bandcamp.com/api/subsonic"
 
-/** Where Bandcamp's Subsonic credentials come from, in the form's own top line. */
+/** Where Bandcamp's Subsonic credentials come from, shown just above the username and password. */
 private const val BANDCAMP_HINT =
-    "Not your Bandcamp login: on bandcamp.com, open Fan Settings, scroll down to Subsonic " +
-        "and generate a username and password."
+    "The login below is different from your usual Bandcamp username and password. To get " +
+        "it, go to bandcamp.com, open Fan Settings, scroll down to Subsonic and generate one."
 
 /** What came of pressing Save. */
 private sealed interface SaveOutcome {
     /** Shown on the form; the user stays where they are. */
     data class Said(val text: String) : SaveOutcome
 
-    /** A source was added and made active — the form has nothing left to say. */
-    data object Added : SaveOutcome
+    /**
+     * A source was added and saved, not yet active — the form has nothing
+     * left to say; [finishAddingSource] offers its libraries if it has two or
+     * more, then makes it active.
+     */
+    data class Added(val sourceId: String, val libraryCount: Int) : SaveOutcome
 }
 
 /** What the folders call said about the account, once the ping has settled the address. */
@@ -470,16 +469,5 @@ private fun explain(error: Throwable?): String {
     chain.filterIsInstance<SubsonicException>().firstOrNull()?.let {
         return it.message ?: "Couldn't connect."
     }
-    return when {
-        chain.any { it is UnknownHostException } ->
-            "Couldn't find that address. Check the spelling, and that this phone is " +
-                "on the same network."
-        chain.any { it is SSLException } ->
-            "The HTTPS certificate wasn't accepted. A self-signed certificate needs " +
-                "http:// instead."
-        chain.any { it is ConnectException || it is SocketTimeoutException } ->
-            "Nothing answered at that address. Check the server is running and the " +
-                "port is right."
-        else -> error.message ?: "Couldn't connect."
-    }
+    return unreachedReason(error)
 }

@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
@@ -155,43 +156,10 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         list.firstOrNull { it.id == id } ?: list.firstOrNull()
     }.distinctUntilChanged()
 
-    /**
-     * Add a source, or replace the one with the same id.
-     *
-     * A Plex source is re-matched against `machineIdentifier` first: that is
-     * Plex's own stable server id, unlike [MusicSource.id] which is minted fresh
-     * every time the link flow runs (account-link, "Enter address and token", a
-     * re-link on a different network reaching a different address...). Without
-     * this, re-linking the same server just appends another row with the same
-     * name and a new id — a duplicate entry in Sources that looks identical to
-     * the user but points at a second, empty local database.
-     */
+    /** Add a source, or update the one it already is — see [mergeSource]. */
     suspend fun saveSource(source: MusicSource): String {
         var effectiveId = source.id
-        editSources { list ->
-            val existing = list.indexOfFirst { it.id == source.id }.takeIf { it >= 0 }
-                ?: source.machineIdentifier.takeIf { it.isNotBlank() }?.let { mid ->
-                    list.indexOfFirst { it.kind == source.kind && it.machineIdentifier == mid }
-                        .takeIf { it >= 0 }
-                }
-            if (existing == null) {
-                list + source
-            } else {
-                val old = list[existing]
-                // Keep the id (and with it, the downloads database and the
-                // user's own preferences for this source) — only what was just
-                // discovered about the server itself should move.
-                effectiveId = old.id
-                val merged = source.copy(
-                    id = old.id,
-                    downloadFormatId = source.downloadFormatId ?: old.downloadFormatId,
-                    offlineModeName = source.offlineModeName ?: old.offlineModeName,
-                    downloadLimitBytes = source.downloadLimitBytes ?: old.downloadLimitBytes,
-                    libraryId = source.libraryId ?: old.libraryId,
-                )
-                list.toMutableList().also { it[existing] = merged }
-            }
-        }
+        editSources { list -> mergeSource(list, source).also { effectiveId = it.second }.first }
         return effectiveId
     }
 
@@ -239,7 +207,20 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
     suspend fun setLibraryId(id: String?) {
         val current = activeSource.first() ?: return
-        saveSource(current.copy(libraryId = id))
+        setSourceLibraryId(current.id, id)
+    }
+
+    /**
+     * Which of a source's libraries is browsed — null for All Libraries —
+     * written exactly as given.
+     *
+     * Not through [saveSource], which keeps the stored library whenever it is
+     * handed none, so that re-linking a server doesn't forget the choice. All
+     * Libraries *is* none: switching to it saved nothing, and the library
+     * stayed where it was while the sync fetched all of them.
+     */
+    suspend fun setSourceLibraryId(sourceId: String, libraryId: String?) {
+        editSources { list -> list.map { if (it.id == sourceId) it.copy(libraryId = libraryId) else it } }
     }
 
     /** Record the folders a server reported, for the Sources page. */
@@ -278,24 +259,14 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     // on which source you were looking at.
 
     /**
-     * Show or hide one of a source's libraries on the Sources page.
-     *
-     * Refuses to hide the last one: the rows under a source are the only way to
-     * switch to it, so a source with none would be stranded — configurable but
-     * unusable.
+     * Show or hide one of a source's libraries — everywhere, not only on the
+     * Sources page: see MusicSource.hiddenLibraryIds and [withLibraryShown].
+     * Written exactly, like [setSourceLibraryId], because hiding can move the
+     * browsing to All Libraries.
      */
-    suspend fun setLibraryVisible(sourceId: String, libraryId: String?, visible: Boolean) {
-        editSource(sourceId) { source ->
-            val hidden = source.hiddenLibraryIds.toMutableList()
-            if (visible) {
-                hidden.remove(libraryId)
-            } else {
-                val remaining = source.libraries.count { it.id !in hidden } +
-                    (if (source.showsAllLibraries) 1 else 0)
-                if (remaining <= 1) return@editSource source
-                if (libraryId !in hidden) hidden.add(libraryId)
-            }
-            source.copy(hiddenLibraryIds = hidden)
+    suspend fun setLibraryVisible(sourceId: String, libraryId: String, visible: Boolean) {
+        editSources { list ->
+            list.map { if (it.id == sourceId) it.withLibraryShown(libraryId, visible) else it }
         }
     }
 
@@ -576,6 +547,18 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     private fun lastSyncedKey(sourceId: String) =
         stringPreferencesKey("state.lastSynced.$sourceId")
 
+    /** How far this source's songs are known to match the server — see [SongCheck]. */
+    suspend fun songCheck(sourceId: String): SongCheck =
+        dataStore.data.first()[songCheckKey(sourceId)]
+            ?.let { runCatching { sourcesJson.decodeFromString<SongCheck>(it) }.getOrNull() }
+            ?: SongCheck()
+
+    suspend fun setSongCheck(sourceId: String, check: SongCheck) =
+        putString(songCheckKey(sourceId), sourcesJson.encodeToString(check))
+
+    private fun songCheckKey(sourceId: String) =
+        stringPreferencesKey("state.songCheck.$sourceId")
+
     /** Read once per operation rather than observed: see [PendingActions]. */
     suspend fun pendingActions(): String = dataStore.data.first()[PENDING_ACTIONS] ?: ""
 
@@ -738,3 +721,77 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         const val DEFAULT_DOWNLOAD_LIMIT = 2L * 1024 * 1024 * 1024
     }
 }
+
+/**
+ * [list] with [source] saved into it, and the id it was saved under.
+ *
+ * The same id is an edit: the record replaces the old one, keeping only the
+ * few choices an edit may leave unset.
+ *
+ * A different id can still be the same server. Signing in mints a new id every
+ * time, so a Plex server re-linked (matched by its `machineIdentifier`) or a
+ * Jellyfin account signed into again (matched by its user id — a GUID, so one
+ * account on one server) would otherwise become a second row with the same
+ * name over an empty library, and on Jellyfin the second sign-in logged the
+ * first out. Instead the source it already is takes the new sign-in — token,
+ * address, libraries — and keeps its id, so its library and downloads, and
+ * every choice the user made for it.
+ */
+internal fun mergeSource(list: List<MusicSource>, source: MusicSource): Pair<List<MusicSource>, String> {
+    val sameId = list.indexOfFirst { it.id == source.id }
+    if (sameId >= 0) {
+        val old = list[sameId]
+        val edited = source.copy(
+            downloadFormatId = source.downloadFormatId ?: old.downloadFormatId,
+            offlineModeName = source.offlineModeName ?: old.offlineModeName,
+            downloadLimitBytes = source.downloadLimitBytes ?: old.downloadLimitBytes,
+            libraryId = source.libraryId ?: old.libraryId,
+        )
+        return list.toMutableList().also { it[sameId] = edited } to old.id
+    }
+    val sameServer = list.indexOfFirst { it.kind == source.kind && it.isSameServerAs(source) }
+    if (sameServer < 0) return list + source to source.id
+    val old = list[sameServer]
+    val relinked = source.copy(
+        id = old.id,
+        streamFormatId = old.streamFormatId,
+        cellularFormatId = old.cellularFormatId,
+        downloadFormatId = old.downloadFormatId,
+        offlineModeName = old.offlineModeName,
+        downloadLimitBytes = old.downloadLimitBytes,
+        playerName = old.playerName,
+        parserGeneration = old.parserGeneration,
+        libraryId = old.libraryId,
+        hiddenLibraryIds = old.hiddenLibraryIds,
+        features = old.features,
+    )
+    return list.toMutableList().also { it[sameServer] = relinked } to old.id
+}
+
+private fun MusicSource.isSameServerAs(other: MusicSource): Boolean = when (kind) {
+    SourceKind.PLEX -> machineIdentifier.isNotBlank() && machineIdentifier == other.machineIdentifier
+    SourceKind.JELLYFIN -> userId.isNotBlank() && userId == other.userId
+    else -> false
+}
+
+/**
+ * How far a source's songs are known to match its server, kept between syncs.
+ *
+ * [mark] is the server's own answer from [MusicServer.songChangesSince] that
+ * everything is read up to. Where the server can't say which songs changed,
+ * a walk re-reads the library a few albums per sync: [walkCursor] is the last
+ * album it reached, [walkMark] the mark it will settle once it gets round, and
+ * [walkedMs] when the last one did.
+ *
+ * A server that names its changes and walks as well (Jellyfin — see
+ * [SongChanges.Albums.alsoWalk]) moves [mark] itself on every sync and never
+ * sets [walkMark]: its walk catches what the list misses, and has no mark of
+ * its own to settle.
+ */
+@Serializable
+data class SongCheck(
+    val mark: String? = null,
+    val walkMark: String? = null,
+    val walkCursor: String? = null,
+    val walkedMs: Long = 0L,
+)

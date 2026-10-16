@@ -1,5 +1,10 @@
 package com.sublunar.amp.data
 
+import java.time.format.DateTimeFormatter
+import java.time.ZonedDateTime
+import java.time.Instant
+import io.ktor.client.statement.HttpResponse
+
 /**
  * A queue the server is holding, from this client or another one.
  *
@@ -25,9 +30,11 @@ data class SavedQueue(
  * **Not every server can do everything.** Rather than have each call fail
  * quietly on a backend that doesn't support it, the *source* declares what it
  * can do (see [MusicSource.supportsLikes] and its neighbours) and the UI leaves
- * out what it can't. The methods here that only some servers implement are
- * marked, and default to doing nothing — a server that can't star a track
- * shouldn't need to write a stub saying so.
+ * out what it can't. The reads only some servers implement default to an empty
+ * answer, so a server that has no popular songs needn't write a stub saying so.
+ * The writes default to [RefusedWrite] instead: a default that did nothing
+ * would read as success, and a like the server never heard of would stand on
+ * the phone as if it had.
  */
 /**
  * What came of asking a server to scan.
@@ -38,6 +45,92 @@ data class SavedQueue(
  * a server without the call keeps its own library and has nothing to refuse.
  */
 enum class ScanRequest { STARTED, REFUSED, ABSENT }
+
+/**
+ * What came of a write: a like, a rating, a playlist edit, a play.
+ *
+ * Two kinds of failure, because they want opposite things done. A server that
+ * never answered may well take the same write later, so it is kept and sent
+ * again; a server that answered no will say no again, and a write kept for it
+ * only stands in the way of everything queued behind it.
+ */
+sealed interface WriteResult {
+    data object Saved : WriteResult
+
+    /** Never answered: worth sending again later. */
+    data class Unreachable(val reason: String) : WriteResult
+
+    /** The server answered no: sending it again gets the same answer. */
+    data class Refused(val reason: String) : WriteResult
+}
+
+/** Refused before anything was sent — no call for it on this server, or nothing to aim it at. */
+class RefusedWrite(reason: String = CANT_DO_THAT) : Exception(reason)
+
+internal const val UNREACHABLE = "Couldn't reach the server"
+internal const val CANT_DO_THAT = "This server can't do that"
+internal const val NO_SUCH_ARTIST = "This artist isn't on the server"
+
+/** A server's own words are shown when they fit on a line; past that they are a log entry. */
+private const val SHOWN_MESSAGE_MAX = 60
+
+/**
+ * Which of the two a failed write was — see [WriteResult].
+ *
+ * The same split [Reachability] draws between a server that answered and one
+ * that didn't, with one difference: a write that can never land must not count
+ * as one that might, so anything not recognised is a refusal. Read as "try
+ * again later", a bug that always throws would hold the offline queue shut for
+ * good, which is what a refused Subsonic star once did.
+ *
+ * A 401 is deliberately not called a login problem: Jellyfin answers 401 to a
+ * delete the account isn't allowed to make, from a login that works.
+ */
+internal fun writeResultOf(e: Exception): WriteResult {
+    if (e is RefusedWrite) return WriteResult.Refused(e.message ?: CANT_DO_THAT)
+    if (e is SubsonicException) {
+        // A portal's or a proxy's page: the server itself was never asked.
+        if (e.notJson) return WriteResult.Unreachable(UNREACHABLE)
+        if (e.endpointMissing) return WriteResult.Refused(CANT_DO_THAT)
+        when (e.code) {
+            40, 41, 44 -> return WriteResult.Refused("The server refused the login")
+            50 -> return WriteResult.Refused("The server doesn't allow that")
+            70 -> return WriteResult.Refused("The server doesn't have that")
+        }
+    }
+    if (e is java.io.IOException || e is kotlinx.serialization.SerializationException) {
+        return WriteResult.Unreachable(UNREACHABLE)
+    }
+    val status = when (e) {
+        is SubsonicException -> e.status
+        is PlexException -> e.status
+        is JellyfinException -> e.status
+        else -> null
+    }
+    return when (status) {
+        // Cloudflare's own codes for an origin that isn't answering behind it.
+        in 520..529 -> WriteResult.Unreachable("Your server isn't responding ($status)")
+        in 500..599 -> WriteResult.Unreachable("The server had an error ($status)")
+        401, 403 -> WriteResult.Refused("The server doesn't allow that")
+        404 -> WriteResult.Refused("The server doesn't have that")
+        in 400..499 -> WriteResult.Refused("The server said $status")
+        else -> WriteResult.Refused(
+            e.message?.takeIf { it.isNotBlank() && it.length < SHOWN_MESSAGE_MAX }
+                ?: if (e is SubsonicException) "The server said no" else "Couldn't save",
+        )
+    }
+}
+
+/** Runs one write and says how it went. Cancellation is not a failure, and goes straight through. */
+internal suspend fun attemptWrite(block: suspend () -> Unit): WriteResult =
+    try {
+        block()
+        WriteResult.Saved
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Exception) {
+        writeResultOf(e)
+    }
 
 interface MusicServer {
 
@@ -88,6 +181,20 @@ interface MusicServer {
     /** True while a [startServerScan] is still running. */
     suspend fun serverScanning(musicFolderId: String? = null): Boolean = false
 
+    /**
+     * Which albums' songs changed on the server since [mark] — a mark this
+     * returned before, null the first time — among [libraries] (null: all).
+     *
+     * A sync re-reads an album's songs when the album is new or its count of
+     * songs moved. A song re-tagged in place moves neither, and nor does one
+     * whose tags a server only finished reading after the album was first
+     * synced — so without this, both stayed as first seen for ever. The
+     * default is [SongChanges.Unknown]: the server can't say, and the sync
+     * walks the library a little at a time instead.
+     */
+    suspend fun songChangesSince(mark: String?, libraries: List<String?>): SongChanges =
+        SongChanges.Unknown(mark = null)
+
     /** Server-side artist ids, for the star calls that need one. */
     suspend fun getArtistIndex(musicFolderId: String? = null): List<ArtistRef> = emptyList()
 
@@ -120,11 +227,11 @@ interface MusicServer {
         timeOffsetSeconds: Int = 0,
         estimateContentLength: Boolean = true,
         /**
-         * A caller-generated id for *this* playback, distinct from any other
-         * stream or download in flight. Optional, and ignored by servers with
-         * no idea of a session (Subsonic); Plex uses it to tell one playing
-         * track from another so a download alongside it can't tear it down —
-         * see the comment on [PlexClient.streamUrl].
+         * A caller-generated id for the playback this stream belongs to,
+         * never shared with a download. Optional, and ignored by servers with
+         * no idea of a session (Subsonic); Plex uses it to tie the stream to
+         * the session its timeline reports, and to keep a download alongside
+         * it from tearing it down — see the comment on [PlexClient.streamUrl].
          */
         sessionId: String? = null,
     ): String
@@ -159,6 +266,17 @@ interface MusicServer {
         streamUrl(track, format, estimateContentLength = false)
 
     /**
+     * Another address for the same original file, for a server that serves
+     * some files on one address and not the other. Null where there is no
+     * other, which is every server but Plex — see [PlexClient.alternateOriginalUrl].
+     *
+     * Asked for only once the usual original stream has failed a song, and
+     * never in place of a format the user chose: it is the same bytes,
+     * reached another way.
+     */
+    fun alternateOriginalUrl(track: Track): String? = null
+
+    /**
      * Settle whatever the server needs settling before it will serve a stream.
      *
      * Most servers need nothing and the default says so. Plex is the exception:
@@ -177,6 +295,28 @@ interface MusicServer {
         format: StreamFormat,
         sessionId: String?,
     ): Boolean = true
+
+    /**
+     * Whether this track's stream in [format] has to have [prepareStream]
+     * asked for it, under the session it carries, before it is fetched. False
+     * by default, and for any stream that is the file itself.
+     */
+    fun streamNeedsDecision(track: Track, format: StreamFormat): Boolean = false
+
+    /**
+     * Whether the server wants one session for a player's whole listening,
+     * changing song as it goes, rather than one per song. Read by the
+     * playback controller, which hands out the ids — see
+     * PlaybackController.sessionIdFor.
+     *
+     * Plex does: its dashboard lists a session per id, and each counts
+     * against a shared user's "remote streams allowed", so an id per song
+     * showed a new entry every song and, at one stream per user, had the
+     * next song refused while the last one's session was still listed.
+     * Jellyfin keeps its PlaySessionId per song, and Subsonic has no
+     * sessions at all.
+     */
+    val oneSessionPerPlayer: Boolean get() = false
 
     fun coverArtUrl(coverArtId: String?): String?
 
@@ -220,6 +360,10 @@ interface MusicServer {
      * starts, the second is the play itself and is what reaches a scrobbling
      * service. A client that only ever sends the second announces nothing while
      * it plays, and logs a play for every track it was skipped past.
+     *
+     * The play throws when the server didn't take it, so the caller can keep it
+     * for later — see [writeResultOf]. The now-playing notice is only true now,
+     * is never kept, and may fail quietly.
      */
     suspend fun scrobble(songId: String, atMs: Long? = null, submission: Boolean = true) = Unit
 
@@ -228,9 +372,10 @@ interface MusicServer {
      * sessions — Plex's dashboard, chiefly — has a "Now Playing" to show.
      *
      * [sessionId] ties a run of calls to one playback the way [streamUrl]'s
-     * parameter of the same name does; it should be the same string handed to
-     * that call for the stream this is reporting on. A server with no notion of
-     * a live session (Subsonic) does nothing with any of this.
+     * parameter of the same name does: one per song, or one for the whole
+     * listening where the server asks for that ([oneSessionPerPlayer]). A
+     * server with no notion of a live session (Subsonic) does nothing with
+     * any of this.
      */
     suspend fun reportTimeline(
         sessionId: String,
@@ -250,15 +395,19 @@ interface MusicServer {
     /** The queue this account last left somewhere, or null if the server keeps none. */
     suspend fun getPlayQueue(): SavedQueue? = null
 
-    /** 1–5, or 0 to clear. False when the server wouldn't take it. */
-    suspend fun setRating(id: String, stars: Int): Boolean = false
+    /**
+     * 1–5, or 0 to clear. Throws when the server didn't take it — see
+     * [writeResultOf] — and so do the likes below: returning is the server's
+     * yes, and nothing else may read as one.
+     */
+    suspend fun setRating(id: String, stars: Int): Unit = throw RefusedWrite()
 
-    suspend fun starSong(songId: String) = Unit
-    suspend fun unstarSong(songId: String) = Unit
-    suspend fun starAlbum(albumId: String) = Unit
-    suspend fun unstarAlbum(albumId: String) = Unit
-    suspend fun starArtist(artistId: String) = Unit
-    suspend fun unstarArtist(artistId: String) = Unit
+    suspend fun starSong(songId: String): Unit = throw RefusedWrite()
+    suspend fun unstarSong(songId: String): Unit = throw RefusedWrite()
+    suspend fun starAlbum(albumId: String): Unit = throw RefusedWrite()
+    suspend fun unstarAlbum(albumId: String): Unit = throw RefusedWrite()
+    suspend fun starArtist(artistId: String): Unit = throw RefusedWrite()
+    suspend fun unstarArtist(artistId: String): Unit = throw RefusedWrite()
 
     // --- Playlists -----------------------------------------------------------
 
@@ -274,11 +423,14 @@ interface MusicServer {
      * at all — it has no call for it — so the songs have to go in as part of
      * the same request, and [MusicSource.supportsEmptyPlaylists] says whether
      * leaving them out is even an option.
+     *
+     * Throws on failure, as the three after it do; a null id is not one. Some
+     * servers make the playlist and answer a bare "ok" without saying which.
      */
-    suspend fun createPlaylist(name: String, songIds: List<String> = emptyList()): String? = null
-    suspend fun renamePlaylist(id: String, name: String) = Unit
-    suspend fun deletePlaylist(id: String) = Unit
-    suspend fun addToPlaylist(id: String, songId: String) = Unit
+    suspend fun createPlaylist(name: String, songIds: List<String> = emptyList()): String? = throw RefusedWrite()
+    suspend fun renamePlaylist(id: String, name: String): Unit = throw RefusedWrite()
+    suspend fun deletePlaylist(id: String): Unit = throw RefusedWrite()
+    suspend fun addToPlaylist(id: String, songId: String): Unit = throw RefusedWrite()
     /**
      * Remove the entries [at] these positions — in the playlist as the server
      * holds it, all of them read against the list as it stands before any is
@@ -301,6 +453,42 @@ interface MusicServer {
 
     /** Whether the edit landed — see [removeFromPlaylistAt]. */
     suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>): Boolean = false
+}
+
+/**
+ * When the server says it is, from a response's `Date` header — a change mark
+ * has to be on the server's clock, which the phone's may disagree with by
+ * minutes. The phone's own where the header is missing or unreadable.
+ */
+internal fun serverClock(response: HttpResponse): Instant = serverClock(response.headers["Date"])
+
+internal fun serverClock(date: String?): Instant =
+    date?.let { runCatching { ZonedDateTime.parse(it, DateTimeFormatter.RFC_1123_DATE_TIME).toInstant() }.getOrNull() }
+        ?: Instant.now()
+
+/** A server's answer to [MusicServer.songChangesSince]; [mark] is what to ask from next time. */
+sealed interface SongChanges {
+    val mark: String?
+
+    /**
+     * These albums' songs changed, and no others' — unless [alsoWalk]: some
+     * changes never reach the server's list, so the sync walks the library
+     * as well, the way it does for [Unknown].
+     */
+    data class Albums(
+        val ids: Set<String>,
+        override val mark: String,
+        val alsoWalk: Boolean = false,
+    ) : SongChanges
+
+    /** Nothing to compare with yet: every album's songs are read once, and from then on it can say. */
+    data class Everything(override val mark: String) : SongChanges
+
+    /** Something may have changed and the server can't say what. */
+    data class Unknown(override val mark: String?) : SongChanges
+
+    /** Nothing changed since the mark. */
+    data class Nothing(override val mark: String) : SongChanges
 }
 
 /** What [MusicServer.reportTimeline] tells the server a session is doing. */

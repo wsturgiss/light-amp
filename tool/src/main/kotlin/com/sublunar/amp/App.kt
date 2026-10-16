@@ -18,6 +18,7 @@ import com.sublunar.amp.data.sortPlaylists
 import com.sublunar.amp.data.sortSongs
 import com.sublunar.amp.data.sortName
 import com.sublunar.amp.data.titleKey
+import com.sublunar.amp.ui.components.NOTICE_MS
 import com.sublunar.amp.ui.components.indexLetterOf
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.distinctUntilChanged
@@ -40,6 +41,7 @@ import com.sublunar.amp.data.db.LibraryDao
 import com.sublunar.amp.data.db.toTrack
 import com.sublunar.amp.data.MusicServer
 import com.sublunar.amp.data.db.LibraryDatabase
+import com.sublunar.amp.playback.LateUnbindGuard
 import com.sublunar.amp.playback.PlaybackController
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SealedLightContext
@@ -58,6 +60,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChangedBy
 import kotlinx.coroutines.flow.drop
@@ -81,6 +84,7 @@ import com.thelightphone.sdk.cast.DlnaCast
 import com.sublunar.amp.art.ArtworkNeed
 import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.withContext
 
 /**
  * App-scoped service locator. Initialized once from the boot screen (which owns
@@ -115,6 +119,26 @@ object App {
     val source: StateFlow<MusicSource> = _source
 
     /**
+     * A line on top of whatever screen is showing, for a few seconds: a write
+     * that didn't land, said after the sheet that made it has closed. Drawn
+     * once, by PlayerTheme, which every screen passes through.
+     */
+    private val _writeNotice = MutableStateFlow<String?>(null)
+    val writeNotice: StateFlow<String?> = _writeNotice
+    private var noticeJob: Job? = null
+
+    /** Show [text] in place of whatever notice is up, and take it down after [NOTICE_MS]. */
+    @Synchronized
+    fun tell(text: String) {
+        noticeJob?.cancel()
+        _writeNotice.value = text
+        noticeJob = scope.launch {
+            delay(NOTICE_MS)
+            _writeNotice.value = null
+        }
+    }
+
+    /**
      * One Room database per source, cached by id.
      *
      * Sources hold different libraries, so they can't share tables — and a shared
@@ -129,15 +153,25 @@ object App {
     /** The active source's DAO. Never read before [boot] has built the first. */
     private fun dao(): LibraryDao = _dao.value ?: error("Library database not ready")
 
-    private fun databaseFor(source: MusicSource): LibraryDatabase = databases.getOrPut(source.id) {
-        // The first server keeps the original file name, so an install from
-        // before sources existed finds its cache rather than syncing afresh.
-        val name = if (source.id == AppSettings.LEGACY_SOURCE_ID) {
-            DB_NAME
-        } else {
-            "$DB_NAME-${source.id}"
+    /**
+     * Held while looking up and building, as [clientFor] holds its own: the
+     * switch, the top-up, the cover loops and the Offline page all ask at once,
+     * from different threads. Two of them missing together would each build a
+     * Room instance on the same file, and Room tells only the instance that
+     * wrote — a download badge or a list on the other would never move. Cheap
+     * to hold: building opens nothing until the first query.
+     */
+    private fun databaseFor(source: MusicSource): LibraryDatabase = synchronized(databases) {
+        databases.getOrPut(source.id) {
+            // The first server keeps the original file name, so an install from
+            // before sources existed finds its cache rather than syncing afresh.
+            val name = if (source.id == AppSettings.LEGACY_SOURCE_ID) {
+                DB_NAME
+            } else {
+                "$DB_NAME-${source.id}"
+            }
+            lightContext.buildDatabase(LibraryDatabase::class.java, name)
         }
-        lightContext.buildDatabase(LibraryDatabase::class.java, name)
     }
 
     /**
@@ -411,6 +445,9 @@ object App {
     /** How long the server must stay silent before the lists narrow to downloads. */
     private const val SERVER_GONE_SETTLE_MS = 20_000L
 
+    /** How long a new link settles before parked download servers are asked about it. */
+    private const val PARKED_PROBE_SETTLE_MS = 2_000L
+
     /** The mode as it stands, for gates that must answer synchronously. */
     val dataMode: StateFlow<DataMode> by lazy {
         settings.dataMode.stateIn(scope, SharingStarted.Eagerly, DataMode.WIFI_ONLY)
@@ -494,6 +531,8 @@ object App {
         if (!coreReady) return
         Connectivity.refresh()
         if (!serverReachable.value) reachability.check(delayMs = 0L)
+        // Nothing, unless a download server is parked — see Downloader.wakeParked.
+        scope.launch { downloader.wakeParked() }
     }
 
     /**
@@ -530,6 +569,10 @@ object App {
     const val SYNC_JOB_KEY = "library-sync"
 
     fun boot(sealedActivity: SealedLightActivity, context: SealedLightContext) {
+        // First, before anything below can make or release a player handle,
+        // and outside the once-only block because it keeps its own flag — see
+        // LateUnbindGuard for why it has to be a raw post from right here.
+        LateUnbindGuard.install()
         if (!coreReady) {
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             settings = AppSettings(context.dataStore)
@@ -585,6 +628,7 @@ object App {
                 bulkAllowed = ::heavyDataAllowed,
                 yieldToPlayback = ::yieldToPlayback,
                 pending = pending,
+                tell = ::tell,
                 settings = settings,
                 scope = scope,
             )
@@ -609,6 +653,10 @@ object App {
             // library data exists is also the right moment to top up downloads.
             library.onSyncSucceeded = {
                 reportServerReachable(true)
+                // Its downloads too, if they were parked — the reachability
+                // flow only speaks on a change, and a download failing never
+                // tells it anything. See Downloader.parkings.
+                downloader.tryNow(source.value.id)
                 scope.launch {
                     // Fresh library rows are also the first chance to work out
                     // which album a reindexed download belongs to.
@@ -704,14 +752,47 @@ object App {
                     .drop(1)
                     .collect { downloader.retry() }
             }
+            // And those a server refused, once their record changes — signed
+            // in again, say. See Downloader.refusals. Or parked, when an address
+            // changed is the reason it stopped answering: Downloader.parkings.
+            scope.launch {
+                settings.sources
+                    .drop(1)
+                    .collect {
+                        if (downloader.refused.value.isNotEmpty() || downloader.parked.value.isNotEmpty()) downloader.retry()
+                    }
+            }
             // Bulk work put off on a metered link — every playlist's contents,
             // and with them the playlist downloads and badges — is picked up
             // the moment the link stops costing money, not at the next launch.
+            // A server parked while bytes could move is asked again once they
+            // may — a mode change with no change of link included, say Low Data
+            // to Make it Hurt on cellular. After the same settle as a change of
+            // link (below): when the link did change too, the one ping should
+            // not go out in its first seconds. See Downloader.wakeParked.
             scope.launch {
                 rules.map { it.mayMoveHeavyBytes }
                     .distinctUntilChanged()
                     .drop(1)
-                    .collect { may -> if (may) topUpDownloads() }
+                    .collect { may ->
+                        if (may) {
+                            scope.launch {
+                                delay(PARKED_PROBE_SETTLE_MS)
+                                downloader.wakeParked()
+                            }
+                            topUpDownloads()
+                        }
+                    }
+            }
+            // A queue held for everyone by the rule has no worker waiting on
+            // it — see Downloader.drain — so the rule moving is what starts
+            // one: opening, or now waiting for something else, which the
+            // Downloads page says.
+            scope.launch {
+                rules.map { it.heavyWaitingFor }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect { downloader.holdChanged() }
             }
             // The covers a sync on cellular couldn't fetch, or a run that Wi-Fi
             // dropping cut short. Its own edge rather than the one above:
@@ -757,6 +838,21 @@ object App {
                     .distinctUntilChanged()
                     .drop(1)
                     .collect { reachability.check() }
+            }
+            // ...and so is every parked download server, not only the browsed
+            // one: nothing else asks them. After a settle, because the first
+            // seconds on a new link are the worst moment to ask (see
+            // NetworkGate.linkChanged), and a server that has been gone ten
+            // minutes is in no hurry.
+            scope.launch {
+                Connectivity.network
+                    .map { Triple(it.isConnected, it.isMetered, it.isWifi) }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collectLatest {
+                        delay(PARKED_PROBE_SETTLE_MS)
+                        downloader.wakeParked()
+                    }
             }
             scope.launch {
                 combine(serverClient, Connectivity.changed) { client, (connected, _) ->
@@ -910,16 +1006,23 @@ object App {
                     .distinctUntilChangedBy { it.size }
                     .collect { topUpDownloads() }
             }
+            // Once per process like the rest. Started on every boot, as it
+            // was, each new activity left one more of these running for good.
+            scope.launch { settings.replayGain.collect { playback.replayGain.value = it } }
             coreReady = true
             // Periodic background library refresh (min 15 min on WorkManager).
             LightWork.enqueuePeriodic(context, SYNC_JOB_KEY, 30.minutes)
         }
-        playback.bind(DefaultLightAudio(sealedActivity))
-        scope.launch { settings.replayGain.collect { playback.replayGain.value = it } }
+        playback.attach(DefaultLightAudio(sealedActivity))
     }
 
-    fun shutdown() {
-        playback.release()
+    /**
+     * The screen that booted [sealedActivity] is backing out. Named, so that an
+     * old activity's back-out can't release the handle a newer one has taken
+     * over — see PlaybackController.attach.
+     */
+    fun shutdown(sealedActivity: SealedLightActivity) {
+        playback.release(owner = DefaultLightAudio(sealedActivity))
     }
 
     /**
@@ -1196,6 +1299,8 @@ object App {
         // source's downloads goes with it.
         library.cancelSync()
         downloader.setSyncing(null)
+        // And whatever it said about syncing — see LibraryRepository.adoptSource.
+        library.adoptSource(runCatching { settings.lastSyncedMs(next.id) }.getOrDefault(0L))
         // Popular songs, the playlists, the search index and the artist ids are
         // all keyed by name rather than by source, so they answer for the wrong
         // server until they're dropped. Cleared *before* the source changes
@@ -1218,6 +1323,13 @@ object App {
         // What was known about the server being left says nothing about this
         // one: assume it is there, and ask.
         reachability.reset()
+        // Its own sync, now that everything it pins is in place, rather than
+        // whenever the root screen next happens to ask: that ask races this
+        // switch, and losing it left a server just added empty for minutes.
+        // The floor still applies, so a source synced a moment ago isn't
+        // fetched again. On Main, where every other caller is, because the
+        // check-then-claim inside isn't atomic.
+        withContext(Dispatchers.Main) { library.syncInBackground() }
     }
 
     /**
@@ -1313,7 +1425,7 @@ object App {
             // Nothing to download on the phone's own music: the files are
             // already here, put there by Light's own transfer, and this app
             // has no business fetching anything on their behalf.
-            if (!source.supportsDownloads || source.offlineMode == OfflineMode.MANUAL) continue
+            if (!source.mayDownload || source.offlineMode == OfflineMode.MANUAL) continue
             runCatching { topUpDownloads(source) }
                 .onFailure { android.util.Log.w("AmpDl", "top-up failed for ${source.name}", it) }
         }

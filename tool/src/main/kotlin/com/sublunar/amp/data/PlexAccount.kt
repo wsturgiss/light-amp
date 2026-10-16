@@ -4,7 +4,10 @@ import io.ktor.client.request.get
 import io.ktor.client.request.header
 import io.ktor.client.request.post
 import io.ktor.client.statement.bodyAsText
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 
 /**
@@ -40,9 +43,13 @@ object PlexAccount {
      * is right for a machine-to-machine link and wrong here. The short code is
      * the one plex.tv/link accepts, and the one a person can read off a phone
      * and type somewhere else.
+     *
+     * [clientIdentifier] is the link's own — see [PlexClient.newClientIdentifier].
+     * The token is issued to it, and plex.tv only answers [awaitToken] for a
+     * code asked for under the same one.
      */
-    suspend fun requestPin(): PlexPin? = runCatching {
-        val response = http.post("$PLEX_TV/api/v2/pins") { plexHeaders() }
+    suspend fun requestPin(clientIdentifier: String): PlexPin? = runCatching {
+        val response = http.post("$PLEX_TV/api/v2/pins") { plexHeaders(clientIdentifier) }
         json.decodeFromString<PlexPin>(response.bodyAsText())
     }.getOrNull()
 
@@ -52,12 +59,12 @@ object PlexAccount {
      * Plex expires a PIN after fifteen minutes; this stops well short of that,
      * because a code left on screen that long has been abandoned.
      */
-    suspend fun awaitToken(pin: PlexPin, onTick: (Int) -> Unit = {}): String? {
+    suspend fun awaitToken(pin: PlexPin, clientIdentifier: String, onTick: (Int) -> Unit = {}): String? {
         repeat(POLL_ATTEMPTS) { attempt ->
             delay(POLL_INTERVAL_MS)
             onTick(attempt)
             val token = runCatching {
-                val response = http.get("$PLEX_TV/api/v2/pins/${pin.id}") { plexHeaders() }
+                val response = http.get("$PLEX_TV/api/v2/pins/${pin.id}") { plexHeaders(clientIdentifier) }
                 json.decodeFromString<PlexPin>(response.bodyAsText()).authToken
             }.getOrNull()
             if (!token.isNullOrBlank()) return token
@@ -66,9 +73,9 @@ object PlexAccount {
     }
 
     /** Every server on the account that provides a library. */
-    suspend fun resources(token: String): List<PlexResource> = runCatching {
+    suspend fun resources(token: String, clientIdentifier: String): List<PlexResource> = runCatching {
         val response = http.get("$PLEX_TV/api/v2/resources?includeHttps=1&includeRelay=1") {
-            plexHeaders()
+            plexHeaders(clientIdentifier)
             header("X-Plex-Token", token)
         }
         json.decodeFromString<List<PlexResource>>(response.bodyAsText())
@@ -96,42 +103,57 @@ object PlexAccount {
      * [MusicSource.connections]: the rest are kept so this can be redone when
      * the network changes underneath a source.
      */
-    suspend fun reachable(resource: PlexResource, token: String): String? {
+    suspend fun reachable(resource: PlexResource, token: String, clientIdentifier: String): String? {
         val ordered = resource.connections.sortedWith(
             compareBy({ !it.local }, { it.relay }),
         )
-        for (connection in ordered) {
-            val ok = runCatching {
-                val response = http.get(connection.uri.trimEnd('/') + "/identity") {
-                    plexHeaders()
-                    header("X-Plex-Token", resource.accessToken ?: token)
-                }
-                response.status.value in 200..299
-            }.getOrDefault(false)
-            if (ok) return connection.uri.trimEnd('/')
-        }
-        return null
+        return firstAnswering(ordered.map { it.uri }, resource.accessToken ?: token, clientIdentifier)
     }
 
     /** The first of [uris] that answers, for re-resolving a stored source. */
-    suspend fun firstReachable(uris: List<String>, token: String): String? {
-        for (uri in uris) {
-            val ok = runCatching {
-                http.get(uri.trimEnd('/') + "/identity") {
-                    plexHeaders()
-                    header("X-Plex-Token", token)
-                }.status.value in 200..299
-            }.getOrDefault(false)
-            if (ok) return uri.trimEnd('/')
+    suspend fun firstReachable(uris: List<String>, token: String, clientIdentifier: String): String? =
+        firstAnswering(uris, token, clientIdentifier)
+
+    /**
+     * The best-ranked of [uris] that answers, in a few seconds rather than
+     * however many addresses a server lists times ten.
+     *
+     * A server lists every address it has — LAN, public, relay — and from any
+     * one place some of them lead nowhere. Tried in turn, each of those had to
+     * time out before the next was asked, which is what kept linking on
+     * "Looking at…" for ten seconds and more. Asked all at once, with a short
+     * limit each, the wait is the best-ranked address's answer, or the limit
+     * if that one is silent; ranking still decides which wins. Nothing
+     * answering that fast — a slow link — gets the patient pass, in turn, as
+     * before, so a slow address is late rather than lost.
+     */
+    private suspend fun firstAnswering(uris: List<String>, token: String, clientIdentifier: String): String? {
+        val quick = coroutineScope {
+            val probes = uris.map { uri ->
+                async { withTimeoutOrNull(QUICK_PROBE_MS) { answers(uri, token, clientIdentifier) } == true }
+            }
+            val winner = uris.indices.firstOrNull { probes[it].await() }
+            probes.forEach { it.cancel() }
+            winner
         }
-        return null
+        if (quick != null) return uris[quick].trimEnd('/')
+        return uris.firstOrNull { answers(it, token, clientIdentifier) }?.trimEnd('/')
     }
 
-    private fun io.ktor.client.request.HttpRequestBuilder.plexHeaders() {
+    private suspend fun answers(uri: String, token: String, clientIdentifier: String): Boolean = runCatching {
+        http.get(uri.trimEnd('/') + "/identity") {
+            plexHeaders(clientIdentifier)
+            header("X-Plex-Token", token)
+        }.status.value in 200..299
+    }.getOrDefault(false)
+
+    private fun io.ktor.client.request.HttpRequestBuilder.plexHeaders(clientIdentifier: String) {
         header("Accept", "application/json")
-        PlexClient.plexIdentity().forEach { (k, v) -> header(k, v) }
+        PlexClient.plexIdentity(clientIdentifier = clientIdentifier).forEach { (k, v) -> header(k, v) }
     }
 
     private const val POLL_INTERVAL_MS = 2_000L
+    /** Long enough for a relay to answer; short enough that a dead LAN address isn't waited out. */
+    private const val QUICK_PROBE_MS = 3_000L
     private const val POLL_ATTEMPTS = 90
 }

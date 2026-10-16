@@ -27,19 +27,14 @@ data class SubsonicConfig(
 ) {
     companion object {
         /**
-         * Base URLs to try for a raw input, in order. When the user omits a
-         * scheme, prefer HTTPS and fall back to HTTP (for LAN servers). Drops a
-         * trailing slash and a `/rest` suffix.
+         * Base URLs to try for a raw input, in order — see [ServerAddress] for
+         * when http:// follows https://. Drops a trailing slash and a `/rest`
+         * suffix.
          */
-        fun candidates(raw: String): List<String> {
-            var url = raw.trim().trimEnd('/')
-            url = url.replace(Regex("/rest$", RegexOption.IGNORE_CASE), "")
-            return if (url.matches(Regex("^https?://.*", RegexOption.IGNORE_CASE))) {
-                listOf(url)
-            } else {
-                listOf("https://$url", "http://$url")
-            }
-        }
+        fun candidates(raw: String): List<String> =
+            ServerAddress.candidates(
+                raw.trim().trimEnd('/').replace(Regex("/rest$", RegexOption.IGNORE_CASE), ""),
+            )
     }
 }
 
@@ -534,6 +529,22 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
             ScanRequest.REFUSED
         }
 
+    /**
+     * Whether a scan has run since [mark] — which is all Subsonic can say.
+     *
+     * Navidrome changes nothing between scans, so the same last scan as the
+     * mark means nothing changed. A different one means something may have,
+     * with no way to ask which songs: the sync walks the library instead. No
+     * answer (a server without getScanStatus, or one mid-scan, whose last scan
+     * is still moving) is the same as not knowing.
+     */
+    override suspend fun songChangesSince(mark: String?, libraries: List<String?>): SongChanges {
+        val status = runCatching { request("getScanStatus").scanStatus }.getOrNull()
+        val lastScan = status?.lastScan?.takeIf { it.isNotBlank() && !status.scanning }
+            ?: return SongChanges.Unknown(mark = null)
+        return if (lastScan == mark) SongChanges.Nothing(lastScan) else SongChanges.Unknown(lastScan)
+    }
+
     override suspend fun serverScanning(musicFolderId: String?): Boolean =
         runCatching { request("getScanStatus").scanStatus?.scanning }.getOrNull() ?: false
 
@@ -630,13 +641,13 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
      * Set a song's or album's star rating on the server, 0–5.
      *
      * Navidrome treats 0 as "remove the rating"; Subsonic's `setRating` takes it
-     * directly, so no separate unrate call is needed. Returns false when the
-     * server refused, so the caller can avoid caching a rating that didn't stick.
+     * directly, so no separate unrate call is needed. Throws when it didn't
+     * land, as the stars do, so the caller can tell a server that refused from
+     * one it couldn't reach.
      */
-    override suspend fun setRating(id: String, stars: Int): Boolean = runCatching {
+    override suspend fun setRating(id: String, stars: Int) {
         request("setRating", listOf("id" to id, "rating" to stars.coerceIn(0, 5).toString()))
-        true
-    }.getOrDefault(false)
+    }
 
     override suspend fun getLyrics(songId: String): Lyrics? {
         return try {

@@ -17,10 +17,10 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import com.sublunar.amp.App
-import com.sublunar.amp.data.Cleartext
 import com.sublunar.amp.data.MusicFolder
 import com.sublunar.amp.data.MusicSource
 import com.sublunar.amp.data.PlexClient
+import com.sublunar.amp.data.PlexException
 import com.sublunar.amp.data.PlexAccount
 import com.sublunar.amp.data.PlexResource
 import com.sublunar.amp.data.SourceKind
@@ -36,9 +36,11 @@ import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
+import kotlinx.serialization.SerializationException
 
 /**
  * Linking a Plex account by code.
@@ -56,8 +58,19 @@ class PlexLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
     /** A server is being looked at; its answer will go back from this page. */
     private var looking by mutableStateOf(false)
 
+    /** The line above the servers, which [pick] writes to as well as the code's wait. */
+    private var status by mutableStateOf("Asking Plex for a code…")
+
     /** Set once this page has been popped, so an answer arriving late can't act on another. */
     private var gone = false
+
+    /**
+     * Who this link is, to plex.tv and to the server: the code is asked for
+     * under it, the token is issued to it, and the source keeps it — see
+     * MusicSource.deviceId. One per page, so a code asked for again after the
+     * page was rebuilt is still the same device asking.
+     */
+    private val clientId = PlexClient.newClientIdentifier()
 
     override fun onScreenDestroy() {
         gone = true
@@ -71,33 +84,50 @@ class PlexLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
     @Composable
     override fun Content() {
         var code by remember { mutableStateOf<String?>(null) }
-        var status by remember { mutableStateOf("Asking Plex for a code…") }
         var servers by remember { mutableStateOf<List<PlexResource>>(emptyList()) }
         var token by remember { mutableStateOf<String?>(null) }
-        // Set once a server is picked, if it turns out to have more than one
-        // music library — asked here rather than after a sync, because syncing
-        // the whole server first only to narrow it afterwards is the long way
-        // round on a machine with several libraries.
-        var pending by remember { mutableStateOf<PendingServer?>(null) }
+        // The way in without an account, offered until the code is claimed:
+        // from then on the account route has begun, and a second way in beside
+        // it is only something to press by mistake. Back again if that route
+        // leads nowhere — no servers on the account, or none that answers.
+        var offerManual by remember { mutableStateOf(true) }
 
         LaunchedEffect(Unit) {
-            val pin = PlexAccount.requestPin()
+            val pin = PlexAccount.requestPin(clientId)
             if (pin == null) {
                 status = "Couldn't reach plex.tv."
                 return@LaunchedEffect
             }
             code = pin.code
             status = "Waiting for you to enter it…"
-            val linked = PlexAccount.awaitToken(pin)
+            val linked = PlexAccount.awaitToken(pin, clientId)
             if (linked == null) {
                 status = "The code expired. Go back and try again."
                 code = null
                 return@LaunchedEffect
             }
             token = linked
+            offerManual = false
+            // The code has done its job; from here the page only says what is happening.
+            code = null
             status = "Finding your servers…"
-            servers = PlexAccount.resources(linked)
-            status = if (servers.isEmpty()) "No servers on that account." else "Choose a server"
+            val found = PlexAccount.resources(linked, clientId)
+            val only = found.singleOrNull()
+            if (only != null) {
+                // One server is no choice. The login just made says which, so
+                // it goes straight on to it, on this same page, rather than
+                // listing it for a tap that could only land on the same row.
+                // The list appears only if it doesn't answer, to try again from.
+                status = "Connecting to ${only.name}…"
+                pick(only, linked) {
+                    servers = found
+                    offerManual = true
+                }
+            } else {
+                servers = found
+                status = if (found.isEmpty()) "No servers on that account." else "Choose a server"
+                if (found.isEmpty()) offerManual = true
+            }
         }
 
         ListScreen(onBack = { goBack() }, title = "Link Plex") {
@@ -109,7 +139,10 @@ class PlexLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.spacedBy(px(31)),
                         ) {
-                            AppText("plex.tv/link", pxSp(LightType.COPY_PX), align = TextAlign.Center)
+                            // Only while there is a code to enter there.
+                            if (code != null) {
+                                AppText("plex.tv/link", pxSp(LightType.COPY_PX), align = TextAlign.Center)
+                            }
                             code?.let {
                                 // The whole point of the screen, so it gets the
                                 // size: read off this and typed somewhere else.
@@ -118,57 +151,53 @@ class PlexLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                             AppText(status, pxSp(LightType.DETAIL_PX), dim = true, align = TextAlign.Center)
                         }
                     }
-                } else if (pending != null) {
-                    val choice = pending!!
-                    item { SectionLabel("Which library?") }
-                    items(choice.sections, key = { it.id }) { section ->
-                        TextRow(title = section.name) {
-                            save(choice.source.copy(libraryId = section.id))
-                        }
-                    }
-                    item {
-                        TextRow(title = "All libraries") { save(choice.source) }
-                    }
                 } else {
                     item { SectionLabel(status) }
                     items(servers, key = { it.clientIdentifier }) { server ->
                         TextRow(
                             title = server.name,
                             subtitle = if (server.owned) "Yours" else "Shared with you",
-                            onClick = {
-                                // One server at a time, and nothing opened over
-                                // this page meanwhile: the answer goes back from
-                                // here — see `gone`.
-                                if (looking) return@TextRow
-                                val accountToken = token ?: return@TextRow
-                                looking = true
-                                status = "Looking at ${server.name}…"
-                                App.scope.launch {
-                                    val next = prepare(server, accountToken)
-                                    // Main, and only while this page is up —
-                                    // see JellyfinLinkScreen.signIn.
-                                    withContext(Dispatchers.Main.immediate) {
-                                        if (gone) return@withContext
-                                        looking = false
-                                        if (next == null) {
-                                            status = "Couldn't reach ${server.name}."
-                                        } else if (next.sections.size < 2) {
-                                            save(next.source)
-                                        } else {
-                                            pending = next
-                                        }
-                                    }
-                                }
-                            },
+                            onClick = { token?.let { pick(server, it) { offerManual = true } } },
                         )
                     }
                 }
-                item { SectionLabel("Server not on an account?") }
-                item {
-                    TextRow(title = "Enter address and token") {
-                        if (looking) return@TextRow
-                        navigateTo<Unit>({ PlexManualScreen(it) }, resultCallback = { goBack() })
+                // See offerManual; and never while a server is being connected
+                // to, since its answer goes on from here.
+                if (offerManual && !looking) {
+                    item { SectionLabel("Server not on an account?") }
+                    item {
+                        TextRow(title = "Enter address and token") {
+                            navigateTo<Unit>({ PlexManualScreen(it) }, resultCallback = { goBack() })
+                        }
                     }
+                }
+            }
+        }
+    }
+
+    /**
+     * Look at [server] and, if it answers, carry on to its libraries — picked
+     * before its first sync, see finishAddingSource.
+     *
+     * One server at a time, and nothing opened over this page meanwhile: the
+     * answer goes on from here — see `gone`. [onMissed] runs if it doesn't
+     * answer, after the status says so.
+     */
+    private fun pick(server: PlexResource, accountToken: String, onMissed: () -> Unit) {
+        if (looking) return
+        looking = true
+        status = "Looking at ${server.name}…"
+        App.scope.launch {
+            val next = prepare(server, accountToken)
+            // Main, and only while this page is up — see JellyfinLinkScreen.signIn.
+            withContext(Dispatchers.Main.immediate) {
+                if (gone) return@withContext
+                looking = false
+                if (next == null) {
+                    status = "Couldn't reach ${server.name}."
+                    onMissed()
+                } else {
+                    adoptServer(next) { gone }
                 }
             }
         }
@@ -181,15 +210,17 @@ class PlexLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
      * advertises several addresses and only some of them work from here.
      */
     private suspend fun prepare(server: PlexResource, accountToken: String): PendingServer? {
-        val uri = PlexAccount.reachable(server, accountToken) ?: return null
-        val pending = inspectPlexServer(
+        val uri = PlexAccount.reachable(server, accountToken, clientId) ?: return null
+        val found = inspectPlexServer(
             name = server.name,
             uri = uri,
             token = server.accessToken ?: accountToken,
+            clientIdentifier = clientId,
             // An account already knows the server's id; only the typed-in path
             // has to go and ask for it.
             machineIdentifier = server.clientIdentifier,
-        ) ?: return null
+        ) as? SignInOutcome.Found ?: return null
+        val pending = found.server
         // Keep the addresses that didn't win too: the one that answers at home
         // is usually the LAN address, which is unreachable from anywhere else.
         // See MusicSource.connections.
@@ -198,18 +229,6 @@ class PlexLinkScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
         )
     }
 
-    private fun save(source: MusicSource) {
-        App.scope.launch {
-            // Re-linking an already-known server (by Plex's own machine id)
-            // updates that source in place rather than adding a second one —
-            // see the note on AppSettings.saveSource — so the id actually made
-            // active has to be whatever saveSource settled on, not the fresh
-            // one this screen minted.
-            val id = App.settings.saveSource(source)
-            App.settings.setActiveSource(id)
-        }
-        goBack()
-    }
 }
 
 /** A server we can reach, and the music libraries on it. */
@@ -219,21 +238,53 @@ data class PendingServer(val source: MusicSource, val sections: List<MusicFolder
  * Everything about a server that has to be settled before it becomes a source:
  * that it answers, what it calls itself, and what music libraries it holds.
  *
- * Null when the address and token don't get us in — better found here than by a
- * sync that fails after the source is already saved.
+ * Better found here than by a sync that fails after the source is already
+ * saved — and said in a way that tells a wrong address from a wrong token.
+ * Plex answers `/identity` without a token, so that settles the address, and
+ * the libraries call settles the token.
  */
 suspend fun inspectPlexServer(
     name: String,
     uri: String,
     token: String,
+    /** The new link's own identifier, kept on the source — see MusicSource.deviceId. */
+    clientIdentifier: String,
     machineIdentifier: String? = null,
-): PendingServer? {
-    val client = PlexClient(uri, token, machineIdentifier.orEmpty())
+): SignInOutcome {
+    val client = PlexClient(uri, token, machineIdentifier.orEmpty(), clientIdentifier = clientIdentifier)
     try {
         // Without the machine id nothing can be added to a playlist, so a server
         // that won't tell us who it is isn't usable as a source.
-        val identity = machineIdentifier ?: client.identity() ?: return null
-        val sections = runCatching { client.getMusicFolders() }.getOrNull() ?: return null
+        val identity = machineIdentifier
+            ?: try {
+                client.publicIdentity()
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                val status = e.plexStatus()
+                return when {
+                    status != null && status in 500..599 ->
+                        SignInOutcome.Missed(unavailableReason(status), answered = true)
+                    e is PlexException || e is SerializationException -> SignInOutcome.Missed(NOT_PLEX, answered = true)
+                    else -> SignInOutcome.Missed(unreachedReason(e), answered = false)
+                }
+            }
+            ?: return SignInOutcome.Missed(NOT_PLEX, answered = true)
+        val sections = try {
+            client.getMusicFolders()
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            val status = e.plexStatus()
+            return SignInOutcome.Settled(
+                uri,
+                when {
+                    status in REFUSED_STATUSES -> PLEX_TOKEN_REFUSED
+                    status != null -> "Plex couldn't list its libraries (error $status). Try again."
+                    else -> "That address answered, then stopped before the token could be checked. Try again."
+                },
+            )
+        }
         val source = MusicSource(
             id = newSourceId(),
             kind = SourceKind.PLEX,
@@ -241,16 +292,26 @@ suspend fun inspectPlexServer(
             baseUrl = uri,
             token = token,
             machineIdentifier = identity,
+            deviceId = clientIdentifier,
             // Remembered on the source, so the Sources page can offer the same
             // switch a Navidrome's music folders get — without waiting for a
             // sync to discover what we already know here.
             libraries = sections.map { SourceLibrary(it.id, it.name) },
         )
-        return PendingServer(source, sections)
+        return SignInOutcome.Found(PendingServer(source, sections))
     } finally {
         client.close()
     }
 }
+
+private fun Throwable.plexStatus(): Int? =
+    generateSequence(this) { it.cause }.take(8).filterIsInstance<PlexException>().firstOrNull()?.status
+
+private val REFUSED_STATUSES = setOf(401, 403)
+
+private const val PLEX_TOKEN_REFUSED = "Plex didn't accept that token."
+
+private const val NOT_PLEX = "That address answered, but it isn't a Plex server. Check the address and port."
 
 /** The fallback: a server address and a token, typed in. */
 class PlexManualScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) {
@@ -266,12 +327,12 @@ class PlexManualScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(se
     private var address by mutableStateOf("")
     private var token by mutableStateOf("")
     private var status by mutableStateOf<String?>(null)
-    // Set once the server answers and turns out to hold more than one music
-    // library, exactly as on the account path.
-    private var pending by mutableStateOf<PendingServer?>(null)
     // Each check mints a fresh source id, so two taps while the first is still
     // in flight would add the same server twice — see the note in ServerScreen.
     private var checking by mutableStateOf(false)
+
+    /** Who this link is to the server, kept on the source — see MusicSource.deviceId. */
+    private val clientId = PlexClient.newClientIdentifier()
 
     /** Set once this page has been popped, so an answer arriving late can't act on another. */
     private var gone = false
@@ -284,17 +345,6 @@ class PlexManualScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(se
     override fun Content() {
         ListScreen(onBack = { goBack() }, title = "Plex Server") {
             ScrollableList(modifier = Modifier.fillMaxSize()) {
-                val choice = pending
-                if (choice != null) {
-                    item { SectionLabel("Which library?") }
-                    items(choice.sections, key = { it.id }) { section ->
-                        TextRow(title = section.name) {
-                            save(choice.source.copy(libraryId = section.id))
-                        }
-                    }
-                    item { TextRow(title = "All libraries") { save(choice.source) } }
-                    return@ScrollableList
-                }
                 item { SectionLabel(status ?: "For a server not linked to an account") }
                 item {
                     TextRow(title = "Name", value = name.ifBlank { "Required" }) {
@@ -304,7 +354,7 @@ class PlexManualScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(se
                 item {
                     TextRow(
                         title = "Address",
-                        value = address.ifBlank { "http://192.168.1.10:32400" },
+                        value = address.ifBlank { "Required" },
                     ) { edit("Address", address) { address = it } }
                 }
                 item {
@@ -319,32 +369,37 @@ class PlexManualScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(se
                             status = "Fill in all three."
                             return@TextRow
                         }
-                        // Said before trying, as on the Jellyfin form: the check
-                        // below can only report that it didn't get in.
-                        if (Cleartext.refuses(address)) {
-                            status = Cleartext.REFUSED
-                            return@TextRow
-                        }
                         checking = true
                         status = "Checking…"
                         App.scope.launch {
                             // Proven before it is saved: a source that can't be
                             // reached would otherwise sit there failing to sync
                             // with nothing to say why.
-                            val next = inspectPlexServer(
-                                name = name.trim(),
-                                uri = address.trim().trimEnd('/'),
-                                token = token.trim(),
-                            )
+                            val outcome = firstAnsweringSpelling(address) { uri ->
+                                inspectPlexServer(
+                                    name = name.trim(),
+                                    uri = uri,
+                                    token = token.trim(),
+                                    clientIdentifier = clientId,
+                                )
+                            }
                             // Main, and only while this page is up — see
                             // JellyfinLinkScreen.signIn.
                             withContext(Dispatchers.Main.immediate) {
                                 if (gone) return@withContext
                                 checking = false
-                                when {
-                                    next == null -> status = "Couldn't get in with that address and token."
-                                    next.sections.size < 2 -> save(next.source)
-                                    else -> pending = next
+                                when (outcome) {
+                                    is SignInOutcome.Found -> {
+                                        val next = outcome.server
+                                        // As on the Jellyfin form: the spelling that answered.
+                                        address = next.source.baseUrl
+                                        adoptServer(next) { gone }
+                                    }
+                                    is SignInOutcome.Settled -> {
+                                        address = outcome.uri
+                                        status = outcome.reason
+                                    }
+                                    is SignInOutcome.Missed -> status = outcome.reason
                                 }
                             }
                         }
@@ -365,15 +420,4 @@ class PlexManualScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(se
         )
     }
 
-    private fun save(source: MusicSource) {
-        App.scope.launch {
-            // See the note in PlexLinkScreen.save: the id that ends up active
-            // is whichever one saveSource kept, which may be an existing
-            // source's if this same server (by machineIdentifier) was already
-            // linked under a different address.
-            val id = App.settings.saveSource(source)
-            App.settings.setActiveSource(id)
-        }
-        goBack(Unit)
-    }
 }
