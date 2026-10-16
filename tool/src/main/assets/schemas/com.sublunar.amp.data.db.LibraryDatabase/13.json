@@ -2,7 +2,7 @@
   "formatVersion": 1,
   "database": {
     "version": 13,
-    "identityHash": "7e455f8e3afdf6391d8825ea8380f23f",
+    "identityHash": "3c0d02578a334c20a366e49f976ae259",
     "entities": [
       {
         "tableName": "tracks",
@@ -122,7 +122,18 @@
           "columnNames": [
             "id"
           ]
-        }
+        },
+        "indices": [
+          {
+            "name": "index_tracks_albumId",
+            "unique": false,
+            "columnNames": [
+              "albumId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_tracks_albumId` ON `${TABLE_NAME}` (`albumId`)"
+          }
+        ]
       },
       {
         "tableName": "albums",
@@ -336,54 +347,11 @@
             "position"
           ]
         }
-      },
-      {
-        "tableName": "playlist_tracks",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`playlistId` TEXT NOT NULL, `position` INTEGER NOT NULL, `trackId` TEXT NOT NULL, `stampedAtMs` INTEGER NOT NULL, `fetchedAtMs` INTEGER NOT NULL, PRIMARY KEY(`playlistId`, `position`))",
-        "fields": [
-          {
-            "fieldPath": "playlistId",
-            "columnName": "playlistId",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "position",
-            "columnName": "position",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
-            "fieldPath": "trackId",
-            "columnName": "trackId",
-            "affinity": "TEXT",
-            "notNull": true
-          },
-          {
-            "fieldPath": "stampedAtMs",
-            "columnName": "stampedAtMs",
-            "affinity": "INTEGER",
-            "notNull": true
-          },
-          {
-            "fieldPath": "fetchedAtMs",
-            "columnName": "fetchedAtMs",
-            "affinity": "INTEGER",
-            "notNull": true
-          }
-        ],
-        "primaryKey": {
-          "autoGenerate": false,
-          "columnNames": [
-            "playlistId",
-            "position"
-          ]
-        }
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '7e455f8e3afdf6391d8825ea8380f23f')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '3c0d02578a334c20a366e49f976ae259')"
     ]
   }
 }
