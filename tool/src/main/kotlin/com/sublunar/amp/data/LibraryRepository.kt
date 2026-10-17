@@ -1199,7 +1199,14 @@ class LibraryRepository(
         } else {
             serverWrite { it.addToPlaylist(id, trackId) }
         }
-        if (result == WriteResult.Saved) editMembership(id) { it + trackId } else dropMembership(id)
+        // Marked rather than dropped when it didn't land. A refusal usually
+        // means the stored copy is still right — the song never went on — and
+        // dropping it costs a full refetch, or offline leaves the playlist
+        // opening empty over an edit that never happened. But the write can
+        // land and the answer be lost coming back, leaving a copy short a
+        // song. Marking covers both: what we hold keeps serving, and the next
+        // prime re-reads it.
+        if (result == WriteResult.Saved) editMembership(id) { it + trackId } else markMembershipStale(id)
         said("addToPlaylist($id)", result)
     }
 
