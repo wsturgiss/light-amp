@@ -82,6 +82,8 @@ import com.sublunar.amp.data.LogFile
 import com.sublunar.amp.data.Trace
 import kotlinx.coroutines.flow.onEach
 import com.sublunar.amp.data.Reachability
+import com.sublunar.amp.data.PlexRoute
+import com.sublunar.amp.data.PlexAccount
 import com.sublunar.amp.data.StreamProxy
 import kotlinx.coroutines.withTimeoutOrNull
 import com.thelightphone.sdk.cast.DlnaCast
@@ -417,7 +419,18 @@ object App {
      * out by asking rather than by waiting for a sync to say so.
      */
     val reachability: Reachability by lazy {
-        Reachability(scope, client = { serverClient.value }, mayAsk = { rules.value.mayTalkToServer })
+        Reachability(
+            scope,
+            client = { serverClient.value },
+            mayAsk = { rules.value.mayTalkToServer },
+            route = PlexRoute(
+                source = { settings.activeSource.first() },
+                advertised = { s -> PlexAccount.advertised(s.machineIdentifier, s.token, s.plexClientIdentifier) },
+                firstAnswering = { uris, s -> PlexAccount.firstReachable(uris, s.token, s.plexClientIdentifier) },
+                save = { s -> settings.saveSource(s) },
+                onLan = { rules.value.let { it.connected && it.wifi } },
+            ),
+        )
     }
     val serverReachable: StateFlow<Boolean> get() = reachability.reachable
 
