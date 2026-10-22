@@ -24,9 +24,7 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.collectAsState
-import com.sublunar.amp.App
 import com.sublunar.amp.data.Album
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
@@ -72,6 +70,7 @@ fun AlbumGrid(
     // it reads and the bar freezes where it was — the same trap the songs tab
     // documents for collectAsState.
     val target = rememberScrollTarget(state)
+    val rows = rememberLatest(albums)
     Box(modifier = modifier.fillMaxSize()) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(GRID_COLUMNS),
@@ -93,8 +92,9 @@ fun AlbumGrid(
         verticalArrangement = Arrangement.spacedBy(px(GRID_GAP_PX)),
     ) {
         header?.invoke(this)
-        items(albums.size, key = { albums[it].id }) { index ->
-            val album = albums[index]
+        // Read through [rows], never captured — see LatestList.
+        items(albums.size, key = { rows[it]?.id ?: it }) { index ->
+            val album = rows[index] ?: return@items
             Column(
                 modifier = Modifier
                     .fillMaxWidth()

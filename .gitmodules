@@ -1,0 +1,4 @@
+[submodule "light-sdk"]
+	path = light-sdk
+	url = https://github.com/lightphone/light-sdk.git
+	ignore = dirty

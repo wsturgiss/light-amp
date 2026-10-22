@@ -1,6 +1,9 @@
 package com.sublunar.amp.ui.screens
 
 import android.view.KeyEvent
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.components.AppText
+import com.sublunar.amp.ui.pxSp
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -12,19 +15,26 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.viewModelScope
 import com.sublunar.amp.App
+import kotlinx.coroutines.flow.first
+import com.sublunar.amp.data.LayoutMode
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.flow.filterNotNull
+import com.sublunar.amp.data.LastSection
 import com.sublunar.amp.data.MusicSource
 import com.sublunar.amp.ui.PlayerTheme
 import com.thelightphone.sdk.InitialScreen
 import com.thelightphone.sdk.LightScreen
 import com.thelightphone.sdk.LightViewModel
 import com.thelightphone.sdk.SealedLightActivity
-import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextVariant
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import androidx.compose.ui.platform.LocalWindowInfo
+
+/** How long to wait for the restored queue before giving up on the player. */
+private const val RESTORE_PLAYER_MS = 2_000L
 
 sealed interface BootState {
     data object Loading : BootState
@@ -61,11 +71,30 @@ class BootViewModel : LightViewModel<Unit>() {
  * on top of this one, so the home menu is always the base of the back stack.
  */
 @InitialScreen
-class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>(sealed) {
+class BootScreen(private val sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>(sealed) {
 
     init {
         App.boot(sealed, lightContext)
     }
+
+    /**
+     * Whether this window has settled where it opens — see the landing in
+     * [Content].
+     *
+     * Held on the screen, not by a composition effect's key: the root leaves
+     * composition whenever a screen is pushed over it and re-enters when that
+     * screen pops, so a `LaunchedEffect(Unit)` there runs again on every
+     * return. Coming back from the keyboard with a query typed, that landed you
+     * on the index with search closed — the results were one tap away and
+     * looked like the search had been thrown away.
+     *
+     * And once per window, not once per process as it was: a window Android
+     * rebuilt while the app ran on — having closed the old one in the
+     * background — skipped the landing and opened on the library's last tab,
+     * whichever of the three it had been left on. Each window makes one of
+     * these screens, so this is that window's own.
+     */
+    private var landed = false
 
     override val viewModelClass: Class<BootViewModel> get() = BootViewModel::class.java
 
@@ -76,20 +105,10 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
         App.playback.handleVolumeKey(keyCode) || super.onKeyDown(keyCode, event)
 
-    /**
-     * This screen *is* the tabs, so while it shows, no page that isn't a tab
-     * does — see [LibraryNav.offTab].
-     *
-     * The SDK's own hook rather than a composition effect: it fires on the way
-     * back down as well (goBack and popToRoot both announce the screen they
-     * reveal), which is every path that can leave a standalone page.
-     */
-    override fun willShow() {
-        LibraryNav.offTab.value = false
-    }
-
+    // Named on the way out: a newer activity may have taken the player over
+    // by then, and this back-out must not release it — see App.shutdown.
     override fun onScreenDestroy() {
-        App.shutdown()
+        App.shutdown(sealed)
     }
 
     private fun createPlaylistFlow() {
@@ -110,9 +129,21 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
             if (state is BootState.Ready) App.library.syncInBackground()
         }
 
+        // Coming back to the front is a reason to look at the link again. The
+        // SDK has no resume hook for a tool, and a process that was frozen in
+        // the background hears about a network change late, if at all — so
+        // the window regaining focus asks the system directly, and asks the
+        // server too if it was last seen silent. Two binder reads and at most
+        // one small request, once per return to the app.
+        val focused = LocalWindowInfo.current.isWindowFocused
+        LaunchedEffect(focused, state) {
+            if (focused && state is BootState.Ready) App.linkMayHaveChanged()
+        }
+
         when (state) {
             BootState.Loading -> Splash()
             BootState.NeedsLogin -> WelcomeContent(
+                onBandcamp = { go { ServerScreen(it, sourceId = null, adding = true, bandcamp = true) } },
                 onSubsonic = { go { ServerScreen(it, sourceId = null, adding = true) } },
                 onPlex = { go { PlexLinkScreen(it) } },
                 onJellyfin = { go { JellyfinLinkScreen(it) } },
@@ -126,57 +157,82 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
             )
             BootState.Ready -> {
                 val tab by viewModel.currentTab.collectAsState()
-                // A header's search button goes straight to typing, wherever it
-                // was pressed — the sub-page that requested it has usually been
-                // unwound by the time this runs, so the root does the pushing.
-                val wantsKeyboard by LibraryNav.pendingKeyboard.collectAsState()
-                LaunchedEffect(wantsKeyboard) {
-                    if (!wantsKeyboard) return@LaunchedEffect
-                    LibraryNav.pendingKeyboard.value = false
+                // Reopen where the app was left: one of the bar's three
+                // destinations, never the page beneath it — see LastSection.
+                // Once per window, guarded by [landed], because this composable
+                // re-enters every time a pushed screen pops off it.
+                LaunchedEffect(Unit) {
+                    if (landed) return@LaunchedEffect
+                    landed = true
+                    when (App.settings.lastSection.first()) {
+                        LastSection.SEARCH -> LibraryNav.openSearch()
+                        LastSection.NOW_PLAYING -> {
+                            // The queue is restored asynchronously, so wait a
+                            // moment for it rather than opening a player with
+                            // nothing in it. If nothing arrives, the library is
+                            // the honest place to land.
+                            val track = withTimeoutOrNull(RESTORE_PLAYER_MS) {
+                                App.playback.currentTrack.filterNotNull().first()
+                            }
+                            if (track != null) go { NowPlayingScreen(it) } else openLibrary()
+                        }
+                        LastSection.LIBRARY -> openLibrary()
+                    }
+                }
+                val libraryIndex by LibraryNav.libraryIndex.collectAsState()
+                val searchActive by viewModel.searchActive.collectAsState()
+                val searchQuery by viewModel.searchQuery.collectAsState()
+                // The SDK's full-screen editor, which is what Simplified uses
+                // for search — see the actions below. A local rather than a
+                // ShellActions member because two of them open the same thing.
+                val openSearchEditor: (String) -> Unit = { current ->
                     navigateTo<String?>(
-                        { TextEntryScreen(it, title = "Search", submitLabel = "SEARCH") },
+                        {
+                            TextEntryScreen(
+                                it,
+                                title = "Search",
+                                initial = current,
+                                submitLabel = "SEARCH",
+                            )
+                        },
                         resultCallback = { text ->
                             if (text != null) viewModel.setSearchQuery(text)
                         },
                     )
                 }
-                val searchActive by viewModel.searchActive.collectAsState()
-                val searchQuery by viewModel.searchQuery.collectAsState()
                 LibraryShell(
                     currentTab = tab,
-                    onSelectTab = { LibraryNav.selectTab(it) },
+                    onSelectTab = { LibraryNav.tapTab(it) },
+                    libraryIndex = libraryIndex,
                     searchActive = searchActive,
                     searchQuery = searchQuery,
                     onSearchQueryChange = { viewModel.setSearchQuery(it) },
                     onSearchClose = { viewModel.closeSearch() },
-                    onSearchClear = { LibraryNav.clearSearch() },
                     actions = ShellActions(
                         nowPlaying = { go { NowPlayingScreen(it) } },
                         settings = { go { SettingsScreen(it) } },
-                        // To the page, not straight to the keyboard. Search is a
-                        // destination in the bar now, and every other one of
-                        // those lands you somewhere you can look at — where the
-                        // tab bar is still under your thumb, and the last
-                        // results are still there. The keyboard is a screen of
-                        // its own that covers all of that, including the bar,
-                        // and it is one tap on the field away when it is wanted.
-                        search = { LibraryNav.openSearch()                         },
-                        editSearch = { current ->
-                            navigateTo<String?>(
-                                {
-                                    TextEntryScreen(
-                                        it,
-                                        title = "Search",
-                                        initial = current,
-                                        submitLabel = "SEARCH",
-                                    )
-                                },
-                                resultCallback = { text ->
-                                    if (text != null) viewModel.setSearchQuery(text)
-                                },
-                            )
+                        // Simplified gets the SDK's own full-screen editor, the
+                        // way it always did: its bar is the phone's own three
+                        // buttons, and the inline keyboard belongs to the layout
+                        // that puts a magnifier in the header. Expanded goes
+                        // straight to typing on the page itself — the list stays
+                        // underneath until something is actually typed.
+                        search = {
+                            if (App.layoutMode.value == LayoutMode.SIMPLIFIED) {
+                                LibraryNav.openSearch()
+                                openSearchEditor("")
+                            } else {
+                                LibraryNav.openSearch(withKeyboard = true)
+                            }
                         },
+                        // The header field on the search page, which under
+                        // Simplified reopens that same editor rather than
+                        // raising the inline keyboard.
+                        editSearch = { current -> openSearchEditor(current) },
                         more = { page -> go { MoreScreen(it, page) } },
+                        // Simplified's centre button: the library index, which
+                        // also drops search if that is what is showing.
+                        browse = { LibraryNav.pressLibrary() },
                         openAlbum = { id, parent -> openAlbum(id, parent) },
                         openArtist = { name, parent -> openArtist(name, parent) },
                         openPlaylist = { id, name -> go { PlaylistDetailScreen(it, id, name) } },
@@ -194,6 +250,16 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
         }
     }
 
+    /**
+     * The library's own front page: the index under Simplified, and under the
+     * standard layout the tab that was current, which is all it has.
+     */
+    private suspend fun openLibrary() {
+        if (App.settings.layoutMode.first() == LayoutMode.SIMPLIFIED) {
+            LibraryNav.libraryIndex.value = true
+        }
+    }
+
     @Composable
     private fun Splash() {
         PlayerTheme {
@@ -202,7 +268,7 @@ class BootScreen(sealed: SealedLightActivity) : LightScreen<Unit, BootViewModel>
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.Center,
             ) {
-                LightText(text = "amp", variant = LightTextVariant.Heading)
+                AppText("amp", pxSp(LightType.HEADING_PX))
             }
         }
     }

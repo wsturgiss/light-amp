@@ -1,8 +1,8 @@
 [tool]
 id = "com.sublunar.amp"
 label = "Amp"
-versionCode = 4
-versionName = "0.1.3"
+versionCode = 21
+versionName = "0.8.1"
 orientation = "portrait"
 permissions = [
     "android.permission.INTERNET",
@@ -11,7 +11,17 @@ permissions = [
     # Reading the phone's own music folder, for the Local Music source. On the
     # SDK's allowed list, and requested through LightOS the first time it is used.
     "android.permission.READ_MEDIA_AUDIO",
+    # Scanning a username and password from a QR code on the server form, with
+    # the SDK's own scanner. On the SDK's allowed list, and asked of the user
+    # through LightOS the first time a code is scanned.
+    "android.permission.CAMERA",
 ]
+# Official background audio (SDK 0.1.1+): the plugin wires LightAudioService
+# and its foreground permissions into this tool's manifest.
+# Plain http:// (SDK 0.2.0+): a self-hosted server on a home network usually
+# speaks it, and without this Android refuses every such request.
+capabilities = ["detached-audio", "cleartext-http"]
 # Real LP3 hardware binds to the LightOS system app.
-# Use "com.thelightphone.sdk.emulator" for the LightOS emulator instead.
+# Use "com.thelightphone.sdk.emulator" for the LightOS emulator instead, and
+# build with -DlightSdk.allowAltServerPackage=true (SDK 0.2.0 refuses it otherwise).
 serverPackage = "com.lightos"

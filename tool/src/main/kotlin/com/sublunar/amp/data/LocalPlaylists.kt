@@ -95,39 +95,48 @@ object LocalPlaylists {
             idFor(file)
         }
 
-    suspend fun rename(id: String, name: String) = withContext(Dispatchers.IO) {
-        val file = fileOf(id) ?: return@withContext
-        if (!file.isFile) return@withContext
+    /**
+     * Whether the playlist has the name now. False when another playlist
+     * already has it: the name is the file, and taking it would replace that one.
+     */
+    suspend fun rename(id: String, name: String): Boolean = withContext(Dispatchers.IO) {
+        val file = fileOf(id) ?: return@withContext false
+        if (!file.isFile) return@withContext false
         val target = File(file.parentFile, fileNameFor(name))
-        if (target.absolutePath == file.absolutePath || target.exists()) return@withContext
-        if (!file.renameTo(target)) Log.w(TAG, "couldn't rename ${file.name}")
+        if (target.absolutePath == file.absolutePath) return@withContext true
+        if (target.exists()) return@withContext false
+        file.renameTo(target).also { if (!it) Log.w(TAG, "couldn't rename ${file.name}") }
     }
 
-    suspend fun delete(id: String) = withContext(Dispatchers.IO) {
-        val file = fileOf(id) ?: return@withContext
-        if (file.isFile && !file.delete()) Log.w(TAG, "couldn't delete ${file.name}")
+    /** Whether the playlist is gone — one already gone, by another app or over adb, included. */
+    suspend fun delete(id: String): Boolean = withContext(Dispatchers.IO) {
+        val file = fileOf(id) ?: return@withContext false
+        if (!file.exists()) return@withContext true
+        file.delete().also { if (!it) Log.w(TAG, "couldn't delete ${file.name}") }
     }
 
-    suspend fun add(id: String, trackId: String) = withContext(Dispatchers.IO) {
-        val file = fileOf(id) ?: return@withContext
+    /** Whether the song reached the file. */
+    suspend fun add(id: String, trackId: String): Boolean = withContext(Dispatchers.IO) {
+        val file = fileOf(id) ?: return@withContext false
+        if (!file.isFile) return@withContext false
         // Appending duplicates is allowed on purpose: a playlist is an ordered
         // list, and the same song twice is a decision someone might mean.
         writeIds(file, readIds(file) + trackId)
-        Unit
     }
 
-    suspend fun removeAt(id: String, index: Int) = withContext(Dispatchers.IO) {
-        val file = fileOf(id) ?: return@withContext
+    /** Whether the edit reached the file — callers take it back off the screen if it didn't. */
+    suspend fun removeAt(id: String, at: Map<Int, String>): Boolean = withContext(Dispatchers.IO) {
+        val file = fileOf(id) ?: return@withContext false
         val ids = readIds(file)
-        if (index !in ids.indices) return@withContext
-        writeIds(file, ids.filterIndexed { i, _ -> i != index })
-        Unit
+        // See [MusicServer.removeFromPlaylistAt]: each position has to hold the song expected.
+        if (at.any { (index, trackId) -> ids.getOrNull(index) != trackId }) return@withContext false
+        writeIds(file, ids.filterIndexed { i, _ -> i !in at.keys })
     }
 
-    suspend fun reorder(id: String, orderedIds: List<String>) = withContext(Dispatchers.IO) {
-        val file = fileOf(id) ?: return@withContext
+    /** Whether the edit reached the file — see [removeAt]. */
+    suspend fun reorder(id: String, orderedIds: List<String>): Boolean = withContext(Dispatchers.IO) {
+        val file = fileOf(id) ?: return@withContext false
         writeIds(file, orderedIds)
-        Unit
     }
 
     /**

@@ -2,7 +2,12 @@
 
 package com.sublunar.amp.ui.components
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.layout.BoxScope
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.draw.clip
+import com.thelightphone.sdk.ui.LightThemeTokens
 import kotlinx.coroutines.withTimeoutOrNull
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -30,25 +35,27 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.Dp
-import androidx.compose.ui.unit.dp
 import com.sublunar.amp.App
-import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextVariant
-import com.thelightphone.sdk.ui.gridUnitsAsDp
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.px
+import com.sublunar.amp.ui.pxSp
 import com.thelightphone.sdk.ui.lightClickable
-
-/** Shared layout constants (tuned further on-device). */
-object Dimens {
-    val ArtworkCorner: Dp = 3.dp
-}
+import com.sublunar.amp.art.ArtworkNeed
+import kotlinx.coroutines.delay
 
 // --- Artwork ----------------------------------------------------------------
 
+/** Waits between tries for the cover in front of the user — see [rememberArtwork]. */
+private val FOCUSED_RETRY_MS = longArrayOf(3_000L, 8_000L, 20_000L)
+
 @Composable
-fun rememberArtwork(coverArtId: String?, sizePx: Int): ImageBitmap? {
+fun rememberArtwork(
+    coverArtId: String?,
+    sizePx: Int,
+    need: ArtworkNeed = ArtworkNeed.BROWSING,
+): ImageBitmap? {
     // Gated here rather than at each drawing site: this is the only way into the
     // artwork cache, so switching covers off also stops fetching and decoding
     // them, which is most of what they cost.
@@ -63,12 +70,30 @@ fun rememberArtwork(coverArtId: String?, sizePx: Int): ImageBitmap? {
     // a cover already in the memory cache, which returns early rather than
     // loading, never assigned anything and the old bitmap simply stayed.
     var image by remember(coverArtId, sizePx, hidden) { mutableStateOf(cached) }
-    LaunchedEffect(coverArtId, sizePx, hidden) {
+    // Whether this cover may be fetched right now is part of the question, so
+    // it is part of the key: an empty answer used to be final until the cover
+    // itself changed, which left the playing sleeve blank for the whole song
+    // after one missed fetch, and a list of placeholders blank after Wi-Fi had
+    // arrived. Read unconditionally — see ARCHITECTURE.md on conditional reads.
+    val rules by App.rules.collectAsState()
+    val allowed = when (need) {
+        ArtworkNeed.FOCUSED -> rules.mayFetchFocusedArt
+        ArtworkNeed.BROWSING -> rules.mayMoveHeavyBytes
+    }
+    LaunchedEffect(coverArtId, sizePx, hidden, allowed) {
         if (image != null) return@LaunchedEffect
-        image = if (hidden || coverArtId.isNullOrBlank()) {
-            null
-        } else {
-            App.artwork.load(coverArtId, sizePx)
+        if (hidden || coverArtId.isNullOrBlank()) return@LaunchedEffect
+        image = App.artwork.load(coverArtId, sizePx, need)
+        // The cover in front of the user is worth asking for again: on poor
+        // reception the first request loses to the song it belongs to. A few
+        // tries, further apart each time, and only while it may be fetched. A
+        // row in a list is not — there are hundreds, and the next scroll asks.
+        if (need == ArtworkNeed.FOCUSED && allowed) {
+            for (wait in FOCUSED_RETRY_MS) {
+                if (image != null) break
+                delay(wait)
+                image = App.artwork.load(coverArtId, sizePx, need)
+            }
         }
     }
     return image
@@ -188,12 +213,36 @@ fun Modifier.appClickable(
 
 // --- Rows -------------------------------------------------------------------
 
-/** A single-line text row (no artwork) — used for menus and text lists. */
+/**
+ * A menu row, drawn the way the phone's own menus are.
+ *
+ * Measured off LightOS's stock tools — the Phone list, Calendar's settings, the
+ * SDK-built Weather's: one line for a row that does something, and for a row
+ * that names a setting, the name small above its current value large, the
+ * value being the information. The stock menus set the line in Heading; tried,
+ * and it shouted on a page of rows, so it sits one step down Light's scale at
+ * Copy — the size the phone's own lists title in. Text starts [MENU_INSET_PX] in, the two units
+ * Light's text-only lists use; the lists with a mark and a cover keep the 72px
+ * axis Light's own Music list has ([ROW_LEAD_PX]).
+ */
 @Composable
 fun TextRow(
     title: String,
     modifier: Modifier = Modifier,
+    /**
+     * The setting's current value, drawn large under the title — which becomes
+     * its label. For a row that names a setting rather than doing something.
+     */
+    value: String? = null,
+    /**
+     * A line under the title saying what the row does, or how it stands.
+     *
+     * One line by default: most are a name or a count, and letting those wrap
+     * would make a list of rows ragged to no purpose. Raised where it is a
+     * sentence explaining what the row does, which is a different job.
+     */
     subtitle: String? = null,
+    subtitleLines: Int = 1,
     onLongClick: (() -> Unit)? = null,
     /** Sits before the text, for a row that needs saying what it opens. */
     leading: (@Composable () -> Unit)? = null,
@@ -201,8 +250,8 @@ fun TextRow(
     /**
      * Null for a row that states something rather than opening it — a setting
      * with only one possible value, which More still shows so the page's
-     * modifiers all read alike. It doesn't take a press, and its title is
-     * lightened to say so before the press is tried.
+     * modifiers all read alike. It doesn't take a press, and its main line is
+     * dimmed to say so before the press is tried.
      */
     onClick: (() -> Unit)? = null,
 ) {
@@ -212,42 +261,146 @@ fun TextRow(
             .let {
                 if (onClick == null) it else it.slowLongPress(onClick, onLongPress = onLongClick)
             }
-            .padding(horizontal = 1.5f.gridUnitsAsDp(), vertical = 0.6f.gridUnitsAsDp()),
+            .padding(horizontal = px(MENU_INSET_PX), vertical = px(MENU_PAD_PX)),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         if (leading != null) {
             leading()
-            Spacer(Modifier.width(1f.gridUnitsAsDp()))
+            Spacer(Modifier.width(px(MENU_GAP_PX)))
         }
         Column(modifier = Modifier.weight(1f)) {
-            LightText(
-                text = title,
-                variant = LightTextVariant.Copy,
-                lighten = onClick == null,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
-            if (!subtitle.isNullOrBlank()) {
-                LightText(text = subtitle, variant = LightTextVariant.Detail, lighten = true, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (value != null) {
+                MenuLabel(title)
+                MenuLine(value, dim = onClick == null)
+            } else {
+                MenuLine(title, dim = onClick == null)
+                if (!subtitle.isNullOrBlank()) MenuLabel(subtitle, maxLines = subtitleLines)
             }
         }
         if (trailing != null) trailing()
     }
 }
 
+/** A menu row's main line: Light's Copy — Heading read too big, see [TextRow]. */
+@Composable
+private fun MenuLine(text: String, dim: Boolean) {
+    AppText(
+        text,
+        pxSp(LightType.COPY_PX),
+        lineHeight = pxSp(LightType.COPY_LINE_PX),
+        role = TextRole.Copy,
+        dim = dim,
+        maxLines = 1,
+    )
+}
+
+/** A menu row's small line, above a value or under a verb: Light's Detail. */
+@Composable
+private fun MenuLabel(text: String, maxLines: Int = 1) {
+    AppText(
+        text,
+        pxSp(LightType.DETAIL_PX),
+        lineHeight = pxSp(LightType.DETAIL_LINE_PX),
+        role = TextRole.Detail,
+        dim = true,
+        maxLines = maxLines,
+    )
+}
+
+/**
+ * Where a menu row's text starts: two grid units, as on the phone's own
+ * text-only lists (the Phone tool, every stock Settings page). The same 80px
+ * the corner glyphs and the bar glyphs sit on.
+ */
+const val MENU_INSET_PX = 80
+
+/** Above and below a row's text: with Copy's line, a 136px pitch. */
+private const val MENU_PAD_PX = 32
+
+/** Between a leading glyph and the text: one unit. */
+private const val MENU_GAP_PX = 40
+
+/**
+ * One of Light's centred verbs: a word in capitals, on its own line, that does
+ * its thing when tapped. The first-run source list, and the Copy / Paste /
+ * Clear a held field offers.
+ */
+@Composable
+fun ChoiceButton(label: String, onClick: () -> Unit) {
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .appClickable(onClick = onClick)
+            .padding(vertical = px(40)),
+        contentAlignment = Alignment.Center,
+    ) {
+        // Light's Button tracking at its Button size — but at the Regular
+        // weight: the style asks for Medium, which the phone lacks, and
+        // AppText would round it up to Bold, which shouts.
+        AppText(
+            label,
+            pxSp(LightType.COPY_PX),
+            role = TextRole.Button,
+            weight = FontWeight.Normal,
+        )
+    }
+}
+
 @Composable
 fun EmptyState(text: String, modifier: Modifier = Modifier) {
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        LightText(text = text, variant = LightTextVariant.Copy, lighten = true, align = TextAlign.Center)
+        AppText(
+            text,
+            pxSp(LightType.COPY_PX),
+            lineHeight = pxSp(LightType.COPY_LINE_PX),
+            dim = true,
+            align = TextAlign.Center,
+        )
     }
 }
 
 @Composable
 fun SectionLabel(text: String) {
-    LightText(
-        text = text,
-        variant = LightTextVariant.Detail,
-        lighten = true,
-        modifier = Modifier.padding(start = 1.5f.gridUnitsAsDp(), top = 1f.gridUnitsAsDp(), bottom = 0.3f.gridUnitsAsDp()),
+    AppText(
+        text,
+        pxSp(LightType.DETAIL_PX),
+        lineHeight = pxSp(LightType.DETAIL_LINE_PX),
+        role = TextRole.Detail,
+        dim = true,
+        modifier = Modifier.padding(
+            start = px(MENU_INSET_PX),
+            top = px(SECTION_TOP_PX),
+            bottom = px(SECTION_BOTTOM_PX),
+        ),
+    )
+}
+
+private const val SECTION_TOP_PX = 40
+private const val SECTION_BOTTOM_PX = 12
+
+// --- Notices ----------------------------------------------------------------
+
+/** How long a notice stays: long enough to read, not just to register as a flicker. */
+const val NOTICE_MS = 2500L
+
+/**
+ * A word or two dead centre and above everything else — "Couldn't save", and
+ * on a second line why. Inset from the screen's edges so a long reason wraps
+ * rather than running off them.
+ */
+@Composable
+fun BoxScope.NoticePill(text: String) {
+    AppText(
+        text,
+        pxSp(ROW_TITLE_PX),
+        align = TextAlign.Center,
+        modifier = Modifier
+            .align(Alignment.Center)
+            .padding(horizontal = px(LIST_EDGE_PX))
+            .clip(RoundedCornerShape(px(24)))
+            // The page's own background/content pair, so it follows the phone's
+            // theme and its invertColors setting.
+            .background(LightThemeTokens.colors.background)
+            .padding(horizontal = px(44), vertical = px(28)),
     )
 }

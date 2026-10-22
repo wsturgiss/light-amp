@@ -37,38 +37,6 @@ val PlaylistSort.descendingByNature: Boolean
         PlaylistSort.DATE_CREATED, PlaylistSort.RECENTLY_UPDATED -> true
     }
 
-val TagSort.descendingByNature: Boolean
-    get() = when (this) {
-        TagSort.NAME -> false
-        TagSort.SONGS -> true
-    }
-
-/**
- * Order a list of tag values — genres, composers.
- *
- * [counts] is a function rather than a map so the name order costs nothing to
- * produce: counting walks every track in the library, and it is only the other
- * order that needs it.
- */
-fun sortTags(
-    tags: List<String>,
-    sort: TagSort,
-    reversed: Boolean = false,
-    counts: () -> Map<String, Int>,
-): List<String> {
-    val ordered = when (sort) {
-        TagSort.NAME -> tags.sortedBy { nameKey(it) }
-        // Ties fall back to the name, so equally-sized genres don't trade places
-        // between visits.
-        TagSort.SONGS -> counts().let { byTag ->
-            tags.sortedWith(
-                compareByDescending<String> { byTag[it] ?: 0 }.thenBy { nameKey(it) },
-            )
-        }
-    }
-    return if (reversed) ordered.reversed() else ordered
-}
-
 /**
  * Leading articles ignored when sorting names, so "The Beatles" files under B.
  * Matches Navidrome's own `IgnoredArticles` default, keeping the app's ordering
@@ -182,7 +150,13 @@ private inline fun <T> List<T>.sortedByDescendingThenKey(
     .sortedWith(compareByDescending<Triple<Long, String, T>> { it.first }.thenBy { it.second })
     .map { it.third }
 
-fun sortAlbums(albums: List<Album>, sort: AlbumSort, reversed: Boolean = false): List<Album> {
+fun sortAlbums(
+    albums: List<Album>,
+    sort: AlbumSort,
+    reversed: Boolean = false,
+    /** Re-deals Random when bumped — see AppSettings.shuffleNonce. */
+    shuffleNonce: Int = 0,
+): List<Album> {
     val ordered = when (sort) {
         AlbumSort.TITLE -> albums.sortedByKeyOnce { nameKey(it.title) }
         AlbumSort.ARTIST -> albums.sortedByKeysOnce(
@@ -213,10 +187,17 @@ fun sortAlbums(albums: List<Album>, sort: AlbumSort, reversed: Boolean = false):
             primary = { it.rating.toLong() },
             key = { nameKey(it.title) },
         )
-        // Shuffled by a seed that only changes when the library does, so the
-        // order is stable while you browse it — a fresh shuffle on every
-        // recomposition would move rows under a scrolling finger.
-        AlbumSort.RANDOM -> albums.shuffled(Random(albums.size.toLong() * 31 + albums.firstOrNull()?.id.hashCode()))
+        // Shuffled by a seed that only changes when the library does — or when
+        // the user re-taps Random for a new deal (the nonce). Stable otherwise,
+        // because a fresh shuffle on every recomposition would move rows under
+        // a scrolling finger.
+        AlbumSort.RANDOM -> albums.shuffled(
+            Random(
+                albums.size.toLong() * 31 +
+                    albums.firstOrNull()?.id.hashCode() +
+                    shuffleNonce * 1_000_003L,
+            ),
+        )
     }
     return if (reversed) ordered.reversed() else ordered
 }

@@ -30,17 +30,22 @@ data class JellyfinItem(
     @SerialName("Name") val name: String = "",
     @SerialName("ServerId") val serverId: String? = null,
     @SerialName("Type") val type: String = "",
+    /** "Audio" for a song or a playlist of songs; "Video" and others are left out — see JellyfinClient.getPlaylists. */
+    @SerialName("MediaType") val mediaType: String? = null,
     /**
      * What a view holds — "music" is the one this app cares about.
      *
-     * Only set on the entries returned by `/Users/{id}/Views`; a library of
-     * films answers "movies" and has no business in a music app.
+     * Only set on the user's views (`/UserViews`, or `/Users/{id}/Views`
+     * before 10.9); a library of films answers "movies" and has no business
+     * in a music app.
      */
     @SerialName("CollectionType") val collectionType: String? = null,
     @SerialName("RunTimeTicks") val runTimeTicks: Long? = null,
     @SerialName("ProductionYear") val productionYear: Int? = null,
     @SerialName("PremiereDate") val premiereDate: String? = null,
     @SerialName("DateCreated") val dateCreated: String? = null,
+    /** On a playlist, when songs were last added to it — the nearest thing it has to "last changed". */
+    @SerialName("DateLastMediaAdded") val dateLastMediaAdded: String? = null,
     @SerialName("IndexNumber") val indexNumber: Int? = null,
     @SerialName("ParentIndexNumber") val parentIndexNumber: Int? = null,
     @SerialName("Album") val album: String? = null,
@@ -57,6 +62,27 @@ data class JellyfinItem(
     @SerialName("Artists") val artists: List<String> = emptyList(),
     @SerialName("ArtistItems") val artistItems: List<JellyfinNamed> = emptyList(),
     @SerialName("Genres") val genres: List<String> = emptyList(),
+    /**
+     * The track's gain in dB against −18 LUFS (10.9+), ReplayGain's own
+     * reference: −18 less the loudness Jellyfin's normalisation scan measured,
+     * otherwise the file's REPLAYGAIN_TRACK_GAIN tag. Absent where it has
+     * neither.
+     */
+    @SerialName("NormalizationGain") val normalizationGain: Float? = null,
+    /**
+     * The track's album's gain, on the same scale (12.0+, on tracks): from the
+     * scan, otherwise the file's REPLAYGAIN_ALBUM_GAIN. Sent without being
+     * asked for in `Fields`, like [normalizationGain].
+     */
+    @SerialName("AlbumNormalizationGain") val albumNormalizationGain: Float? = null,
+    /**
+     * Everyone credited on the track, composers among them.
+     *
+     * Jellyfin has no composer field of its own: a composer is a person with
+     * [JellyfinPerson.type] "Composer", and the list only arrives when "People"
+     * is asked for — see FIELDS.
+     */
+    @SerialName("People") val people: List<JellyfinPerson> = emptyList(),
     /**
      * Which images the item actually has.
      *
@@ -85,12 +111,31 @@ data class JellyfinNamed(
     @SerialName("Name") val name: String = "",
 )
 
+/** A credited person; [type] is Jellyfin's PersonType — "Composer" and friends. */
+@Serializable
+data class JellyfinPerson(
+    @SerialName("Name") val name: String = "",
+    @SerialName("Type") val type: String = "",
+)
+
 @Serializable
 data class JellyfinUserData(
     @SerialName("PlayCount") val playCount: Int = 0,
     @SerialName("IsFavorite") val isFavorite: Boolean = false,
     @SerialName("Played") val played: Boolean = false,
     @SerialName("LastPlayedDate") val lastPlayedDate: String? = null,
+)
+
+/** `/Users/Me`: what the account is allowed. */
+@Serializable
+data class JellyfinMe(
+    @SerialName("Policy") val policy: JellyfinPolicy = JellyfinPolicy(),
+)
+
+@Serializable
+data class JellyfinPolicy(
+    /** "Allow media downloading" in the server's user settings; on unless its owner turned it off. */
+    @SerialName("EnableContentDownloading") val enableContentDownloading: Boolean = true,
 )
 
 /** What `/Users/AuthenticateByName` hands back. */

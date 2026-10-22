@@ -53,22 +53,6 @@ class JellyfinParseTest {
     }
 
     @Test
-    fun `an album by various artists is marked a compilation`() {
-        val album = item(
-            """{"Id":"al","Name":"A Compilation","AlbumArtist":"Various Artists"}""",
-        ).toAlbum()
-        assertTrue(album.compilation)
-    }
-
-    @Test
-    fun `a record by one artist is not`() {
-        val album = item(
-            """{"Id":"al","Name":"Twoism","AlbumArtist":"Boards of Canada"}""",
-        ).toAlbum()
-        assertTrue(!album.compilation)
-    }
-
-    @Test
     fun `a cover is claimed only where the item says it has one`() {
         // Jellyfin serves /Items/{anything}/Images/Primary and only 404s when
         // the bytes are asked for, so this cannot be assumed from the id alone.
@@ -155,6 +139,13 @@ class JellyfinParseTest {
         assertTrue(named.contains("""Token="abc123""""))
         // The device stays the hardware — two sources are still one phone.
         assertTrue(named.contains("""Device="Light Phone III""""))
+    }
+
+    @Test
+    fun `a song's own gain comes first, and its album's stands in where it has none`() {
+        assertEquals(-7.2f, item("""{"Id":"t","NormalizationGain":-7.2,"AlbumNormalizationGain":-6.1}""").toTrack().gainDb)
+        assertEquals(-6.1f, item("""{"Id":"t","AlbumNormalizationGain":-6.1}""").toTrack().gainDb)
+        assertNull(item("""{"Id":"t"}""").toTrack().gainDb)
     }
 
     @Test

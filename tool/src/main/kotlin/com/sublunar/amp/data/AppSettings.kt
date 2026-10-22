@@ -12,6 +12,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 
 /**
@@ -50,7 +51,9 @@ enum class OfflineMode {
  */
 enum class DataMode {
     /**
-     * Off Wi-Fi, still stream when the stream would beat the copy on disk.
+     * Nothing waits for Wi-Fi: downloads, covers and streams all run on any
+     * connection. The one exception is a track already downloaded, which still
+     * plays from its file — a copy on the phone beats paying for the same song.
      */
     MAKE_IT_HURT,
 
@@ -74,14 +77,35 @@ enum class ArtistSort { NAME, MOST_PLAYED }
 enum class PlaylistSort { RECENTLY_UPDATED, NAME, DATE_CREATED }
 
 /**
- * Ordering for the genre and composer lists, which are bare tag values.
+ * Which of the bar's three destinations was last showing.
  *
- * A tag carries nothing to sort on but itself, so the only other question worth
- * asking of it is how much music sits under it — [SONGS] answers that. One key
- * serves both lists: they are the same kind of list, and setting the order of
- * each separately is a distinction no one is asking for.
+ * Only these three, not the page under them: a record you were reading is
+ * somewhere within the library, and reopening the app there rather than at the
+ * library itself is landing you part-way into something you have since left.
  */
-enum class TagSort { NAME, SONGS }
+enum class LastSection { LIBRARY, SEARCH, NOW_PLAYING }
+
+/**
+ * How the bottom bar is arranged, and what that implies for the pages above it.
+ *
+ * [STANDARD] is the default now, and the one the setting describes the absence
+ * of: "Simplified Library View", off. The four tabs along the bar are what most
+ * people expect of a music library, and the tag lists and liked lists that were
+ * Simplified's reason to exist are reachable from any tab's own menu.
+ *
+ * The default moved after installs already existed. A migration briefly held
+ * those installs to Simplified, but it could not tell an old install from a
+ * fresh one that had just added a source, and flipped new installs on their
+ * second launch — so it is gone. Anyone it strands on the wrong layout is one
+ * toggle from the one they want.
+ */
+enum class LayoutMode {
+    /** Expanded: the four library tabs along the bar, with search as a fifth. */
+    STANDARD,
+
+    /** Library, the player and search — the library being a page of its own. */
+    SIMPLIFIED,
+}
 
 /**
  * All persisted state: the server credentials plus user preferences, backed by
@@ -120,8 +144,6 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
                 downloadFormatId = source.downloadFormatId ?: p[DOWNLOAD_FORMAT],
                 offlineModeName = source.offlineModeName ?: legacyOfflineMode(p[OFFLINE_MODE]).name,
                 downloadLimitBytes = source.downloadLimitBytes ?: p[DOWNLOAD_LIMIT] ?: DEFAULT_DOWNLOAD_LIMIT,
-                downloadLibraryId = source.downloadLibraryId ?: p[DOWNLOAD_LIBRARY_ID],
-                downloadLyrics = source.downloadLyrics ?: p[DOWNLOAD_LYRICS] ?: true,
             )
         }
     }.distinctUntilChanged()
@@ -134,45 +156,10 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         list.firstOrNull { it.id == id } ?: list.firstOrNull()
     }.distinctUntilChanged()
 
-    /**
-     * Add a source, or replace the one with the same id.
-     *
-     * A Plex source is re-matched against `machineIdentifier` first: that is
-     * Plex's own stable server id, unlike [MusicSource.id] which is minted fresh
-     * every time the link flow runs (account-link, "Enter address and token", a
-     * re-link on a different network reaching a different address...). Without
-     * this, re-linking the same server just appends another row with the same
-     * name and a new id — a duplicate entry in Sources that looks identical to
-     * the user but points at a second, empty local database.
-     */
+    /** Add a source, or update the one it already is — see [mergeSource]. */
     suspend fun saveSource(source: MusicSource): String {
         var effectiveId = source.id
-        editSources { list ->
-            val existing = list.indexOfFirst { it.id == source.id }.takeIf { it >= 0 }
-                ?: source.machineIdentifier.takeIf { it.isNotBlank() }?.let { mid ->
-                    list.indexOfFirst { it.kind == source.kind && it.machineIdentifier == mid }
-                        .takeIf { it >= 0 }
-                }
-            if (existing == null) {
-                list + source
-            } else {
-                val old = list[existing]
-                // Keep the id (and with it, the downloads database and the
-                // user's own preferences for this source) — only what was just
-                // discovered about the server itself should move.
-                effectiveId = old.id
-                val merged = source.copy(
-                    id = old.id,
-                    downloadFormatId = source.downloadFormatId ?: old.downloadFormatId,
-                    offlineModeName = source.offlineModeName ?: old.offlineModeName,
-                    downloadLimitBytes = source.downloadLimitBytes ?: old.downloadLimitBytes,
-                    downloadLibraryId = source.downloadLibraryId ?: old.downloadLibraryId,
-                    downloadLyrics = source.downloadLyrics ?: old.downloadLyrics,
-                    libraryId = source.libraryId ?: old.libraryId,
-                )
-                list.toMutableList().also { it[existing] = merged }
-            }
-        }
+        editSources { list -> mergeSource(list, source).also { effectiveId = it.second }.first }
         return effectiveId
     }
 
@@ -220,7 +207,20 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
 
     suspend fun setLibraryId(id: String?) {
         val current = activeSource.first() ?: return
-        saveSource(current.copy(libraryId = id))
+        setSourceLibraryId(current.id, id)
+    }
+
+    /**
+     * Which of a source's libraries is browsed — null for All Libraries —
+     * written exactly as given.
+     *
+     * Not through [saveSource], which keeps the stored library whenever it is
+     * handed none, so that re-linking a server doesn't forget the choice. All
+     * Libraries *is* none: switching to it saved nothing, and the library
+     * stayed where it was while the sync fetched all of them.
+     */
+    suspend fun setSourceLibraryId(sourceId: String, libraryId: String?) {
+        editSources { list -> list.map { if (it.id == sourceId) it.copy(libraryId = libraryId) else it } }
     }
 
     /** Record the folders a server reported, for the Sources page. */
@@ -259,24 +259,14 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     // on which source you were looking at.
 
     /**
-     * Show or hide one of a source's libraries on the Sources page.
-     *
-     * Refuses to hide the last one: the rows under a source are the only way to
-     * switch to it, so a source with none would be stranded — configurable but
-     * unusable.
+     * Show or hide one of a source's libraries — everywhere, not only on the
+     * Sources page: see MusicSource.hiddenLibraryIds and [withLibraryShown].
+     * Written exactly, like [setSourceLibraryId], because hiding can move the
+     * browsing to All Libraries.
      */
-    suspend fun setLibraryVisible(sourceId: String, libraryId: String?, visible: Boolean) {
-        editSource(sourceId) { source ->
-            val hidden = source.hiddenLibraryIds.toMutableList()
-            if (visible) {
-                hidden.remove(libraryId)
-            } else {
-                val remaining = source.libraries.count { it.id !in hidden } +
-                    (if (source.showsAllLibraries) 1 else 0)
-                if (remaining <= 1) return@editSource source
-                if (libraryId !in hidden) hidden.add(libraryId)
-            }
-            source.copy(hiddenLibraryIds = hidden)
+    suspend fun setLibraryVisible(sourceId: String, libraryId: String, visible: Boolean) {
+        editSources { list ->
+            list.map { if (it.id == sourceId) it.withLibraryShown(libraryId, visible) else it }
         }
     }
 
@@ -284,16 +274,13 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         editSource(sourceId) { it.copy(offlineModeName = mode.name) }
     }
 
-    suspend fun setSourceDownloadLimit(sourceId: String, bytes: Long) {
-        editSource(sourceId) { it.copy(downloadLimitBytes = bytes) }
-    }
-
-    suspend fun setSourceDownloadLibrary(sourceId: String, libraryId: String?) {
-        editSource(sourceId) { it.copy(downloadLibraryId = libraryId) }
-    }
-
-    suspend fun setSourceDownloadLyrics(sourceId: String, on: Boolean) {
-        editSource(sourceId) { it.copy(downloadLyrics = on) }
+    /**
+     * Record that this source's cache has been refilled by the current parser —
+     * see [MusicSource.parserGeneration]. Written only after a sync that
+     * finished, so one that was interrupted refetches again next time.
+     */
+    suspend fun setParserGeneration(sourceId: String, generation: Int) {
+        editSource(sourceId) { it.copy(parserGeneration = generation) }
     }
 
     private suspend fun editSource(sourceId: String, block: (MusicSource) -> MusicSource) {
@@ -307,7 +294,6 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     val songSort: Flow<SongSort> = enumFlow(SONG_SORT, SongSort.TITLE)
     val artistSort: Flow<ArtistSort> = enumFlow(ARTIST_SORT, ArtistSort.NAME)
     val playlistSort: Flow<PlaylistSort> = enumFlow(PLAYLIST_SORT, PlaylistSort.RECENTLY_UPDATED)
-    val tagSort: Flow<TagSort> = enumFlow(TAG_SORT, TagSort.NAME)
 
     /**
      * Whether a tab is showing only what you have liked.
@@ -317,6 +303,18 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
      * is not a statement about the others. Playlists have none — nothing likes a
      * playlist.
      */
+    /**
+     * The tag each list is narrowed to, or blank for all of it.
+     *
+     * Per tab, as the liked switch is: narrowing the albums to a composer and
+     * the songs to a genre at the same time is a reasonable thing to want, and
+     * one shared setting would make each page silently change the other.
+     */
+    val albumsGenre: Flow<String> = stringFlow(ALBUMS_GENRE)
+    val albumsComposer: Flow<String> = stringFlow(ALBUMS_COMPOSER)
+    val songsGenre: Flow<String> = stringFlow(SONGS_GENRE)
+    val songsComposer: Flow<String> = stringFlow(SONGS_COMPOSER)
+
     val likedAlbumsOnly: Flow<Boolean> = boolFlow(LIKED_ALBUMS_ONLY, false)
     val likedSongsOnly: Flow<Boolean> = boolFlow(LIKED_SONGS_ONLY, false)
     val likedArtistsOnly: Flow<Boolean> = boolFlow(LIKED_ARTISTS_ONLY, false)
@@ -326,7 +324,18 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     val songSortReversed: Flow<Boolean> = boolFlow(SONG_SORT_REV, false)
     val artistSortReversed: Flow<Boolean> = boolFlow(ARTIST_SORT_REV, false)
     val playlistSortReversed: Flow<Boolean> = boolFlow(PLAYLIST_SORT_REV, false)
-    val tagSortReversed: Flow<Boolean> = boolFlow(TAG_SORT_REV, false)
+
+    /**
+     * Bumped each time Random is re-tapped for a new deal — see sortAlbums,
+     * whose shuffle is otherwise seeded by the library alone and would hand the
+     * same order back forever.
+     */
+    val shuffleNonce: Flow<Int> =
+        dataStore.data.map { it[SHUFFLE_NONCE] ?: 0 }.distinctUntilChanged()
+
+    suspend fun bumpShuffleNonce() {
+        dataStore.edit { it[SHUFFLE_NONCE] = (it[SHUFFLE_NONCE] ?: 0) + 1 }
+    }
 
     // --- Offline / downloads -------------------------------------------------
 
@@ -349,13 +358,90 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
      * they have found the setting. Streaming a FLAC album over cellular is a
      * choice worth making deliberately, not one to discover on a bill.
      */
-    val dataMode: Flow<DataMode> = enumFlow(DATA_MODE, DataMode.WIFI_ONLY)
+    // Low Data for a fresh install: safe on a metered plan but *working* —
+    // Wi-Fi Only as the default meant a first sign-in over cellular synced
+    // nothing and the app looked broken, with the reason buried on this page.
+    val dataMode: Flow<DataMode> = enumFlow(DATA_MODE, DataMode.LOW_DATA)
+
+    /**
+     * How much of the phone the downloads may take, across the whole tool.
+     *
+     * One budget, not one per source: the limit is about this phone's storage,
+     * and the phone has one of those. Per source it was being weighed against a
+     * single source's usage either way, so three sources set to "20GB" could
+     * quietly take sixty.
+     */
+    val downloadLimit: Flow<Long> =
+        dataStore.data.map { it[DOWNLOAD_LIMIT] ?: DEFAULT_DOWNLOAD_LIMIT }
+            .distinctUntilChanged()
+
+    suspend fun setDownloadLimit(bytes: Long) {
+        dataStore.edit { it[DOWNLOAD_LIMIT] = bytes }
+    }
+
+    /**
+     * Carry the per-source limits up to the one that replaced them.
+     *
+     * Takes the largest, so nobody's budget shrinks under them on update — the
+     * new single limit has to cover what every source was allowed separately, or
+     * the first sweep after this would start deleting music that was within its
+     * limit yesterday.
+     */
+    /**
+     * Whether the one-time repair of downloaded mp3s still has to run.
+     *
+     * TEMPORARY — DELETE THIS, [markMp3IndexRepaired], their caller, and
+     * DownloadStore.indexMp3s before the tool is submitted for community
+     * review. See DownloadStore.indexMp3s for the full removal list and the
+     * reasoning; this pair is only the record of having run.
+     */
+    suspend fun mp3IndexRepairNeeded(): Boolean =
+        dataStore.data.first()[MP3_INDEX_REPAIRED] != true
+
+    /**
+     * Record that the repair finished — called *after* the walk, never before.
+     *
+     * Marking it done up front would be cheaper by one walk and wrong: a repair
+     * killed half-way would count as complete, and the files it never reached
+     * would keep their wrong duration for good. Nothing else would ever fix
+     * them, because the indexer that runs at download time only sees tracks
+     * being downloaded now, not ones already on the phone. Repeating a
+     * one-second walk after an interrupted launch is the cheaper mistake.
+     */
+    suspend fun markMp3IndexRepaired() {
+        dataStore.edit { it[MP3_INDEX_REPAIRED] = true }
+    }
+
+    suspend fun migrateDownloadLimit() {
+        val p = dataStore.data.first()
+        if (p[DOWNLOAD_LIMIT] != null) return
+        val perSource = runCatching {
+            sourcesJson.decodeFromString<List<MusicSource>>(p[SOURCES].orEmpty())
+        }.getOrDefault(emptyList()).mapNotNull { it.downloadLimitBytes }
+        if (perSource.isEmpty()) return
+        setDownloadLimit(perSource.max())
+    }
 
     suspend fun setDataMode(value: DataMode) = putString(DATA_MODE, value.name)
 
 
     val invertColors: Flow<Boolean> = boolFlow(INVERT_COLORS, false)
     val karaokeLyrics: Flow<Boolean> = boolFlow(KARAOKE_LYRICS, true)
+
+    /**
+     * Even out the volume between tracks, from the loudness the server
+     * measured. On by default — with it off, a remaster can be 10 dB louder
+     * than the record before it. Attenuate-only, so it never adds clipping;
+     * a library with no measurements plays exactly as it does today.
+     */
+    val replayGain: Flow<Boolean> = boolFlow(REPLAY_GAIN, true)
+
+
+    /** Whether to use the simplified or standard layout mode. */
+    val layoutMode: Flow<LayoutMode> = enumFlow(LAYOUT_MODE, LayoutMode.STANDARD)
+
+    /** Where the app was when it was last closed — see [LastSection]. */
+    val lastSection: Flow<LastSection> = enumFlow(LAST_SECTION, LastSection.LIBRARY)
 
     /**
      * Show album lists as a wall of covers instead of a column of titles.
@@ -386,8 +472,11 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
      * reads as broken rather than as sparse. With them off the artist rows fall
      * back to the tighter single-line pitch, exactly as they do with artwork
      * switched off altogether.
+     *
+     * Hidden by default — the publicity shots have to be asked for. Only the
+     * default moved: a value the toggle ever stored still wins.
      */
-    val hideArtistImages: Flow<Boolean> = boolFlow(HIDE_ARTIST_IMAGES, false)
+    val hideArtistImages: Flow<Boolean> = boolFlow(HIDE_ARTIST_IMAGES, true)
 
     /**
      * Stop marking downloaded rows.
@@ -402,15 +491,6 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
      */
     val hideDownloadIcons: Flow<Boolean> = boolFlow(HIDE_DOWNLOAD_ICONS, false)
 
-
-    /**
-     * Artwork stays grey — the app's own switch over the display workaround.
-     *
-     * On by default, because turning it off changes the whole device's colour
-     * filter for as long as the app is in front, and because without the adb
-     * grant behind it there is nothing it can do. See LightDisplayColor.
-     */
-    val monochromeArtwork: Flow<Boolean> = boolFlow(MONOCHROME_ARTWORK, true)
 
     /**
      * The queue as it stood when the app last went away: track ids, the index into
@@ -450,6 +530,35 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     private fun cachedPlaylistsKey(sourceId: String) =
         stringPreferencesKey("${CACHED_PLAYLISTS.name}.$sourceId")
 
+    /**
+     * When [sourceId] last finished a library sync, in epoch ms; 0 if never.
+     *
+     * Kept across launches because the "don't sync again so soon" floor used
+     * to live only in memory: every cold start walked the whole album index
+     * again, on whatever link the phone was on, in the first minutes — exactly
+     * when someone opens the app to play something.
+     */
+    suspend fun lastSyncedMs(sourceId: String): Long =
+        dataStore.data.first()[lastSyncedKey(sourceId)]?.toLongOrNull() ?: 0L
+
+    suspend fun setLastSyncedMs(sourceId: String, atMs: Long) =
+        putString(lastSyncedKey(sourceId), atMs.toString())
+
+    private fun lastSyncedKey(sourceId: String) =
+        stringPreferencesKey("state.lastSynced.$sourceId")
+
+    /** How far this source's songs are known to match the server — see [SongCheck]. */
+    suspend fun songCheck(sourceId: String): SongCheck =
+        dataStore.data.first()[songCheckKey(sourceId)]
+            ?.let { runCatching { sourcesJson.decodeFromString<SongCheck>(it) }.getOrNull() }
+            ?: SongCheck()
+
+    suspend fun setSongCheck(sourceId: String, check: SongCheck) =
+        putString(songCheckKey(sourceId), sourcesJson.encodeToString(check))
+
+    private fun songCheckKey(sourceId: String) =
+        stringPreferencesKey("state.songCheck.$sourceId")
+
     /** Read once per operation rather than observed: see [PendingActions]. */
     suspend fun pendingActions(): String = dataStore.data.first()[PENDING_ACTIONS] ?: ""
 
@@ -473,16 +582,37 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     suspend fun setSongSort(value: SongSort) = putString(SONG_SORT, value.name)
     suspend fun setArtistSort(value: ArtistSort) = putString(ARTIST_SORT, value.name)
     suspend fun setPlaylistSort(value: PlaylistSort) = putString(PLAYLIST_SORT, value.name)
-    suspend fun setTagSort(value: TagSort) = putString(TAG_SORT, value.name)
+    suspend fun setAlbumsGenre(value: String) = putString(ALBUMS_GENRE, value)
+    suspend fun setAlbumsComposer(value: String) = putString(ALBUMS_COMPOSER, value)
+    suspend fun setSongsGenre(value: String) = putString(SONGS_GENRE, value)
+    suspend fun setSongsComposer(value: String) = putString(SONGS_COMPOSER, value)
+
     suspend fun setLikedAlbumsOnly(value: Boolean) = putBool(LIKED_ALBUMS_ONLY, value)
     suspend fun setLikedSongsOnly(value: Boolean) = putBool(LIKED_SONGS_ONLY, value)
     suspend fun setLikedArtistsOnly(value: Boolean) = putBool(LIKED_ARTISTS_ONLY, value)
+
+    /**
+     * Drop every narrowing of the library lists — the liked switches and the
+     * genre and composer filters — in one write. See App.swapSource: these
+     * are facts about one library, and a genre chosen on one server applied
+     * to the next empties its lists with nothing on screen to say why.
+     */
+    suspend fun clearLibraryFilters() {
+        dataStore.edit { p ->
+            p.remove(LIKED_ALBUMS_ONLY)
+            p.remove(LIKED_SONGS_ONLY)
+            p.remove(LIKED_ARTISTS_ONLY)
+            p.remove(ALBUMS_GENRE)
+            p.remove(ALBUMS_COMPOSER)
+            p.remove(SONGS_GENRE)
+            p.remove(SONGS_COMPOSER)
+        }
+    }
 
     suspend fun setAlbumSortReversed(value: Boolean) = putBool(ALBUM_SORT_REV, value)
     suspend fun setSongSortReversed(value: Boolean) = putBool(SONG_SORT_REV, value)
     suspend fun setArtistSortReversed(value: Boolean) = putBool(ARTIST_SORT_REV, value)
     suspend fun setPlaylistSortReversed(value: Boolean) = putBool(PLAYLIST_SORT_REV, value)
-    suspend fun setTagSortReversed(value: Boolean) = putBool(TAG_SORT_REV, value)
 
     suspend fun setInvertColors(value: Boolean) = putBool(INVERT_COLORS, value)
     suspend fun setKaraokeLyrics(value: Boolean) = putBool(KARAOKE_LYRICS, value)
@@ -490,12 +620,18 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
     suspend fun setArtistAlbumGrid(value: Boolean) = putBool(ARTIST_ALBUM_GRID, value)
     suspend fun setHideArtistImages(value: Boolean) = putBool(HIDE_ARTIST_IMAGES, value)
     suspend fun setHideDownloadIcons(value: Boolean) = putBool(HIDE_DOWNLOAD_ICONS, value)
+    suspend fun setReplayGain(value: Boolean) = putBool(REPLAY_GAIN, value)
 
-    suspend fun setMonochromeArtwork(value: Boolean) = putBool(MONOCHROME_ARTWORK, value)
     suspend fun setArtwork(value: ArtworkMode) = putString(ARTWORK, value.name)
     suspend fun setDownloadsPaused(value: Boolean) = putBool(DOWNLOADS_PAUSED, value)
+    suspend fun setLayoutMode(value: LayoutMode) = putString(LAYOUT_MODE, value.name)
+
+    suspend fun setLastSection(value: LastSection) = putString(LAST_SECTION, value.name)
 
     // --- helpers -------------------------------------------------------------
+
+    private fun stringFlow(key: Preferences.Key<String>): Flow<String> =
+        dataStore.data.map { it[key].orEmpty() }.distinctUntilChanged()
 
     private fun boolFlow(key: Preferences.Key<Boolean>, default: Boolean): Flow<Boolean> =
         dataStore.data.map { it[key] ?: default }.distinctUntilChanged()
@@ -526,7 +662,14 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         private val SONG_SORT = stringPreferencesKey("pref.songSort")
         private val ARTIST_SORT = stringPreferencesKey("pref.artistSort")
         private val PLAYLIST_SORT = stringPreferencesKey("pref.playlistSort")
-        private val TAG_SORT = stringPreferencesKey("pref.tagSort")
+        private val ALBUMS_GENRE = stringPreferencesKey("pref.albumsGenre")
+        private val ALBUMS_COMPOSER = stringPreferencesKey("pref.albumsComposer")
+        private val SONGS_GENRE = stringPreferencesKey("pref.songsGenre")
+        private val SONGS_COMPOSER = stringPreferencesKey("pref.songsComposer")
+
+        /** TEMPORARY — see [mp3IndexRepairNeeded]; goes with it. */
+        private val MP3_INDEX_REPAIRED = booleanPreferencesKey("pref.mp3IndexRepaired")
+
         private val LIKED_ALBUMS_ONLY = booleanPreferencesKey("pref.likedAlbumsOnly")
         private val LIKED_SONGS_ONLY = booleanPreferencesKey("pref.likedSongsOnly")
         private val LIKED_ARTISTS_ONLY = booleanPreferencesKey("pref.likedArtistsOnly")
@@ -535,16 +678,18 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         private val SONG_SORT_REV = booleanPreferencesKey("pref.songSortReversed")
         private val ARTIST_SORT_REV = booleanPreferencesKey("pref.artistSortReversed")
         private val PLAYLIST_SORT_REV = booleanPreferencesKey("pref.playlistSortReversed")
-        private val TAG_SORT_REV = booleanPreferencesKey("pref.tagSortReversed")
+        private val SHUFFLE_NONCE = intPreferencesKey("pref.shuffleNonce")
 
         private val INVERT_COLORS = booleanPreferencesKey("pref.invertColors")
         private val KARAOKE_LYRICS = booleanPreferencesKey("pref.karaokeLyrics")
+        private val REPLAY_GAIN = booleanPreferencesKey("pref.replayGain")
         private val ALBUM_GRID = booleanPreferencesKey("pref.albumGrid")
         private val ARTIST_ALBUM_GRID = booleanPreferencesKey("pref.artistAlbumGrid")
         private val HIDE_ARTIST_IMAGES = booleanPreferencesKey("pref.hideArtistImages")
         private val HIDE_DOWNLOAD_ICONS = booleanPreferencesKey("pref.hideDownloadIcons")
-        private val MONOCHROME_ARTWORK = booleanPreferencesKey("pref.monochromeArtwork")
         private val ARTWORK = stringPreferencesKey("pref.artworkMode")
+        private val LAYOUT_MODE = stringPreferencesKey("pref.layoutMode")
+        private val LAST_SECTION = stringPreferencesKey("pref.lastSection")
         private val SOURCES = stringPreferencesKey("pref.sources")
         private val ACTIVE_SOURCE = stringPreferencesKey("pref.activeSource")
 
@@ -571,9 +716,82 @@ class AppSettings(private val dataStore: DataStore<Preferences>) {
         private val DOWNLOAD_FORMAT = stringPreferencesKey("pref.downloadFormat")
         private val DOWNLOAD_LYRICS = booleanPreferencesKey("pref.downloadLyrics")
         private val DOWNLOAD_LIMIT = longPreferencesKey("pref.downloadLimitBytes")
-        private val DOWNLOAD_LIBRARY_ID = stringPreferencesKey("pref.downloadLibraryId")
 
         /** 2 GB — a few hundred albums as MP3, and well inside any device. */
         const val DEFAULT_DOWNLOAD_LIMIT = 2L * 1024 * 1024 * 1024
     }
 }
+
+/**
+ * [list] with [source] saved into it, and the id it was saved under.
+ *
+ * The same id is an edit: the record replaces the old one, keeping only the
+ * few choices an edit may leave unset.
+ *
+ * A different id can still be the same server. Signing in mints a new id every
+ * time, so a Plex server re-linked (matched by its `machineIdentifier`) or a
+ * Jellyfin account signed into again (matched by its user id — a GUID, so one
+ * account on one server) would otherwise become a second row with the same
+ * name over an empty library, and on Jellyfin the second sign-in logged the
+ * first out. Instead the source it already is takes the new sign-in — token,
+ * address, libraries — and keeps its id, so its library and downloads, and
+ * every choice the user made for it.
+ */
+internal fun mergeSource(list: List<MusicSource>, source: MusicSource): Pair<List<MusicSource>, String> {
+    val sameId = list.indexOfFirst { it.id == source.id }
+    if (sameId >= 0) {
+        val old = list[sameId]
+        val edited = source.copy(
+            downloadFormatId = source.downloadFormatId ?: old.downloadFormatId,
+            offlineModeName = source.offlineModeName ?: old.offlineModeName,
+            downloadLimitBytes = source.downloadLimitBytes ?: old.downloadLimitBytes,
+            libraryId = source.libraryId ?: old.libraryId,
+        )
+        return list.toMutableList().also { it[sameId] = edited } to old.id
+    }
+    val sameServer = list.indexOfFirst { it.kind == source.kind && it.isSameServerAs(source) }
+    if (sameServer < 0) return list + source to source.id
+    val old = list[sameServer]
+    val relinked = source.copy(
+        id = old.id,
+        streamFormatId = old.streamFormatId,
+        cellularFormatId = old.cellularFormatId,
+        downloadFormatId = old.downloadFormatId,
+        offlineModeName = old.offlineModeName,
+        downloadLimitBytes = old.downloadLimitBytes,
+        playerName = old.playerName,
+        parserGeneration = old.parserGeneration,
+        libraryId = old.libraryId,
+        hiddenLibraryIds = old.hiddenLibraryIds,
+        features = old.features,
+    )
+    return list.toMutableList().also { it[sameServer] = relinked } to old.id
+}
+
+private fun MusicSource.isSameServerAs(other: MusicSource): Boolean = when (kind) {
+    SourceKind.PLEX -> machineIdentifier.isNotBlank() && machineIdentifier == other.machineIdentifier
+    SourceKind.JELLYFIN -> userId.isNotBlank() && userId == other.userId
+    else -> false
+}
+
+/**
+ * How far a source's songs are known to match its server, kept between syncs.
+ *
+ * [mark] is the server's own answer from [MusicServer.songChangesSince] that
+ * everything is read up to. Where the server can't say which songs changed,
+ * a walk re-reads the library a few albums per sync: [walkCursor] is the last
+ * album it reached, [walkMark] the mark it will settle once it gets round, and
+ * [walkedMs] when the last one did.
+ *
+ * A server that names its changes and walks as well (Jellyfin — see
+ * [SongChanges.Albums.alsoWalk]) moves [mark] itself on every sync and never
+ * sets [walkMark]: its walk catches what the list misses, and has no mark of
+ * its own to settle.
+ */
+@Serializable
+data class SongCheck(
+    val mark: String? = null,
+    val walkMark: String? = null,
+    val walkCursor: String? = null,
+    val walkedMs: Long = 0L,
+)

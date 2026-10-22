@@ -1,7 +1,11 @@
 package com.sublunar.amp.ui.screens
 
 import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
+import com.sublunar.amp.ui.LightType
+import com.sublunar.amp.ui.components.AppText
+import com.sublunar.amp.ui.components.ChoiceButton
+import com.sublunar.amp.ui.px
+import com.sublunar.amp.ui.pxSp
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -13,10 +17,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextAlign
 import com.sublunar.amp.ui.PlayerTheme
-import com.sublunar.amp.ui.components.appClickable
-import com.thelightphone.sdk.ui.LightText
-import com.thelightphone.sdk.ui.LightTextVariant
-import com.thelightphone.sdk.ui.gridUnitsAsDp
 
 /**
  * First run: pick where the music comes from.
@@ -32,6 +32,7 @@ import com.thelightphone.sdk.ui.gridUnitsAsDp
  */
 @Composable
 fun WelcomeContent(
+    onBandcamp: () -> Unit,
     onSubsonic: () -> Unit,
     onPlex: () -> Unit,
     onJellyfin: () -> Unit,
@@ -41,56 +42,44 @@ fun WelcomeContent(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .padding(horizontal = 2f.gridUnitsAsDp()),
+                .padding(horizontal = px(80)),
             verticalArrangement = Arrangement.Center,
             horizontalAlignment = Alignment.CenterHorizontally,
         ) {
-            LightText(text = "amp", variant = LightTextVariant.Heading)
-            LightText(
-                text = "Where is your music?",
-                variant = LightTextVariant.Detail,
-                lighten = true,
+            AppText("amp", pxSp(LightType.HEADING_PX))
+            AppText(
+                "Where is your music?",
+                pxSp(LightType.DETAIL_PX),
+                dim = true,
                 align = TextAlign.Center,
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 2f.gridUnitsAsDp()),
+                    .padding(bottom = px(80)),
             )
 
-            SourceChoice("SUBSONIC SERVER", onSubsonic)
-            SourceChoice("PLEX SERVER", onPlex)
-            SourceChoice("JELLYFIN SERVER", onJellyfin)
-            SourceChoice("MUSIC ON THIS PHONE", onLocal)
+            // Bandcamp leads: it is the only one here that needs nothing
+            // self-hosted, so it is the choice most likely to tell a reader this
+            // app is for them after all. It is a Subsonic server underneath —
+            // the choice only fills in its address and says where its
+            // credentials come from.
+            ChoiceButton("BANDCAMP", onBandcamp)
+            ChoiceButton("SUBSONIC SERVER", onSubsonic)
+            ChoiceButton("PLEX SERVER", onPlex)
+            ChoiceButton("JELLYFIN SERVER", onJellyfin)
+            ChoiceButton("MUSIC ON THIS PHONE", onLocal)
 
-            Spacer(Modifier.height(1.5f.gridUnitsAsDp()))
+            Spacer(Modifier.height(px(60)))
 
             // Named because "Subsonic" is the protocol, not the thing most
             // people run — someone with a Navidrome server needs telling that
-            // the first option is theirs.
-            //
-            // Bandcamp leads the list: it is the only one of them that needs
-            // nothing self-hosted, so it is the name most likely to tell a
-            // reader that this app is for them after all.
-            LightText(
-                text = "Subsonic covers Bandcamp, Navidrome, Airsonic and Ampache.",
-                variant = LightTextVariant.Detail,
-                lighten = true,
+            // the Subsonic option is theirs. Bandcamp has its own choice above.
+            AppText(
+                "Subsonic covers Navidrome, Airsonic and Ampache.",
+                pxSp(LightType.DETAIL_PX),
+                dim = true,
                 align = TextAlign.Center,
                 modifier = Modifier.fillMaxWidth(),
             )
         }
-    }
-}
-
-/** One of the three, all drawn identically so none reads as the default. */
-@Composable
-private fun SourceChoice(label: String, onClick: () -> Unit) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .appClickable(onClick = onClick)
-            .padding(vertical = 1f.gridUnitsAsDp()),
-        contentAlignment = Alignment.Center,
-    ) {
-        LightText(text = label, variant = LightTextVariant.Button)
     }
 }

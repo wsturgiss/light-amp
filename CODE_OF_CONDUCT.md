@@ -40,8 +40,8 @@ project.
 
 ---
 
-Amp is a fork of [lightphone/light-sdk](https://github.com/lightphone/light-sdk).
-Light's own code of conduct, which governs their repository and their community
-spaces, is kept at
-[docs/light-sdk-CODE_OF_CONDUCT.md](docs/light-sdk-CODE_OF_CONDUCT.md) —
+Amp is built against [lightphone/light-sdk](https://github.com/lightphone/light-sdk),
+carried here as a submodule. Light's own code of conduct, which governs their
+repository and their community spaces, is
+[in their repository](https://github.com/lightphone/light-sdk/blob/main/CODE_OF_CONDUCT.md) —
 **report anything happening in Light's spaces to Light, not here.**

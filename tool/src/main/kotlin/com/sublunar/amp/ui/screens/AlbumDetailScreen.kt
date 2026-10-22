@@ -16,16 +16,13 @@ import com.sublunar.amp.App
 import com.sublunar.amp.data.Track
 import com.sublunar.amp.data.shuffled
 import com.sublunar.amp.ui.components.AppHeader
+import com.sublunar.amp.ui.components.formatTime
 import com.sublunar.amp.ui.components.AppIcons
-import com.sublunar.amp.ui.components.ScrollableList
 import com.sublunar.amp.ui.components.LibraryList
 import com.sublunar.amp.ui.components.AppText
-import com.sublunar.amp.ui.components.HeaderAction
 import com.sublunar.amp.ui.components.NumberedRow
 import com.sublunar.amp.ui.components.SelectionHeader
-import com.sublunar.amp.ui.components.rememberListAnchor
 import com.sublunar.amp.ui.components.rememberSelection
-import com.sublunar.amp.ui.nSp
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import androidx.compose.foundation.layout.Box
@@ -41,13 +38,17 @@ import com.sublunar.amp.ui.components.AppArtwork
 import com.sublunar.amp.ui.components.appClickable
 import com.sublunar.amp.ui.components.rowClickable
 import com.sublunar.amp.ui.components.AppIcon
+import com.sublunar.amp.ui.components.HeaderAction
 import com.sublunar.amp.ui.components.ROW_GAP_PX
+import com.sublunar.amp.ui.components.ROW_LEAD_PX
 import com.sublunar.amp.ui.components.ROW_SUB_PX
 import com.sublunar.amp.ui.components.ROW_SUB_LINE_PX
 import com.sublunar.amp.ui.components.formatRunTime
+import com.sublunar.amp.ui.LightType
 import com.sublunar.amp.ui.px
 import com.sublunar.amp.ui.pxSp
 import kotlinx.coroutines.launch
+import com.sublunar.amp.art.ArtworkNeed
 
 class AlbumDetailScreen(
     sealed: SealedLightActivity,
@@ -58,6 +59,9 @@ class AlbumDetailScreen(
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
         App.playback.handleVolumeKey(keyCode) || super.onKeyDown(keyCode, event)
 
+    /** On the screen, which outlives its composition — see JellyfinLinkScreen. */
+    private var refreshed = false
+
     @Composable
     override fun Content() {
         val albums by App.library.albums.collectAsState()
@@ -65,7 +69,14 @@ class AlbumDetailScreen(
         val current by App.playback.currentTrack.collectAsState()
 
         var tracks by remember(albumId) { mutableStateOf<List<Track>?>(null) }
-        LaunchedEffect(albumId) { tracks = App.library.getAlbumTracks(albumId) }
+        LaunchedEffect(albumId) {
+            tracks = App.library.getAlbumTracks(albumId)
+            // Once per visit, not on every return from a page opened over it.
+            if (!refreshed) {
+                refreshed = true
+                App.library.refreshAlbumTracks(albumId)?.let { tracks = it }
+            }
+        }
 
         val selection = rememberSelection("album:$albumId")
 
@@ -81,11 +92,21 @@ class AlbumDetailScreen(
                 } else {
                     AppHeader(
                         onBack = { goBack() },
-                        // The album's name alone. The artist is on every row
+                        // The album's name alone. The artist is in the card
                         // below and in the cover art, so a second line here was
                         // repeating what the page already says.
                         title = album?.title ?: "Album",
-                        rightAction = libraryCornerAction(LibraryPage.ALBUM, album?.title),
+                        // The album's own menu, not the library's sort: a record
+                        // has no order to choose, so the corner that offered a
+                        // dead sort now offers the record's verbs — download,
+                        // queue, playlist, artist. Same menu as a long-press on
+                        // the album's row, reachable from the album itself.
+                        rightAction = HeaderAction(
+                            AppIcons.MoreVert,
+                            onLongClick = { go { SettingsScreen(it) } },
+                        ) {
+                            go { AlbumActionsScreen(it, albumId) }
+                        },
                         fitTitle = true,
                     )
                 }
@@ -101,13 +122,26 @@ class AlbumDetailScreen(
                         if (!selection.active && album != null) {
                             item { AlbumCard(album, list) }
                         }
+                        // Credits appear only where the tracks' own artists
+                        // vary, and then on every track — all or nothing, so
+                        // the page never reads as "some tracks have artists".
+                        // Judged against each other, not against the record's
+                        // artist: a name shared by every track says nothing
+                        // per-row even when the album entity credits someone
+                        // else, as a classical record does when its tracks all
+                        // carry the composer and the album the performer.
+                        val varied = list
+                            .map { it.artist.trim().lowercase() }
+                            .distinct().size > 1
                         itemsIndexed(list, key = { _, t -> t.id }) { index, track ->
                             NumberedRow(
                                 number = track.trackNumber ?: (index + 1),
                                 title = track.title,
-                                durationMs = track.durationMs,
+                                subtitle = if (varied) track.artist else "",
+                                detail = formatTime(track.durationMs),
                                 current = current?.id == track.id,
                                 selected = if (selection.active) track.id in selection.selected else null,
+                                coverArtId = track.coverArtId,
                                 onClick = {
                                     if (selection.active) {
                                         selection.toggle(track.id)
@@ -142,10 +176,18 @@ class AlbumDetailScreen(
         Row(
             modifier = Modifier.fillMaxWidth().padding(bottom = px(CARD_GAP_PX)),
         ) {
+            // The sleeve starts where every list's covers start — the axis
+            // after the leading slot — so the push from a list lands with the
+            // art on the same edge, and the tracklist's numbers sit in the
+            // gutter under it. (The albums grid is the one full-bleed
+            // exception, and it is tiles, not rows.)
+            Spacer(Modifier.width(px(ROW_LEAD_PX)))
             AppArtwork(
                 coverArtId = album.coverArtId,
                 size = px(CARD_ART_PX),
                 fallback = AppIcons.Album,
+                // The album that is open, not one in a list — see ArtworkNeed.
+                need = ArtworkNeed.FOCUSED,
                 // Held, not tapped. The sleeve sits at the top of a list you
                 // scroll past constantly, and a tap target there is one flicked
                 // thumb away from a full-screen picture nobody asked for. The
@@ -217,15 +259,15 @@ class AlbumDetailScreen(
     @Composable
     private fun Loading() {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            AppText("Loading…", nSp(16), dim = true)
+            AppText("Loading…", pxSp(LightType.DETAIL_PX), dim = true)
         }
     }
 }
 
 /** The record's own block at the head of its list. */
 private const val CARD_ART_PX = 300
-private const val CARD_TITLE_PX = 60
-private const val CARD_TITLE_LINE_PX = 72
+private const val CARD_TITLE_PX = LightType.COPY_PX
+private const val CARD_TITLE_LINE_PX = LightType.COPY_LINE_PX
 private const val CARD_GAP_PX = 24
 private const val CARD_ICON_PX = 60
 private const val CARD_ICON_GAP_PX = 66

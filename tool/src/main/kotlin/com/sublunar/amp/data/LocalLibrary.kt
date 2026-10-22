@@ -2,6 +2,7 @@ package com.sublunar.amp.data
 
 import android.media.MediaMetadataRetriever
 import com.thelightphone.sdk.checkPermission
+import com.thelightphone.sdk.hasRuntimePermission
 import com.thelightphone.sdk.shared.LightServiceMethod
 import com.thelightphone.sdk.shared.asKotlinResult
 import android.util.Log
@@ -78,8 +79,20 @@ object LocalLibrary {
         runCatching { File("/storage/emulated/0/$FOLDER").mkdirs() }
     }
 
-    private val AUDIO_EXTENSIONS =
-        setOf("mp3", "flac", "m4a", "aac", "ogg", "opus", "wav", "wma", "mp4", "aiff", "aif")
+    /**
+     * What the phone can actually play, by extension.
+     *
+     * Deliberately not everything with audio in it: `ape`, `wv` and `dsf` have
+     * no decoder here, so listing them would put tracks in the library that
+     * fail the moment they are pressed — a silent substitute of a different
+     * kind. `oga` and `mka` are here because they are ordinary Ogg and
+     * Matroska audio under names some rippers prefer, and `m4b` because an
+     * audiobook is an MP4 the phone plays like any other.
+     */
+    private val AUDIO_EXTENSIONS = setOf(
+        "mp3", "flac", "m4a", "m4b", "aac", "ogg", "oga", "opus",
+        "wav", "wma", "mp4", "mka", "aiff", "aif",
+    )
 
     /** How deep to walk. Deep enough for Artist/Album/Disc, shallow enough to end. */
     private const val MAX_DEPTH = 6
@@ -89,19 +102,42 @@ object LocalLibrary {
     /** The permission that makes any of this readable — see lighttool.toml. */
     const val PERMISSION = "android.permission.READ_MEDIA_AUDIO"
 
+    /** What stands between the app and the music folder, if anything. */
+    enum class Access { GRANTED, NOT_GRANTED, BLOCKED_BY_LIGHTOS }
+
     /**
-     * Whether the app may actually read the music folder.
+     * Whether the app may actually read the music folder — and if not, why.
      *
-     * Asked of LightOS rather than inferred from the filesystem: without the
-     * permission, listing `/sdcard/Music` returns an *empty* array rather than
-     * null or an error, so a folder full of music and a folder we aren't allowed
-     * to see look exactly alike from here — which is how a local library ends up
-     * silently showing nothing.
+     * Not inferred from the filesystem: without the permission, listing
+     * `/sdcard/Music` returns an *empty* array rather than null or an error, so
+     * a folder full of music and a folder we aren't allowed to see look exactly
+     * alike from here — which is how a local library ends up silently showing
+     * nothing.
+     *
+     * The grant itself, asked of this process, is what decides. LightOS is asked
+     * only when the process can't say yet. Its answer used to be the whole test,
+     * and LightOS answers from its own policy before it looks at the grant —
+     * BlockedByServer, or Unknown when it can't say — so a phone where the
+     * permission had been granted in Android's own settings, or where LightOS's
+     * policy and the grant disagreed, was told to allow access it already had,
+     * and sent to a prompt that had nothing to change. Both answers are logged,
+     * because a report from such a phone needs them side by side.
      */
-    suspend fun permitted(): Boolean =
-        checkPermission(PERMISSION).asKotlinResult
-            .map { it.permissionResult == LightServiceMethod.GetPermission.Result.Granted }
-            .getOrDefault(false)
+    suspend fun access(): Access {
+        val held = hasRuntimePermission(PERMISSION)
+        val lightOs = checkPermission(PERMISSION).asKotlinResult
+            .map { it.permissionResult }
+            .getOrNull()
+        Log.i(TAG, "Music access: grant=${held ?: "unknown"} lightos=${lightOs ?: "no answer"}")
+        return when {
+            held == true -> Access.GRANTED
+            held == null && lightOs == LightServiceMethod.GetPermission.Result.Granted -> Access.GRANTED
+            lightOs == LightServiceMethod.GetPermission.Result.BlockedByServer -> Access.BLOCKED_BY_LIGHTOS
+            else -> Access.NOT_GRANTED
+        }
+    }
+
+    suspend fun permitted(): Boolean = access() == Access.GRANTED
 
     private fun roots(): List<File> =
         ROOTS.map(::File).filter { it.isDirectory }.distinctBy { it.canonicalPath }
@@ -162,6 +198,12 @@ object LocalLibrary {
                 track = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_CD_TRACK_NUMBER),
                 disc = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DISC_NUMBER),
                 year = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_YEAR),
+                // The tag pages are offered only where the library has the tag
+                // (see LibraryIndex), and nothing read these — so a phone full
+                // of tagged files still reported having no genres and no
+                // composers, and neither page could ever appear.
+                genre = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_GENRE),
+                composer = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_COMPOSER),
                 durationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
                     ?.toLongOrNull() ?: 0L,
             )
@@ -196,6 +238,11 @@ object LocalLibrary {
             // different from what it means on every other source.
             playCount = 0,
             lastPlayedMs = 0L,
+            genre = tags.genre?.trim().orEmpty(),
+            composer = tags.composer?.trim().orEmpty(),
+            // The retriever cannot see a custom tag, and ReplayGain is always
+            // one — read separately, off the same file. See ReplayGainTags.
+            gainDb = ReplayGainTags.gainDb(file),
         )
     }
 
@@ -231,6 +278,8 @@ object LocalLibrary {
         val track: String?,
         val disc: String?,
         val year: String?,
+        val genre: String?,
+        val composer: String?,
         val durationMs: Long,
     )
 

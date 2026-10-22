@@ -1,5 +1,8 @@
 package com.sublunar.amp.ui.screens
 
+import kotlinx.coroutines.launch
+import com.sublunar.amp.data.LastSection
+import com.sublunar.amp.App
 import com.sublunar.amp.data.Track
 import com.sublunar.amp.ui.components.SelectionState
 import com.sublunar.amp.ui.components.ScrollAnchors
@@ -21,35 +24,91 @@ object LibraryNav {
     val searchQuery = MutableStateFlow("")
 
     /**
-     * True while a library page that is not one of the tabs is showing — a liked
-     * list, a genre, the downloads.
-     *
-     * Those pages are peers of the tabs rather than pages *of* one, so the bar
-     * lights nothing while they are up, exactly as it does for search. It can't
-     * be answered from [currentTab]: that is still "the tab you would return
-     * to", and it has to keep saying so for when one is next tapped. Sub-pages
-     * opened from a standalone page inherit the state — an album reached from
-     * Liked Albums is no more "in Albums" than the liked list was.
-     *
-     * Set when such a page is opened and cleared by the tab host on its way back
-     * to the screen — see [openLibraryPage] and BootScreen.willShow.
-     */
-    val offTab = MutableStateFlow(false)
-
-    /**
      * Show the search page.
      *
-     * [withKeyboard] is set by the header's button, which goes straight to typing;
-     * the tab bar's shows the page and its last results instead. The root screen
-     * watches [pendingKeyboard] and pushes the editor, because the caller is often
-     * a sub-page that is about to be unwound.
+     * [withKeyboard] is set by the field at the top of every library list, which
+     * goes straight to typing; the tab bar's button shows the page and its last
+     * results instead.
      */
     fun openSearch(withKeyboard: Boolean = false) {
         searchActive.value = true
-        if (withKeyboard) pendingKeyboard.value = true
+        record(LastSection.SEARCH)
+        typing.value = withKeyboard
     }
 
-    val pendingKeyboard = MutableStateFlow(false)
+    /**
+     * Whether the keyboard is up.
+     *
+     * Search has two states on one page rather than two screens: typing, with the
+     * keyboard against the bottom of the screen and the results filling what is
+     * left, and reading, with the keyboard gone and the nav bar back. Return
+     * moves from the first to the second, and the results never go away in
+     * between — which is the whole reason this isn't the SDK's full-screen
+     * editor, where the list is behind the keyboard rather than above it.
+     */
+    val typing = MutableStateFlow(false)
+
+    /**
+     * The library index — the simplified layout's middle button.
+     *
+     * A state of the shell rather than a screen, because the thing it opens
+     * *onto* is a tab, and tabs are states too: there is no stack to push
+     * Albums on top of a page with. So the index takes the shell's place the
+     * way search does, a tab replaces it when one is chosen, and that tab's
+     * header carries a back arrow that brings the index back. A page that is a
+     * real screen — a genre, the composers — pushes over the top and leaves
+     * this set, so backing out of it lands here too.
+     */
+    val libraryIndex = MutableStateFlow(false)
+
+    /** Show the index, leaving whatever was showing. */
+    fun openLibraryIndex() {
+        closeSearch()
+        libraryIndex.value = true
+    }
+
+    /**
+     * Back to the library as you left it — the bar's middle button.
+     *
+     * Deliberately not [openLibraryIndex]: the button means "the library",
+     * and the library is whichever page you were last reading, scrolled where
+     * you left it, not a menu you have to walk through again. Only a cold start
+     * opens on the index, because then there is no page to go back to. The way
+     * *up* to the index is the back arrow in a tab's header.
+     *
+     * So this only drops search, if that is what is covering the library; the
+     * tab and every scroll position are left exactly as they were.
+     */
+    fun returnToLibrary() {
+        closeSearch()
+    }
+
+    /**
+     * The bar's middle button, pressed while the shell itself is showing.
+     *
+     * One press is "the library" and lands on the page you were last reading.
+     * A second, now that you are already there, is a press with nowhere left to
+     * go — so it means the step up, to the index. Pressing again comes back
+     * down to the page, which makes the button a way between the two rather
+     * than a dead tap on one of them.
+     *
+     * Search is the exception and is only ever left, never toggled into: it
+     * covers the library rather than being part of it, so the first press out
+     * of it is the plain "back to the library" above.
+     */
+    fun pressLibrary() {
+        // Not on the library: come back to it, as you left it.
+        if (searchActive.value) {
+            closeSearch()
+            return
+        }
+        // Already on it: go to the top. Not a toggle — a second press used to
+        // flip back down to the page you had just come up from, so the button
+        // undid itself and never settled anywhere. From the list it now does
+        // nothing you can see, which is the honest answer to "take me to the
+        // list" when the list is what you are looking at.
+        libraryIndex.value = true
+    }
 
     fun setQuery(query: String) {
         searchQuery.value = query
@@ -64,26 +123,55 @@ object LibraryNav {
      */
     fun closeSearch() {
         searchActive.value = false
-    }
-
-    /** Empty the field without leaving the page — what the X in it means. */
-    fun clearSearch() {
-        searchQuery.value = ""
+        typing.value = false
+        record(LastSection.LIBRARY)
     }
 
     /**
+     * Note where the app is, so it can reopen there.
+     *
+     * Silent until the app has booted: these run from navigation that can fire
+     * before the settings store exists, and where the app reopens is not worth
+     * a crash on the way in.
+     */
+    internal fun record(section: LastSection) {
+        if (!App.isReady) return
+        App.scope.launch { App.settings.setLastSection(section) }
+    }
+
+        /**
      * Go to a tab's front page.
      *
      * Tapping a tab is a request to start over there, so the list returns to the
      * top rather than to wherever it was left — its sort is the only thing that
      * carries over.
      */
+    /**
+     * The bar's tab, tapped.
+     *
+     * Tapping the one you are already on is not a request to go there — you are
+     * there — so it means the other thing a tab button can mean: back to the top
+     * of it. Drilling in is already handled by the bar on the pushed page, which
+     * pops to the root before it selects.
+     */
+    fun tapTab(tab: LibraryTab) {
+        if (currentTab.value == tab && !searchActive.value && !libraryIndex.value) {
+            ScrollAnchors.requestTop("tab:${tab.name.lowercase()}")
+            return
+        }
+        selectTab(tab)
+    }
+
     fun selectTab(tab: LibraryTab) {
         closeSearch()
+        // Choosing from the index is leaving it — see [libraryIndex].
+        libraryIndex.value = false
         // A selection belongs to the list it was made in; changing tabs abandons
         // it rather than leaving a stale count waiting on some other page.
         Selections.clearAll()
-        ScrollAnchors.clear("tab:${tab.name.lowercase()}")
+        // The tab keeps where it was. Coming back to a list is coming back to
+        // the place in it you left — tapping the tab you are already on is what
+        // asks for the top, and that is [tapTab]'s job.
         currentTab.value = tab
     }
 }
@@ -110,18 +198,17 @@ enum class LibraryPage {
     /** Results, which are the library in its own order. */
     SEARCH,
 
+    /** The simplified layout's index of everything there is to browse. */
+    LIBRARY,
+
     /** Pages whose order is the record's, the playlist's, or the server's. */
     ALBUM,
     ARTIST,
     ARTIST_SONGS,
     ARTIST_POPULAR,
     PLAYLIST,
-    TAG_SONGS,
 
     /** Peers of the tabs, reached from More, that carry a tab's sort. */
-    GENRES,
-    COMPOSERS,
-    COMPILATIONS,
     DOWNLOADS,
 }
 
@@ -133,26 +220,6 @@ enum class LibraryPage {
  */
 fun SimpleLightScreen<*>.go(factory: (SealedLightActivity) -> SimpleLightScreen<Unit>) {
     navigateTo(factory)
-}
-
-/**
- * Open a library page that is a peer of the tabs — a liked list, a genre list,
- * the downloads.
- *
- * These are reached from More, but they are not pages *of* More: More is a way
- * in, the way the tab bar is a way in, and neither is somewhere to go back up
- * to. So the stack is unwound first and the page lands directly on the tab host,
- * exactly one level deep. That is what lets it drop its back button — the bar
- * below is how you leave — while anything opened *from* it is a genuine level
- * deeper and keeps one.
- *
- * [LibraryNav.offTab] is set last, after the push: the unwind makes the tab host
- * current for an instant, and it clears the flag whenever it is shown.
- */
-fun SimpleLightScreen<*>.openLibraryPage(factory: (SealedLightActivity) -> SimpleLightScreen<Unit>) {
-    popToRoot()
-    navigateTo(factory)
-    LibraryNav.offTab.value = true
 }
 
 /**
@@ -211,7 +278,7 @@ fun SimpleLightScreen<*>.openTrackActions(trackId: String, selection: SelectionS
  *
  * Which of the two applies is the caller's to name rather than something to
  * infer here. Neither rule is safe as a blanket one: laying the ancestors down
- * is right from a tab list and wrong from a genre, a compilation or a playlist,
+ * is right from a tab list and wrong from a genre or a playlist,
  * because those are real parents and unwinding to a tab root throws them away.
  */
 sealed interface Parent {

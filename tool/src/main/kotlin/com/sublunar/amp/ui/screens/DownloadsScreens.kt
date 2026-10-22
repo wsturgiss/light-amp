@@ -3,39 +3,37 @@ package com.sublunar.amp.ui.screens
 import android.view.KeyEvent
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import com.sublunar.amp.data.Track
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.sublunar.amp.App
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import com.sublunar.amp.ui.PlayerTheme
+import com.sublunar.amp.data.AppSettings
 import com.sublunar.amp.data.DataMode
 import com.sublunar.amp.data.OfflineMode
-import com.sublunar.amp.data.SourceKind
 import com.sublunar.amp.data.formatBytes
 import com.sublunar.amp.data.formatGb
-import com.sublunar.amp.data.shuffled
 import com.sublunar.amp.data.sortSongs
 import com.sublunar.amp.ui.components.AppHeader
 import com.sublunar.amp.ui.components.AppIcon
 import com.sublunar.amp.ui.components.AppIcons
 import com.sublunar.amp.ui.components.EmptyState
-import com.sublunar.amp.ui.components.HeaderAction
 import com.sublunar.amp.ui.components.ListScreen
-import com.sublunar.amp.ui.components.PlayAllRow
-import com.sublunar.amp.ui.components.SplitActionRow
 import com.sublunar.amp.ui.components.SectionLabel
 import com.sublunar.amp.ui.components.TextRow
 import com.sublunar.amp.ui.components.TrackRow
 import com.sublunar.amp.ui.components.ScrollableList
 import com.sublunar.amp.ui.components.LibraryList
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
 import com.thelightphone.sdk.ui.LightIcon
@@ -49,7 +47,7 @@ fun offlineModeLabel(mode: OfflineMode): String = when (mode) {
 }
 
 private fun offlineModeDetail(mode: OfflineMode): String = when (mode) {
-    OfflineMode.MANUAL -> "You choose what to download"
+    OfflineMode.MANUAL -> "Hold a song, album or artist to download it"
     OfflineMode.FAVORITES -> "Liked albums, liked songs and playlists"
     OfflineMode.ALL -> "Favorites first, then the rest of the library"
 }
@@ -57,13 +55,20 @@ private fun offlineModeDetail(mode: OfflineMode): String = when (mode) {
 fun dataModeLabel(mode: DataMode): String = when (mode) {
     DataMode.MAKE_IT_HURT -> "Make it Hurt"
     DataMode.LOW_DATA -> "Low Data"
-    DataMode.WIFI_ONLY -> "WiFi Only"
+    DataMode.WIFI_ONLY -> "Wi-Fi Only"
 }
 
+/**
+ * The explanations under each mode wrap in full. A cap of two lines was meant to
+ * fit them all, and on the LP3's narrow panel it cut Low Data's off mid-sentence;
+ * a sentence explaining a choice is only any use whole.
+ */
+private const val MODE_DETAIL_LINES = Int.MAX_VALUE
+
 private fun dataModeDetail(mode: DataMode): String = when (mode) {
-    DataMode.MAKE_IT_HURT -> "Stream on cellular even when a download would do"
-    DataMode.LOW_DATA -> "Off Wi-Fi, play the download rather than streaming"
-    DataMode.WIFI_ONLY -> "Streams on Wi-Fi; downloads only on cellular"
+    DataMode.MAKE_IT_HURT -> "No limits — streaming, downloads and artwork all use cellular data when there's no Wi-Fi"
+    DataMode.LOW_DATA -> "Streams music on cellular data. Downloads and library artwork wait for Wi-Fi; the cover of what's playing doesn't"
+    DataMode.WIFI_ONLY -> "Never uses cellular data. Without Wi-Fi, only your downloads play"
 }
 
 /** Everything the user has downloaded, newest first. */
@@ -74,41 +79,137 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
 
     @Composable
     override fun Content() {
-        val downloaded by App.library.downloads.collectAsState(initial = emptyList())
+        // Every source's downloads, not the active one's — see
+        // App.downloadsBySource. Read again each time a download lands, which
+        // is what makes a song appear here while you are watching it happen;
+        // it used to be read once when the page opened and then sat still, so
+        // a download finishing was invisible until you left and came back.
+        //
+        // Keyed on the downloader's count of completed transfers rather than
+        // observing every source: this read reaches into databases the app is
+        // not otherwise holding open, and this way it opens them for a moment
+        // instead of holding all of them open for as long as the page is up.
+        // The count covers every source, since downloads run for all of them
+        // whichever is being browsed; the active source's set is watched too,
+        // for a download removed from a library screen.
+        val downloadedIds by App.library.downloadedTrackIds.collectAsState()
+        val progress by App.downloader.progress.collectAsState()
+        var bySource by remember { mutableStateOf<List<Pair<String, List<Track>>>>(emptyList()) }
         // The song lists' own order, chosen from the header — this page used to
         // be stuck with whatever order the store handed back.
         val sort by App.songSort.collectAsState()
         val reversed by App.songSortReversed.collectAsState()
-        val tracks = remember(downloaded, sort, reversed) {
-            sortSongs(downloaded, sort, reversed)
+        val sorted = remember(bySource, sort, reversed) {
+            bySource.map { (name, list) -> name to sortSongs(list, sort, reversed) }
         }
-        val bytes by App.library.downloadedBytes.collectAsState()
-        val limit = App.source.collectAsState().value.downloadLimit
-        // The global count, not `tracks.size`: the list below is scoped to the
-        // library in view, while the downloads themselves are not.
-        val downloadedCount by App.library.downloadedTrackIds.collectAsState()
-        val progress by App.downloader.progress.collectAsState()
+        val total = remember(sorted) { sorted.sumOf { it.second.size } }
+        val named = sorted.size > 1
+        // Across every source, off the disk: this page is about what the phone
+        // is holding, and the budget it is measured against covers all of it.
+        // Read alongside the lists, so the figure and the songs it counts can
+        // never disagree.
+        var bytes by remember { mutableStateOf(0L) }
+        LaunchedEffect(downloadedIds, progress.completed) {
+            // Both of these touch the disk, and neither belongs on the frame
+            // this page is drawn on. A change arriving mid-read cancels it and
+            // starts again, so the newest answer is the one that lands.
+            val read = withContext(Dispatchers.IO) {
+                App.downloadsBySource() to App.downloads.usedBytesEverywhere()
+            }
+            bySource = read.first
+            bytes = read.second
+        }
+        val limit by App.settings.downloadLimit.collectAsState(
+            initial = AppSettings.DEFAULT_DOWNLOAD_LIMIT,
+        )
         val paused by App.settings.downloadsPaused.collectAsState(initial = false)
+        // Named only with more than one server to download from — with one,
+        // the name would repeat the obvious.
+        val sources by App.settings.sources.collectAsState(initial = emptyList())
+        val severalServers = sources.count { it.supportsDownloads } > 1
+        // Servers whose chosen download quality they can't serve. Their
+        // downloads wait rather than coming down as something else, and this
+        // is the page anyone checks when nothing is arriving — so it says why,
+        // read from the settings themselves rather than the worker's state.
+        val unmet = sources.filter { it.supportsDownloads && !it.downloadFormatAvailable }
+        // And servers that refused the last download — see Downloader.refusals.
+        val refusedStatus by App.downloader.refused.collectAsState()
+        val refused = sources.filter { it.id in refusedStatus && it !in unmet }
+        // And servers that stopped answering for long enough that downloading
+        // from them stopped — see Downloader.parkings. No worker is running
+        // for them, so without this row their queue would simply be invisible.
+        val parkedError by App.downloader.parked.collectAsState()
+        val parked = sources.filter { it.id in parkedError && it !in unmet && it !in refused }
 
-        // The tab bar belongs here like it does on every other library page: this
-        // is a page of the library, not a page of More.
-        LibrarySubPage(LibraryPage.DOWNLOADS) {
+        // No tab bar and no menu: this is reached from Settings, and it is a
+        // page about storage rather than a way of browsing the library. Back
+        // returns to the settings it was opened from, which is the only route
+        // in. Its order still follows the song lists' — see App.songSort — it
+        // simply isn't set from here any more.
+        PlayerTheme {
+            Column(modifier = Modifier.fillMaxSize()) {
             AppHeader(
-                // The same corners as every library page: the player on the
-                // left, this page's menu behind its title.
-                leftAction = HeaderAction(AppIcons.Waveform) { go { NowPlayingScreen(it) } },
-                title = "Downloaded Songs",
-                rightAction = libraryCornerAction(LibraryPage.DOWNLOADS),
+                onBack = { goBack() },
+                title = "Downloads",
                 fitTitle = true,
             )
-            if (tracks.isEmpty() && !progress.active && bytes == 0L) {
-                EmptyState("Nothing downloaded yet")
-                return@LibrarySubPage
+            if (total == 0 && !progress.active && bytes == 0L && unmet.isEmpty() && refused.isEmpty() && parked.isEmpty()) {
+                // Says how, not just that: the one user who came looking here
+                // had no way to learn that holding a row is the way in.
+                EmptyState("Nothing downloaded yet.\nHold a song, album or artist and choose Download.")
+                return@Column
             }
             LibraryList(
                 anchor = "downloaded-songs",
                 modifier = Modifier.fillMaxSize(),
             ) {
+                unmet.forEach { source ->
+                    item(key = "unmet/${source.id}") {
+                        if (source.downloadsRefused) {
+                            TextRow(
+                                title = "${source.name} won't let this account download",
+                                subtitle = "Its owner can allow it in the server's user settings",
+                                subtitleLines = 2,
+                            )
+                        } else {
+                            TextRow(
+                                title = "${source.name} can't keep original files",
+                                subtitle = "Choose another download quality",
+                                subtitleLines = 2,
+                                onClick = { go { SourceDownloadFormatScreen(it, source.id) } },
+                            )
+                        }
+                    }
+                }
+                refused.forEach { source ->
+                    item(key = "refused/${source.id}") {
+                        if (refusedStatus[source.id] == 401) {
+                            TextRow(
+                                title = "${source.name} refused the login",
+                                subtitle = "Sign in again in Sources",
+                                subtitleLines = 2,
+                                onClick = { go { SourceDetailScreen(it, source.id) } },
+                            )
+                        } else {
+                            TextRow(
+                                title = "${source.name} won't let this account download",
+                                subtitle = "Its owner can allow it in the server's user settings",
+                                subtitleLines = 2,
+                            )
+                        }
+                    }
+                }
+                parked.forEach { source ->
+                    item(key = "parked/${source.id}") {
+                        // A tap is someone saying the server is back: try now.
+                        TextRow(
+                            title = "${source.name} isn't answering",
+                            subtitle = listOfNotNull("Its downloads wait for it", parkedError[source.id]).joinToString(" · "),
+                            subtitleLines = 2,
+                            onClick = { App.downloader.tryNow(source.id) },
+                        )
+                    }
+                }
                 if (progress.active || paused) {
                     item {
                         // Separate from pause: one stops for now, the other throws
@@ -118,7 +219,7 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
                             title = "Cancel Downloads",
                             subtitle = "Clears what's still queued",
                             onClick = { App.downloader.cancelAll() },
-                            trailing = { AppIcon(AppIcons.Close, size = n(24)) },
+                            trailing = { AppIcon(AppIcons.Close, size = px(61)) },
                         )
                     }
                     item {
@@ -130,151 +231,62 @@ class DownloadsScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
                             // the whole library and the size limit stops it long
                             // before the end, so "N of 10105" told the user nothing.
                             title = progress.currentTitle ?: "Downloading",
-                            subtitle = if (paused) "Paused" else "Downloading",
+                            // Whose music is moving, when that isn't obvious:
+                            // every server's downloads share this one row.
+                            subtitle = when {
+                                paused -> "Paused"
+                                // Held, and why the last try failed: "Waiting for
+                                // the server" alone never said what it answered.
+                                progress.currentSource == null && progress.error != null -> progress.error!!
+                                severalServers && progress.currentSource != null ->
+                                    "Downloading · ${progress.currentSource}"
+                                else -> "Downloading"
+                            },
                             onClick = { App.downloader.setUserPaused(!paused) },
                             trailing = {
                                 AppIcon(
                                     if (paused) AppIcons.PlayArrow else AppIcons.Pause,
-                                    size = n(24),
+                                    size = px(61),
                                 )
                             },
                         )
                     }
                 }
-                // Storage used against the budget, whatever the list shows: the
-                // rows are scoped to the selected library, so they can be empty
-                // while there are gigabytes downloaded from another one.
                 item {
-                    SectionLabel(
-                        "${downloadedCount.size} tracks · " +
-                            "${formatGb(bytes)} / ${formatGb(limit)}",
-                    )
+                    SectionLabel("$total tracks · ${formatGb(bytes)} / ${formatGb(limit)}")
                 }
-                if (tracks.isNotEmpty()) {
-                    item {
-                        PlayAllRow(AppIcons.Shuffle, "Shuffle") {
-                            App.playback.playQueue(shuffled(tracks), 0)
-                            go { NowPlayingScreen(it) }
-                        }
-                    }
-                    itemsIndexed(tracks, key = { _, t -> t.id }) { index, track ->
+                // A list to read, not to play from: a track from a source that
+                // isn't the current one resolves its file and its stream through
+                // the wrong server, so tapping it could only mislead. The
+                // library is where music is played from; this is where you see
+                // what the phone is holding.
+                sorted.forEach { (source, list) ->
+                    // Named only when there is more than one, since with a
+                    // single source the heading would repeat the obvious.
+                    if (named) item(key = "src-$source") { SectionLabel(source) }
+                    items(list, key = { "$source-${it.id}" }) { track ->
                         TrackRow(
                             title = track.title,
                             subtitle = track.artist,
                             coverArtId = track.coverArtId,
                             downloaded = true,
-                            onClick = {
-                                App.playback.playQueue(tracks, index)
-                                go { NowPlayingScreen(it) }
-                            },
-                            onLongClick = { go { TrackActionsScreen(it, track.id) } },
+                            onClick = {},
                         )
                     }
                 }
+            }
             }
         }
     }
 }
 
 /**
- * One source's downloads: what to fetch, how much of the phone to spend, and
- * what to throw away.
+ * What one server downloads without being asked.
  *
- * Per source rather than app-wide because the downloads are: each source keeps
- * its own folder and its own rows, so "everything, up to 20GB" said once for the
- * whole app meant something different depending on which source you were looking
- * at — the budget was being weighed against one source's usage either way.
+ * Titled "Auto-Download" rather than the OfflineMode name the setting keeps:
+ * "Offline Mode" sounds like a switch that takes the app offline, and under a
+ * page already called Offline it said nothing the header hadn't.
  */
-class DownloadSettingsScreen(
-    sealed: SealedLightActivity,
-    private val sourceId: String,
-) : SimpleLightScreen<Unit>(sealed) {
-    @Composable
-    override fun Content() {
-        val sources by App.settings.sources.collectAsState(initial = emptyList())
-        val source = sources.firstOrNull { it.id == sourceId }
-        val used by App.library.downloadedBytes.collectAsState()
-        val progress by App.downloader.progress.collectAsState()
-
-        ListScreen(onBack = { goBack() }, title = "Downloads") {
-            ScrollableList(modifier = Modifier.fillMaxSize()) {
-                if (source == null) return@ScrollableList
-                val mode = source.offlineMode
-                val limit = source.downloadLimit
-                val lyrics = source.wantsLyrics
-                item { SectionLabel("Using ${formatBytes(used)} of ${formatBytes(limit)}") }
-                if (progress.limitReached) {
-                    item { SectionLabel("Size limit reached — raise it to download more") }
-                }
-
-                item { SectionLabel("What to download") }
-                item {
-                    TextRow(
-                        title = "Offline Mode",
-                        subtitle = offlineModeLabel(mode),
-                        onClick = { go { OfflineModeScreen(it, sourceId) } },
-                    )
-                }
-                item {
-                    TextRow(
-                        title = "Size Limit",
-                        subtitle = formatBytes(limit),
-                        onClick = { go { SizeLimitScreen(it, sourceId) } },
-                    )
-                }
-                item {
-                    TextRow(
-                        title = "Library",
-                        subtitle = source.downloadLibraryId?.let { "One library" } ?: "Current library",
-                        onClick = { go { DownloadLibraryScreen(it, sourceId) } },
-                    )
-                }
-
-                item { SectionLabel("Quality") }
-                if (source.kind != SourceKind.LOCAL) {
-                    item {
-                        TextRow(
-                            title = "Download Format",
-                            subtitle = formatLabel(source.downloadFormat),
-                            onClick = { go { SourceDownloadFormatScreen(it, sourceId) } },
-                        )
-                    }
-                }
-                item {
-                    ToggleRow("Include Lyrics", lyrics) {
-                        App.scope.launch {
-                            App.settings.setSourceDownloadLyrics(sourceId, !lyrics)
-                        }
-                    }
-                }
-
-                item { SectionLabel("Storage") }
-                item {
-                    TextRow(title = "Delete All Downloads") {
-                        navigateTo<Boolean>(
-                            {
-                                ConfirmScreen(
-                                    it,
-                                    title = "Delete All Downloads",
-                                    message = "This removes ${formatBytes(used)} of downloaded " +
-                                        "music from this phone. Your library on the server is " +
-                                        "untouched.",
-                                    confirmLabel = "Delete",
-                                )
-                            },
-                            resultCallback = { confirmed ->
-                                if (confirmed == true) {
-                                    App.scope.launch { App.downloader.deleteEverything() }
-                                }
-                            },
-                        )
-                    }
-                }
-            }
-        }
-    }
-}
-
 class OfflineModeScreen(
     sealed: SealedLightActivity,
     private val sourceId: String,
@@ -283,12 +295,14 @@ class OfflineModeScreen(
     override fun Content() {
         val sources by App.settings.sources.collectAsState(initial = emptyList())
         val current = sources.firstOrNull { it.id == sourceId }?.offlineMode ?: OfflineMode.MANUAL
-        ListScreen(onBack = { goBack() }, title = "Offline Mode") {
+        ListScreen(onBack = { goBack() }, title = "Auto-Download") {
             ScrollableList(modifier = Modifier.fillMaxSize()) {
                 items(OfflineMode.entries.toList()) { mode ->
                     TextRow(
                         title = offlineModeLabel(mode),
+                        // A sentence, not a label — see TextRow.subtitleLines.
                         subtitle = offlineModeDetail(mode),
+                        subtitleLines = MODE_DETAIL_LINES,
                         onClick = {
                             App.scope.launch { App.settings.setSourceOfflineMode(sourceId, mode) }
                             goBack()
@@ -310,7 +324,9 @@ class DataModeScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
                 items(DataMode.entries.toList()) { mode ->
                     TextRow(
                         title = dataModeLabel(mode),
+                        // A sentence, not a label — see TextRow.subtitleLines.
                         subtitle = dataModeDetail(mode),
+                        subtitleLines = MODE_DETAIL_LINES,
                         onClick = {
                             App.scope.launch { App.settings.setDataMode(mode) }
                             goBack()
@@ -328,16 +344,15 @@ class DataModeScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seal
  * Size budget. The offered values stop at what the device can actually spare —
  * see [com.sublunar.amp.data.DownloadStore.maxSelectableBytes].
  */
-class SizeLimitScreen(
-    sealed: SealedLightActivity,
-    private val sourceId: String,
-) : SimpleLightScreen<Unit>(sealed) {
+class SizeLimitScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) {
     @Composable
     override fun Content() {
-        val sources by App.settings.sources.collectAsState(initial = emptyList())
-        val current = sources.firstOrNull { it.id == sourceId }?.downloadLimit ?: 0L
+        val current by App.settings.downloadLimit.collectAsState(
+            initial = AppSettings.DEFAULT_DOWNLOAD_LIMIT,
+        )
         val max = remember { App.downloads.maxSelectableBytes() }
         val free = remember { App.downloads.freeBytes() }
+        val used = remember { App.downloads.usedBytesEverywhere() }
         val options = remember(max) {
             val gb = 1024L * 1024 * 1024
             listOf(1L, 2L, 5L, 10L, 20L, 32L, 48L).map { it * gb }.filter { it < max } + listOf(max)
@@ -345,84 +360,23 @@ class SizeLimitScreen(
 
         ListScreen(onBack = { goBack() }, title = "Size Limit") {
             ScrollableList(modifier = Modifier.fillMaxSize()) {
-                item { SectionLabel("${formatBytes(free)} free on this phone") }
+                // Both numbers, because a limit is chosen against both: free
+                // space alone makes the options look arbitrarily small next to
+                // what is already downloaded.
+                item {
+                    SectionLabel(
+                        "${formatBytes(used)} downloaded · ${formatBytes(free)} free",
+                    )
+                }
                 items(options) { bytes ->
                     TextRow(
                         title = formatBytes(bytes),
                         subtitle = if (bytes == max) "Maximum" else null,
                         onClick = {
-                            App.scope.launch {
-                                App.settings.setSourceDownloadLimit(sourceId, bytes)
-                            }
+                            App.scope.launch { App.settings.setDownloadLimit(bytes) }
                             goBack()
                         },
                         trailing = { if (bytes == current) LightIcon(LightIcons.ACCEPT, size = 1.4f) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-class DownloadLibraryScreen(
-    sealed: SealedLightActivity,
-    private val sourceId: String,
-) : SimpleLightScreen<Unit>(sealed) {
-    @Composable
-    override fun Content() {
-        val sources by App.settings.sources.collectAsState(initial = emptyList())
-        val source = sources.firstOrNull { it.id == sourceId }
-        val current = source?.downloadLibraryId
-        var folders by remember(sourceId) {
-            mutableStateOf<List<com.sublunar.amp.data.MusicFolder>>(emptyList())
-        }
-        // Asked of the source being edited, not of whatever the app happens to
-        // be browsing: these pages are reachable for every configured source, and
-        // App.library only ever speaks to the active one — so editing a second
-        // server's downloads offered the first server's libraries, and picking
-        // one stored an id that means nothing on the server it was stored for.
-        LaunchedEffect(source?.id, source?.baseUrl) {
-            val s = source ?: return@LaunchedEffect
-            folders = if (s.id == App.source.value.id) {
-                // Already connected — no second client for the same server.
-                App.library.musicFolders()
-            } else {
-                val client = s.toClient()
-                try {
-                    runCatching { client?.getMusicFolders().orEmpty() }.getOrDefault(emptyList())
-                } finally {
-                    client?.close()
-                }
-            }
-        }
-
-        ListScreen(onBack = { goBack() }, title = "Download Library") {
-            ScrollableList(modifier = Modifier.fillMaxSize()) {
-                item {
-                    TextRow(
-                        title = "Current library",
-                        subtitle = "Follow whatever the app is browsing",
-                        onClick = {
-                            App.scope.launch {
-                                App.settings.setSourceDownloadLibrary(sourceId, null)
-                            }
-                            goBack()
-                        },
-                        trailing = { if (current == null) LightIcon(LightIcons.ACCEPT, size = 1.4f) },
-                    )
-                }
-                items(folders, key = { it.id }) { folder ->
-                    TextRow(
-                        title = folder.name,
-                        onClick = {
-                            App.scope.launch {
-                                App.settings.setSourceDownloadLibrary(sourceId, folder.id)
-                            }
-                            goBack()
-                        },
-                        trailing = {
-                            if (current == folder.id) LightIcon(LightIcons.ACCEPT, size = 1.4f)
-                        },
                     )
                 }
             }

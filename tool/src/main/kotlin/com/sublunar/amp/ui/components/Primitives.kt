@@ -1,54 +1,6 @@
 package com.sublunar.amp.ui.components
 
 import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBackIos
-import androidx.compose.material.icons.filled.ArrowDropDown
-import androidx.compose.material.icons.automirrored.filled.FormatListBulleted
-import androidx.compose.material.icons.automirrored.filled.PlaylistPlay
-import androidx.compose.material.icons.automirrored.filled.QueueMusic
-import androidx.compose.material.icons.automirrored.filled.Sort
-import androidx.compose.material.icons.automirrored.filled.VolumeDown
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.Speaker
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.AddCircleOutline
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.RadioButtonUnchecked
-import androidx.compose.material.icons.filled.Album
-import androidx.compose.material.icons.filled.ArrowDownward
-import androidx.compose.material.icons.filled.ArrowUpward
-import androidx.compose.material.icons.filled.Bluetooth
-import androidx.compose.material.icons.filled.Cast
-import androidx.compose.material.icons.filled.CloudOff
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Download
-import androidx.compose.material.icons.filled.DownloadDone
-import androidx.compose.material.icons.filled.Dehaze
-import androidx.compose.material.icons.filled.DeleteOutline
-import androidx.compose.material.icons.filled.Smartphone
-import androidx.compose.material.icons.filled.FastForward
-import androidx.compose.material.icons.filled.FastRewind
-import androidx.compose.material.icons.filled.Favorite
-import androidx.compose.material.icons.filled.FavoriteBorder
-import androidx.compose.material.icons.filled.FilterNone
-import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.LibraryMusic
-import androidx.compose.material.icons.filled.Lyrics
-import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MoreHoriz
-import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.MusicNote
-import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
-import androidx.compose.material.icons.filled.RecordVoiceOver
-import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Repeat
-import androidx.compose.material.icons.filled.RepeatOne
-import androidx.compose.material.icons.filled.Search
-import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.Shuffle
-import androidx.compose.material.icons.filled.Whatshot
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -63,7 +15,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.sp
-import com.sublunar.amp.ui.n
+import com.sublunar.amp.ui.px
 import com.thelightphone.sdk.ui.LightProgressBar
 import com.thelightphone.sdk.ui.LightThemeTokens
 
@@ -87,7 +39,6 @@ object AppIcons {
     val RecordVoiceOver = Icons.Filled.Mic
     val QueueMusic = Icons.AutoMirrored.Filled.QueueMusic
     val PlaylistPlay = Icons.AutoMirrored.Filled.PlaylistPlay
-    val MoreHoriz = Icons.Filled.MoreHoriz
     val MoreVert = Icons.Filled.MoreVert
     val GraphicEq = Icons.Filled.GraphicEq
 
@@ -95,8 +46,17 @@ object AppIcons {
     val Waveform = WaveformSymbol
     val Lyrics = Icons.Filled.Lyrics
 
-    /** Leaving Now Playing goes back to the library, so the button says so. */
+    /**
+     * Leaving Now Playing goes back to the library, so the button says so — and
+     * the simplified bar's middle button, which is that same library.
+     */
     val LibraryMusic = Icons.Filled.LibraryMusic
+
+    /** Genres, on the library index: a tag is what a genre is. */
+    val Genre = Icons.Filled.LocalOffer
+
+    /** Composers, on the library index — written, rather than performed. */
+    val Composer = Icons.Filled.HistoryEdu
     val Sort = Icons.AutoMirrored.Filled.Sort
     val Favorite = Icons.Filled.Favorite
     val FavoriteBorder = Icons.Filled.FavoriteBorder
@@ -115,7 +75,6 @@ object AppIcons {
     /** Selection state in multi-select mode: filled when picked, ring when not. */
     val Selected = Icons.Filled.CheckCircle
     val Unselected = Icons.Filled.RadioButtonUnchecked
-    val ArrowBackIos = Icons.AutoMirrored.Filled.ArrowBackIos
 
     /** Marks a header title that opens a menu. */
     val ArrowDropDown = Icons.Filled.ArrowDropDown
@@ -149,7 +108,7 @@ object AppIcons {
 fun AppIcon(
     icon: ImageVector,
     modifier: Modifier = Modifier,
-    size: Dp = n(28),
+    size: Dp = px(71),
     tint: Color = LightThemeTokens.colors.content,
 ) {
     Icon(

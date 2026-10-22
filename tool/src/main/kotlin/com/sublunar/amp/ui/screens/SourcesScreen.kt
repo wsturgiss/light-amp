@@ -3,7 +3,6 @@ package com.sublunar.amp.ui.screens
 import android.view.KeyEvent
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -14,9 +13,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import com.sublunar.amp.App
-import com.sublunar.amp.data.MusicFolder
+import com.sublunar.amp.data.JellyfinClient
 import com.sublunar.amp.data.MusicSource
 import com.sublunar.amp.data.SourceKind
+import com.sublunar.amp.data.SyncState
 import com.sublunar.amp.ui.components.AppIcons
 import com.sublunar.amp.ui.components.ListScreen
 import com.sublunar.amp.ui.components.PlayAllRow
@@ -30,6 +30,7 @@ import com.thelightphone.sdk.ui.LightIcon
 import com.thelightphone.sdk.ui.LightIcons
 import com.sublunar.amp.data.LocalLibrary
 import com.thelightphone.sdk.rememberPermissionRequestLauncher
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.launch
@@ -40,8 +41,8 @@ private val READ_MEDIA_AUDIO = LocalLibrary.PERMISSION
 /**
  * Which library the app is showing — and nothing else.
  *
- * This is the page reached while listening, so it does one thing: every source's
- * libraries, one tap each. Adding a source, or changing anything about one,
+ * This is the page reached while listening, so it does two things: every
+ * source's libraries, one tap each, and Sync Now for the one in use. Adding a source, or changing anything about one,
  * lives in Settings under Sources — see [SourceListScreen]. Splitting them keeps
  * the switch you make often away from the settings you set once, where a
  * mistaken tap costs a re-sync.
@@ -61,9 +62,24 @@ class SourcesScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
         val sources by App.settings.sources.collectAsState(initial = emptyList())
         val active by App.settings.activeSource.collectAsState(initial = null)
         val activeLibrary by App.settings.libraryId.collectAsState(initial = null)
+        val sync by App.library.syncState.collectAsState()
 
         ListScreen(onBack = { goBack() }, title = "Sources") {
             ScrollableList(modifier = Modifier.fillMaxSize()) {
+                // First, and always in the same place: a control shouldn't move
+                // when the source changes. It refreshes the source in use — the
+                // only one a sync can work on, and the only one that needs it,
+                // since switching to another syncs that one as it opens. The
+                // line under it names the source, so which one is never a guess.
+                active?.let { current ->
+                    item(key = "sync") {
+                        TextRow(
+                            title = if (sync.syncing) "Syncing…" else "Sync Now",
+                            subtitle = "${current.name} · ${syncStatus(current, sync)}",
+                            onClick = { if (!sync.syncing) App.library.scanAndSyncInBackground() },
+                        )
+                    }
+                }
                 sources.forEach { source ->
                     val chosen = source.id == active?.id
                     // The source is the heading its libraries sit under, not a
@@ -83,6 +99,21 @@ class SourcesScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
                 }
             }
         }
+    }
+
+    /** How the source in use stands, for the line under Sync Now. */
+    private fun syncStatus(source: MusicSource, sync: SyncState): String = when {
+        sync.syncing -> sync.phase.ifBlank { "Working" }
+        sync.error != null -> sync.error
+        // Worth saying every time it is true: it means new files on the server
+        // will never appear until the server itself is set to look for them.
+        App.library.scanRefused -> "won't scan on request — last synced ${relativeTime(sync.lastSyncedMs)}"
+        sync.lastSyncedMs > 0L -> "last synced ${relativeTime(sync.lastSyncedMs)}"
+        source.kind == SourceKind.LOCAL -> "rescan this phone's music"
+        // A server with no scan call of its own is only ever read from — see
+        // MusicSource.supportsServerScan.
+        !source.supportsServerScan -> "fetch the library again"
+        else -> "scan the server, then refresh"
     }
 
     /** A row belonging to the source above it: one of its folders, or its page. */
@@ -108,15 +139,20 @@ class SourcesScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
     private fun rowsUnder(source: MusicSource, activeLibraryId: String?): List<LibraryEntry> = when {
         source.kind == SourceKind.LOCAL ->
             listOf(LibraryEntry(LocalLibrary.FOLDER, null))
-        // Several libraries: the whole server is a choice of its own, and it has
-        // to be a row now that the source above doesn't select anything. Which
-        // of them appear here is the source's own setting — see
-        // LibraryVisibilityScreen.
-        source.libraries.size >= 2 ->
-            (if (source.showsAllLibraries) listOf(LibraryEntry(ALL_LIBRARIES, null)) else emptyList()) +
+        // Several libraries shown: the whole server is a choice of its own, and
+        // it has to be a row now that the source above doesn't select anything.
+        // Which libraries appear here is the source's own setting — see
+        // LibraryVisibilityScreen; All Libraries comes with two or more of
+        // them, never by choice — see MusicSource.showsAllLibraries.
+        source.showsAllLibraries ->
+            listOf(LibraryEntry(ALL_LIBRARIES, null)) +
                 source.libraries
                     .filter { it.id !in source.hiddenLibraryIds || it.id == activeLibraryId }
                     .map { LibraryEntry(it.name, it.id) }
+        // All but one hidden: that one is everything shown, so its row means
+        // the whole of what is shown, as a single library's always has.
+        source.libraries.size >= 2 ->
+            listOf(LibraryEntry(source.visibleLibraries.firstOrNull()?.name ?: ALL_LIBRARIES, null))
         // One library, or a server not yet synced: no choice to offer, just the
         // one row that turns it on.
         else -> listOf(LibraryEntry(source.libraries.firstOrNull()?.name ?: ALL_LIBRARIES, null))
@@ -139,7 +175,7 @@ class SourcesScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
             // before the switch — the library then syncs against the right one
             // rather than the previous choice.
             if (changingLibrary) {
-                App.settings.saveSource(source.copy(libraryId = libraryId))
+                App.settings.setSourceLibraryId(source.id, libraryId)
             }
             App.settings.setActiveSource(source.id)
 
@@ -158,7 +194,9 @@ class SourcesScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
 }
 
 /**
- * Which of a source's libraries appear under it on the Sources page.
+ * Which of a source's libraries Amp shows at all — see
+ * MusicSource.hiddenLibraryIds. Hidden ones are off the Sources page, out of
+ * All Libraries and every list, and not synced.
  *
  * A server can hold libraries this phone has no interest in — an Audiobooks
  * section beside the music — and every one of them was taking a row on the page
@@ -168,6 +206,12 @@ class SourcesScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(seale
 class LibraryVisibilityScreen(
     sealed: SealedLightActivity,
     private val sourceId: String,
+    /**
+     * Opened while the source is being added, before its first sync: titled
+     * as a choice, with a Done row, and handing back a result on Done and on
+     * back alike — either way the adding carries on.
+     */
+    private val adding: Boolean = false,
 ) : SimpleLightScreen<Unit>(sealed) {
 
     // While casting, the rocker belongs to the speaker — see handleVolumeKey.
@@ -179,17 +223,16 @@ class LibraryVisibilityScreen(
         val sources by App.settings.sources.collectAsState(initial = emptyList())
         val source = sources.firstOrNull { it.id == sourceId }
 
-        ListScreen(onBack = { goBack() }, title = "Shown on Sources") {
+        ListScreen(onBack = { leave() }, title = if (adding) "Choose Libraries" else "Shown in Amp") {
             ScrollableList(modifier = Modifier.fillMaxSize()) {
                 if (source == null) return@ScrollableList
-                item { SectionLabel("Tap to show or hide") }
                 item {
-                    VisibilityRow(
-                        name = ALL_LIBRARIES,
-                        shown = source.showsAllLibraries,
-                        onToggle = { toggle(null, !source.showsAllLibraries) },
+                    SectionLabel(
+                        if (adding) "Tap to show or hide. Hidden libraries aren't synced." else "Tap to show or hide",
                     )
                 }
+                // Real libraries only: All Libraries comes and goes by itself —
+                // see MusicSource.showsAllLibraries.
                 items(source.libraries, key = { it.id }) { library ->
                     val shown = library.id !in source.hiddenLibraryIds
                     VisibilityRow(
@@ -198,9 +241,13 @@ class LibraryVisibilityScreen(
                         onToggle = { toggle(library.id, !shown) },
                     )
                 }
+                if (adding) item { TextRow(title = "Done", onClick = { leave() }) }
             }
         }
     }
+
+    /** A result only while adding: the SDK calls back only when there is one. */
+    private fun leave() = if (adding) goBack(Unit) else goBack()
 
     @Composable
     private fun VisibilityRow(name: String, shown: Boolean, onToggle: () -> Unit) {
@@ -211,8 +258,64 @@ class LibraryVisibilityScreen(
         )
     }
 
-    private fun toggle(libraryId: String?, visible: Boolean) {
-        App.scope.launch { App.settings.setLibraryVisible(sourceId, libraryId, visible) }
+    private fun toggle(libraryId: String, visible: Boolean) {
+        App.scope.launch {
+            App.settings.setLibraryVisible(sourceId, libraryId, visible)
+            // A library shown again may never have been fetched — hidden while
+            // the server was being added — so it is fetched now, not whenever
+            // the next sync comes round.
+            if (visible && App.source.value.id == sourceId) {
+                withContext(Dispatchers.Main) { App.library.syncInBackground(force = true) }
+            }
+        }
+    }
+}
+
+/**
+ * The last step of adding a source, the same for every kind: with two or more
+ * libraries, offer them to pick from first (see [LibraryVisibilityScreen]);
+ * then make the source active, which starts its first sync, and land on its
+ * albums. Active only after the choice, so a library hidden there is never
+ * fetched. The source must already be saved, under [sourceId].
+ */
+fun SimpleLightScreen<*>.finishAddingSource(sourceId: String, libraryCount: Int) {
+    if (libraryCount >= 2) {
+        navigateTo<Unit>(
+            { LibraryVisibilityScreen(it, sourceId, adding = true) },
+            resultCallback = { activateAddedSource(sourceId) },
+        )
+    } else {
+        activateAddedSource(sourceId)
+    }
+}
+
+/**
+ * Save a server a sign-in found, then [finishAddingSource] — unless the page
+ * that found it has [gone] meanwhile, since navigating from it then would
+ * act on whatever page is on top.
+ *
+ * The id carried on is whatever saveSource settled on, not the one the
+ * sign-in minted: re-linking a server already known by its own id updates
+ * that source in place rather than adding a second — see
+ * AppSettings.saveSource.
+ */
+fun SimpleLightScreen<*>.adoptServer(server: PendingServer, gone: () -> Boolean) {
+    App.scope.launch {
+        val id = App.settings.saveSource(server.source)
+        withContext(Dispatchers.Main.immediate) {
+            if (gone()) return@withContext
+            finishAddingSource(id, server.sections.size)
+        }
+    }
+}
+
+private fun SimpleLightScreen<*>.activateAddedSource(sourceId: String) {
+    App.scope.launch {
+        App.settings.setActiveSource(sourceId)
+        withContext(Dispatchers.Main) {
+            LibraryNav.selectTab(LibraryTab.ALBUMS)
+            popToRoot()
+        }
     }
 }
 
@@ -280,7 +383,12 @@ class AddSourceScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sea
 
         ListScreen(onBack = { goBack() }, title = "Add Source") {
             ScrollableList(modifier = Modifier.fillMaxSize()) {
-                item { SectionLabel("Subsonic covers Navidrome, Airsonic and Bandcamp") }
+                item { SectionLabel("Subsonic covers Navidrome, Airsonic and Ampache") }
+                item {
+                    PlayAllRow(AppIcons.Add, "Bandcamp") {
+                        go { ServerScreen(it, sourceId = null, adding = true, bandcamp = true) }
+                    }
+                }
                 item {
                     PlayAllRow(AppIcons.Add, "Subsonic Server") {
                         go { ServerScreen(it, sourceId = null, adding = true) }
@@ -319,7 +427,15 @@ private fun subtitleFor(source: MusicSource): String = when (source.kind) {
         source.baseUrl.ifBlank { "Not connected" }
 }
 
-/** One source's own settings: what it is called, and how it is reached. */
+/**
+ * One source's own settings: what it is called, and how it is reached.
+ *
+ * Nothing else. This page used to carry the source's streaming and download
+ * quality and its offline behaviour too, which buried the connection rows under
+ * knobs that get revisited; those live under Data and Offline now — see
+ * [DataScreen] and [OfflineScreen] — leaving this a page you visit to point the
+ * app at a server and then leave alone.
+ */
 class SourceDetailScreen(
     sealed: SealedLightActivity,
     private val sourceId: String,
@@ -333,12 +449,13 @@ class SourceDetailScreen(
     override fun Content() {
         val sources by App.settings.sources.collectAsState(initial = emptyList())
         val source = sources.firstOrNull { it.id == sourceId }
-
         val sync by App.library.syncState.collectAsState()
+
         // Re-checked on every sync, because granting access is what the user
         // goes off to do and coming back is when it should have changed.
-        var canRead by remember { mutableStateOf(true) }
-        LaunchedEffect(sync) { canRead = LocalLibrary.permitted() }
+        var access by remember { mutableStateOf(LocalLibrary.Access.GRANTED) }
+        LaunchedEffect(sync) { access = LocalLibrary.access() }
+        val canRead = access == LocalLibrary.Access.GRANTED
         val audioPermission = rememberPermissionRequestLauncher(READ_MEDIA_AUDIO)
 
         ListScreen(onBack = { goBack() }, title = source?.name ?: "Source") {
@@ -351,7 +468,11 @@ class SourceDetailScreen(
                     item {
                         TextRow(
                             title = "Allow Music Access",
-                            subtitle = "Needed to read this phone's music folder",
+                            subtitle = if (access == LocalLibrary.Access.BLOCKED_BY_LIGHTOS) {
+                                "LightOS is blocking it for this tool"
+                            } else {
+                                "Needed to read this phone's music folder"
+                            },
                             onClick = { audioPermission?.launch() },
                         )
                     }
@@ -360,8 +481,31 @@ class SourceDetailScreen(
                     item {
                         TextRow(
                             title = "Connection",
-                            subtitle = source.baseUrl.ifBlank { "Not set" },
+                            value = source.baseUrl.ifBlank { "Not set" },
                             onClick = { go { ServerScreen(it, sourceId = source.id) } },
+                        )
+                    }
+                } else if (source.kind == SourceKind.JELLYFIN) {
+                    // Signing in again, here rather than by logging out and
+                    // adding the server anew, keeps its library and downloads.
+                    item {
+                        TextRow(
+                            title = "Connection",
+                            value = source.baseUrl.ifBlank { "Not set" },
+                            subtitle = "Sign in again",
+                            onClick = { go { JellyfinLinkScreen(it, again = source) } },
+                        )
+                    }
+                } else if (source.kind != SourceKind.LOCAL) {
+                    // Plex signs in by token, so there are no fields to edit —
+                    // a different server or account means linking again, which
+                    // updates this source in place. The row still answers where
+                    // the music comes from; a stating row takes no press — see
+                    // TextRow.
+                    item {
+                        TextRow(
+                            title = "Connection",
+                            value = source.baseUrl.ifBlank { "Not set" },
                         )
                     }
                 }
@@ -372,7 +516,7 @@ class SourceDetailScreen(
                     item {
                         TextRow(
                             title = "Player name",
-                            subtitle = source.playerName.ifBlank { "Amp (default)" },
+                            value = source.playerName.ifBlank { "Amp (default)" },
                             onClick = {
                                 navigateTo<String?>(
                                     {
@@ -396,80 +540,17 @@ class SourceDetailScreen(
                         )
                     }
                 }
-                // Both qualities together, and per source: two servers can hold
-                // the same album in different formats and only one of them may
-                // be able to transcode it, so this is a fact about the server
-                // rather than about the app. The phone's own music has neither —
-                // it plays the file that is there.
-                if (source.kind != SourceKind.LOCAL) {
-                    // Streaming twice over, because the two connections are
-                    // different bargains: on Wi-Fi the bytes are free and the
-                    // answer is usually "the best you have", on cellular they
-                    // are not. Stating both beats one setting and a data mode
-                    // that silently overrides it.
-                    item { SectionLabel("Streaming quality") }
-                    item {
-                        TextRow(
-                            title = "On Wi-Fi",
-                            subtitle = formatLabel(source.wifiFormat),
-                            onClick = { go { StreamFormatScreen(it, source.id) } },
-                        )
-                    }
-                    item {
-                        TextRow(
-                            title = "On Cellular",
-                            subtitle = formatLabel(source.cellularFormat),
-                            onClick = { go { CellularFormatScreen(it, source.id) } },
-                        )
-                    }
-                }
                 // Only worth offering when there is a choice to make: with one
                 // library there is one row under the source and nothing to hide.
                 if (source.libraries.size >= 2) {
-                    val shown = source.visibleLibraries.size +
-                        (if (source.showsAllLibraries) 1 else 0)
                     item { SectionLabel("Library") }
                     item {
                         TextRow(
-                            title = "Shown on Sources",
-                            subtitle = "$shown of ${source.libraries.size + 1}",
+                            title = "Shown in Amp",
+                            value = "${source.visibleLibraries.size} of ${source.libraries.size}",
                             onClick = { go { LibraryVisibilityScreen(it, source.id) } },
                         )
                     }
-                }
-                // This source's downloads: its own budget, its own idea of what
-                // to fetch without being asked.
-                if (source.supportsDownloads) {
-                    item { SectionLabel("Offline") }
-                    item {
-                        TextRow(
-                            title = "Downloads",
-                            subtitle = "${offlineModeLabel(source.offlineMode)} · " +
-                                formatLabel(source.downloadFormat),
-                            onClick = { go { DownloadSettingsScreen(it, source.id) } },
-                        )
-                    }
-                }
-                // Refreshing is a thing you do to *this* source, so it belongs
-                // here rather than in the app's own settings.
-                item {
-                    TextRow(
-                        title = if (sync.syncing) "Syncing…" else "Sync Now",
-                        subtitle = when {
-                            sync.syncing -> sync.phase.ifBlank { "Working" }
-                            sync.error != null -> sync.error
-                            // Worth saying every time it is true: it means new
-                            // files on the server will never appear until the
-                            // server itself is set to look for them.
-                            App.library.scanRefused ->
-                                "Server won't scan on request — last synced " +
-                                    relativeTime(sync.lastSyncedMs)
-                            sync.lastSyncedMs > 0L -> "Last synced ${relativeTime(sync.lastSyncedMs)}"
-                            source.kind == SourceKind.LOCAL -> "Rescan this phone's music"
-                            else -> "Scan the server, then refresh"
-                        },
-                        onClick = { if (!sync.syncing) App.library.scanAndSyncInBackground() },
-                    )
                 }
                 // Logging out of a server *is* forgetting it now that there can
                 // be several: one row, named for what it does to this kind of
@@ -484,16 +565,46 @@ class SourceDetailScreen(
                         },
                         subtitle = "Forgets its library and its downloads",
                         onClick = {
-                            // Stop first: the queue holds stream URLs signed for
-                            // the server we are about to forget.
-                            if (source.id == App.source.value.id) App.playback.stop()
-                            App.scope.launch {
-                                // Wipe while the source still exists to name its
-                                // database and its download folder.
-                                App.forgetSource(source)
-                                App.settings.removeSource(source.id)
-                            }
-                            goBack()
+                            // Asked first: what goes with it can't be had back
+                            // without the network, and downloads are what this
+                            // phone keeps for when there is none.
+                            val local = source.kind == SourceKind.LOCAL
+                            navigateTo<Boolean>(
+                                {
+                                    ConfirmScreen(
+                                        it,
+                                        title = if (local) "Remove Source" else "Log Out",
+                                        message = if (local) {
+                                            "This removes ${source.name} from Amp. The music " +
+                                                "files stay on this phone."
+                                        } else {
+                                            "This removes ${source.name} from Amp and deletes " +
+                                                "all of its downloads from this phone."
+                                        },
+                                        confirmLabel = if (local) "Remove" else "Log Out",
+                                    )
+                                },
+                                resultCallback = { confirmed ->
+                                    if (confirmed == true) {
+                                        // Stop first: the queue holds stream URLs
+                                        // signed for the server we are about to forget.
+                                        if (source.id == App.source.value.id) App.playback.stop()
+                                        // Ended on the server too, on its own: the
+                                        // phone stops being listed there, and nothing
+                                        // here waits on a server that may be gone.
+                                        if (source.kind == SourceKind.JELLYFIN) {
+                                            App.scope.launch { signOutQuietly(source) }
+                                        }
+                                        App.scope.launch {
+                                            // Wipe while the source still exists to
+                                            // name its database and its download folder.
+                                            App.forgetSource(source)
+                                            App.settings.removeSource(source.id)
+                                        }
+                                        goBack()
+                                    }
+                                },
+                            )
                         },
                     )
                 }
@@ -502,43 +613,14 @@ class SourceDetailScreen(
     }
 }
 
-/** Which of a Subsonic server's music folders this source shows. */
-class LibraryFolderScreen(sealed: SealedLightActivity) : SimpleLightScreen<Unit>(sealed) {
-
-    // While casting, the rocker belongs to the speaker — see handleVolumeKey.
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
-        App.playback.handleVolumeKey(keyCode) || super.onKeyDown(keyCode, event)
-
-    @Composable
-    override fun Content() {
-        val selected by App.settings.libraryId.collectAsState(initial = null)
-        var folders by remember { mutableStateOf<List<MusicFolder>>(emptyList()) }
-        LaunchedEffect(Unit) { folders = App.library.musicFolders() }
-
-        ListScreen(onBack = { goBack() }, title = "Library") {
-            ScrollableList(modifier = Modifier.fillMaxSize()) {
-                item { row("All Libraries", selected == null) { choose(null) } }
-                items(folders, key = { it.id }) { folder: MusicFolder ->
-                    row(folder.name, selected == folder.id) { choose(folder.id) }
-                }
-            }
-        }
-    }
-
-    @Composable
-    private fun row(name: String, chosen: Boolean, onClick: () -> Unit) {
-        TextRow(
-            title = name,
-            onClick = onClick,
-            trailing = { if (chosen) LightIcon(LightIcons.ACCEPT, size = 1.4f) },
-        )
-    }
-
-    private fun choose(id: String?) {
-        App.scope.launch {
-            App.settings.setLibraryId(id)
-            App.library.switchLibrary(id)
-        }
-        goBack()
+/** Log Out's word to a Jellyfin server — see [JellyfinClient.signOut]. Best effort, and brief. */
+private suspend fun signOutQuietly(source: MusicSource) {
+    val client = source.toClient() as? JellyfinClient ?: return
+    try {
+        runCatching { withTimeoutOrNull(SIGN_OUT_TIMEOUT_MS) { client.signOut() } }
+    } finally {
+        client.close()
     }
 }
+
+private const val SIGN_OUT_TIMEOUT_MS = 5_000L

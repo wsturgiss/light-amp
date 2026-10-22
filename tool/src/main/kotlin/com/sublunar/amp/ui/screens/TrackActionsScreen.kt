@@ -4,14 +4,20 @@ import android.view.KeyEvent
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import com.sublunar.amp.App
+import com.sublunar.amp.data.primaryAlbumArtist
 import com.sublunar.amp.ui.components.EmptyState
 import com.sublunar.amp.ui.components.ActionList
 import com.sublunar.amp.ui.components.ListScreen
+import com.sublunar.amp.ui.components.SectionLabel
 import com.sublunar.amp.ui.components.TextRow
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SimpleLightScreen
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 class TrackActionsScreen(
     sealed: SealedLightActivity,
@@ -68,6 +74,21 @@ class TrackActionsScreen(
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean =
         App.playback.handleVolumeKey(keyCode) || super.onKeyDown(keyCode, event)
 
+    /*
+     * What the radio row is up to, said above the menu. Held on the screen
+     * rather than remembered in the composition, like ServerScreen's status:
+     * the request outlives a recomposition and its answer has to land.
+     */
+    private var status by mutableStateOf<String?>(null)
+    private var tuning by mutableStateOf(false)
+
+    /** Set once this page has been popped, so an answer arriving late can't act on another. */
+    private var gone = false
+
+    override fun onScreenDestroy() {
+        gone = true
+    }
+
     @Composable
     override fun Content() {
         val source by App.source.collectAsState()
@@ -94,6 +115,7 @@ class TrackActionsScreen(
                 return@ListScreen
             }
             ActionList {
+                status?.let { SectionLabel(it) }
                 // First: it is the way into multi-select, so it is the row that
                 // changes what the rest of the app is doing rather than acting
                 // on this one track.
@@ -131,6 +153,46 @@ class TrackActionsScreen(
                         }
                     }
                 }
+                // A queue that starts on this song and carries on with what the
+                // server thinks follows. The sheet stays up while it asks: the
+                // wait is a server round trip, and the answer can be "nothing"
+                // — which is said here, rather than a shuffled library played
+                // in its place. See LibraryRepository.radioFrom.
+                if (source.supportsRadio) {
+                    TextRow(title = "Start Song Radio") {
+                        if (tuning) return@TextRow
+                        tuning = true
+                        status = "Finding songs…"
+                        App.scope.launch {
+                            val radio = App.library.radioFrom(track)
+                            // The player's looper is Main — see PlaybackController.
+                            withContext(Dispatchers.Main) {
+                                // Left while it was asking: the radio is
+                                // dropped. Going back or opening the player now
+                                // would act on whatever page is showing instead
+                                // — the library's root, which would close Amp.
+                                if (gone) return@withContext
+                                tuning = false
+                                if (radio.isEmpty()) {
+                                    status = "No radio for this song"
+                                } else if (isCurrent) {
+                                    // Seeded by the song already playing: it
+                                    // carries on, and the radio takes the place
+                                    // of whatever was queued after it — not a
+                                    // restart from the top. The radio's first
+                                    // entry is the seed itself, so it is skipped.
+                                    status = null
+                                    App.playback.replaceUpcoming(radio.drop(1), name = "${track.title} Radio")
+                                    goBack()
+                                } else {
+                                    status = null
+                                    App.playback.playQueue(radio, 0, name = "${track.title} Radio")
+                                    replaceWithPlayer()
+                                }
+                            }
+                        }
+                    }
+                }
                 if (showAddToPlaylist && source.supportsPlaylists) {
                     TextRow(title = "Add to Playlist") {
                         // Dismiss this sheet too once a playlist is picked, so the
@@ -141,7 +203,7 @@ class TrackActionsScreen(
                         )
                     }
                 }
-                if (showDownload && source.supportsDownloads) {
+                if (showDownload && source.supportsDownloads && (downloaded || source.mayDownload)) {
                     if (downloaded) {
                         TextRow(title = "Remove from Downloads") {
                             App.scope.launch { App.downloader.remove(track.id) }
@@ -180,14 +242,15 @@ class TrackActionsScreen(
                     }
                 }
                 if (showRating && source.supportsRatings) {
-                    TextRow(title = "Rating", subtitle = ratingStars(track.rating)) {
+                    TextRow(title = "Rating", value = ratingStars(track.rating)) {
                         go { RatingScreen(it, track.id, track.title, track.rating, isAlbum = false) }
                     }
                 }
                 // This sheet is opened from anywhere — a list, the queue, the
                 // player — so neither destination has a parent on the stack:
                 // both name the walk that leads to them.
-                val artist = track.albumArtist.ifBlank { track.artist }
+                // One destination, so the record's first credit — see primaryAlbumArtist.
+                val artist = track.primaryAlbumArtist()
                 if (track.albumId != null) {
                     TextRow(title = "Go to Album") {
                         openAlbum(track.albumId, Parent.artist(artist))

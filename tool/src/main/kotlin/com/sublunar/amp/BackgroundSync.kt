@@ -1,5 +1,6 @@
 package com.sublunar.amp
 
+import com.sublunar.amp.data.noteOom
 import com.thelightphone.sdk.LightJob
 import com.thelightphone.sdk.LightJobHandler
 import com.thelightphone.sdk.LightJobResult
@@ -10,8 +11,20 @@ import com.thelightphone.sdk.LightJobResult
  */
 @LightJob("library-sync")
 val librarySyncJob: LightJobHandler = { _, _ ->
-    if (App.isReady) {
-        runCatching { App.library.sync() }
+    // Bulk work, by the same test as everything else that is: on a metered
+    // link outside Make it Hurt it waits. Left alone, this walked the whole
+    // album index every half hour of a cellular listening session, against
+    // the stream being played — the launch sync's floor did not cover it.
+    //
+    // Asked of the system rather than of the last callback: a queue held for
+    // Wi-Fi no longer re-reads the link while it waits (see Downloader.drain),
+    // and a callback that missed Wi-Fi arriving is caught here — the fresh
+    // look moves the rules, and the rules start the queue again.
+    if (App.isReady && App.rulesNow().mayMoveHeavyBytes) {
+        runCatching { App.library.sync() }.noteOom("background sync")
+        // The one background moment a download server that stopped answering
+        // is asked again. Awaited, so the job holds the process while it asks.
+        runCatching { App.downloader.wakeParked() }
     }
-    LightJobResult.Success()
+    LightJobResult.Success(outputFilePath = null, message = null)
 }

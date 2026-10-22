@@ -18,10 +18,15 @@ data class SubsonicEnvelope(
 data class SubsonicBody(
     val status: String = "failed",
     val version: String? = null,
+    /** OpenSubsonic servers name themselves and their own version in every reply. */
+    val type: String? = null,
+    val serverVersion: String? = null,
     val error: SubsonicError? = null,
     val albumList2: AlbumListDto? = null,
     val album: AlbumDto? = null,
     val starred2: Starred2Dto? = null,
+    /** getStarred, for servers without getStarred2 — see SubsonicClient.getStarred. */
+    val starred: Starred2Dto? = null,
     val playlists: PlaylistsDto? = null,
     val playlist: PlaylistDto? = null,
     val lyricsList: LyricsListDto? = null,
@@ -29,6 +34,7 @@ data class SubsonicBody(
     val musicFolders: MusicFoldersDto? = null,
     val artists: ArtistsRootDto? = null,
     val topSongs: TopSongsDto? = null,
+    val similarSongs: SimilarSongsDto? = null,
     val scanStatus: ScanStatusDto? = null,
     val playQueue: PlayQueueDto? = null,
 )
@@ -51,7 +57,12 @@ data class PlayQueueDto(
 
 /** getScanStatus: whether the server is walking its music folders. */
 @Serializable
-data class ScanStatusDto(val scanning: Boolean = false, val count: Long? = null)
+data class ScanStatusDto(
+    val scanning: Boolean = false,
+    val count: Long? = null,
+    /** When the last scan ran (OpenSubsonic); see SubsonicClient.songChangesSince. */
+    val lastScan: String? = null,
+)
 
 /** getArtists: artists grouped into alphabetical index buckets. */
 @Serializable
@@ -75,6 +86,9 @@ data class ArtistDto(
 data class TopSongsDto(val song: List<SongDto> = emptyList())
 
 @Serializable
+data class SimilarSongsDto(val song: List<SongDto> = emptyList())
+
+@Serializable
 data class MusicFoldersDto(val musicFolder: List<MusicFolderDto> = emptyList())
 
 @Serializable
@@ -91,6 +105,7 @@ data class SubsonicError(val code: Int = 0, val message: String? = null)
 @Serializable
 data class AlbumListDto(val album: List<AlbumDto> = emptyList())
 
+/** getStarred2's `starred2`, and getStarred's `starred`: same lists, ids alike. */
 @Serializable
 data class Starred2Dto(
     val song: List<SongDto> = emptyList(),
@@ -129,15 +144,22 @@ data class AlbumDto(
     val version: String? = null,
     /** Subsonic userRating, 1–5; absent or 0 means unrated. */
     val userRating: Int? = null,
-    /**
-     * Navidrome's compilation flag, spelled two ways across versions of the
-     * API — `isCompilation` in OpenSubsonic, `compilation` before it.
-     */
-    val isCompilation: Boolean? = null,
-    val compilation: Boolean? = null,
     val genre: String? = null,
+    /**
+     * OpenSubsonic's structured album-artist credit, and the reliable one: the
+     * legacy [artist] flattens several names into one string with whichever
+     * separator the server likes. Taking the names from here means the app does
+     * its own joining and never has to guess where one ends.
+     */
+    val artists: List<AlbumArtistDto> = emptyList(),
+    /** OpenSubsonic's single-string form of the same credit. */
+    val displayArtist: String? = null,
     val song: List<SongDto> = emptyList(),
 )
+
+/** One name in an album's artist credit. Everything optional: servers vary. */
+@Serializable
+data class AlbumArtistDto(val id: String = "", val name: String? = null)
 
 /** OpenSubsonic ItemDate: any component may be missing. */
 @Serializable
@@ -169,6 +191,12 @@ data class SongDto(
     val album: String? = null,
     val artist: String? = null,
     val albumArtist: String? = null,
+    /**
+     * OpenSubsonic's name for the same thing, and the one Navidrome actually
+     * sends: the base Subsonic Child has no albumArtist field at all, so the
+     * plain spelling above stays only for servers that add it themselves.
+     */
+    val displayAlbumArtist: String? = null,
     val albumId: String? = null,
     val artistId: String? = null,
     val track: Int? = null,
@@ -190,6 +218,24 @@ data class SongDto(
     /** Tag fields Navidrome sends when the file carries them. */
     val genre: String? = null,
     val composer: String? = null,
+    /**
+     * As with the album artist, composer is an OpenSubsonic field under a name
+     * of its own — there is no plain `composer` on a Child. Reading only the
+     * plain spelling is why the library never reported having any composers,
+     * and so why the Composers page never appeared.
+     */
+    val displayComposer: String? = null,
+    /**
+     * OpenSubsonic ReplayGain, sent when the file is tagged. Gains are dB
+     * relative to reference loudness — negative for loud masters.
+     */
+    val replayGain: ReplayGainDto? = null,
+)
+
+@Serializable
+data class ReplayGainDto(
+    val trackGain: Float? = null,
+    val albumGain: Float? = null,
 )
 
 @Serializable

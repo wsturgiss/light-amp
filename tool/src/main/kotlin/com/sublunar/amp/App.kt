@@ -6,20 +6,20 @@ import com.sublunar.amp.data.Album
 import com.sublunar.amp.data.AlbumSort
 import com.sublunar.amp.data.Artist
 import com.sublunar.amp.data.ArtworkMode
+import com.sublunar.amp.data.LayoutMode
 import com.sublunar.amp.data.ArtistSort
 import com.sublunar.amp.data.PendingActions
 import com.sublunar.amp.data.Playlist
 import com.sublunar.amp.data.PlaylistSort
 import com.sublunar.amp.data.SongSort
-import com.sublunar.amp.data.TagSort
 import com.sublunar.amp.data.sortAlbums
 import com.sublunar.amp.data.sortArtists
 import com.sublunar.amp.data.sortPlaylists
 import com.sublunar.amp.data.sortSongs
 import com.sublunar.amp.data.sortName
 import com.sublunar.amp.data.titleKey
+import com.sublunar.amp.ui.components.NOTICE_MS
 import com.sublunar.amp.ui.components.indexLetterOf
-import com.sublunar.amp.ui.screens.LibraryNav
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.map
@@ -31,11 +31,19 @@ import com.sublunar.amp.data.DownloadStore
 import com.sublunar.amp.data.Downloader
 import com.sublunar.amp.data.LibraryRepository
 import com.sublunar.amp.data.MusicSource
+import com.sublunar.amp.data.OfflineMode
 import com.sublunar.amp.data.SourceKind
+import com.sublunar.amp.data.TagFilter
+import com.sublunar.amp.data.creditNames
+import com.sublunar.amp.data.hasComposer
+import com.sublunar.amp.data.hasGenre
+import com.sublunar.amp.data.noteOom
 import com.sublunar.amp.data.SourceLibrary
 import com.sublunar.amp.data.db.LibraryDao
+import com.sublunar.amp.data.db.MAX_BOUND_IDS
 import com.sublunar.amp.data.MusicServer
 import com.sublunar.amp.data.db.LibraryDatabase
+import com.sublunar.amp.playback.LateUnbindGuard
 import com.sublunar.amp.playback.PlaybackController
 import com.thelightphone.sdk.SealedLightActivity
 import com.thelightphone.sdk.SealedLightContext
@@ -45,17 +53,44 @@ import com.thelightphone.sdk.buildDatabase
 import com.thelightphone.sdk.display.LightDisplayColor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.distinctUntilChangedBy
+import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.time.Duration.Companion.minutes
+import com.sublunar.amp.data.NetworkGate
+import com.thelightphone.sdk.audio.LightAudioNetworkPolicy
+import com.sublunar.amp.data.LinkRules
+import com.sublunar.amp.data.LogFile
+import com.sublunar.amp.data.Trace
+import kotlinx.coroutines.flow.onEach
+import com.sublunar.amp.data.Reachability
+import com.sublunar.amp.data.PlexRoute
+import com.sublunar.amp.data.PlexAccount
+import com.sublunar.amp.data.StreamProxy
+import kotlinx.coroutines.withTimeoutOrNull
+import com.thelightphone.sdk.cast.DlnaCast
+import com.sublunar.amp.art.ArtworkNeed
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.FlowPreview
+import kotlinx.coroutines.withContext
 
 /**
  * App-scoped service locator. Initialized once from the boot screen (which owns
@@ -90,6 +125,26 @@ object App {
     val source: StateFlow<MusicSource> = _source
 
     /**
+     * A line on top of whatever screen is showing, for a few seconds: a write
+     * that didn't land, said after the sheet that made it has closed. Drawn
+     * once, by PlayerTheme, which every screen passes through.
+     */
+    private val _writeNotice = MutableStateFlow<String?>(null)
+    val writeNotice: StateFlow<String?> = _writeNotice
+    private var noticeJob: Job? = null
+
+    /** Show [text] in place of whatever notice is up, and take it down after [NOTICE_MS]. */
+    @Synchronized
+    fun tell(text: String) {
+        noticeJob?.cancel()
+        _writeNotice.value = text
+        noticeJob = scope.launch {
+            delay(NOTICE_MS)
+            _writeNotice.value = null
+        }
+    }
+
+    /**
      * One Room database per source, cached by id.
      *
      * Sources hold different libraries, so they can't share tables — and a shared
@@ -104,15 +159,102 @@ object App {
     /** The active source's DAO. Never read before [boot] has built the first. */
     private fun dao(): LibraryDao = _dao.value ?: error("Library database not ready")
 
-    private fun databaseFor(source: MusicSource): LibraryDatabase = databases.getOrPut(source.id) {
-        // The first server keeps the original file name, so an install from
-        // before sources existed finds its cache rather than syncing afresh.
-        val name = if (source.id == AppSettings.LEGACY_SOURCE_ID) {
-            DB_NAME
-        } else {
-            "$DB_NAME-${source.id}"
+    /**
+     * Held while looking up and building, as [clientFor] holds its own: the
+     * switch, the top-up, the cover loops and the Offline page all ask at once,
+     * from different threads. Two of them missing together would each build a
+     * Room instance on the same file, and Room tells only the instance that
+     * wrote — a download badge or a list on the other would never move. Cheap
+     * to hold: building opens nothing until the first query.
+     */
+    private fun databaseFor(source: MusicSource): LibraryDatabase = synchronized(databases) {
+        databases.getOrPut(source.id) {
+            // The first server keeps the original file name, so an install from
+            // before sources existed finds its cache rather than syncing afresh.
+            val name = if (source.id == AppSettings.LEGACY_SOURCE_ID) {
+                DB_NAME
+            } else {
+                "$DB_NAME-${source.id}"
+            }
+            lightContext.buildDatabase(LibraryDatabase::class.java, name)
         }
-        lightContext.buildDatabase(LibraryDatabase::class.java, name)
+    }
+
+    /**
+     * One client per source, kept for as long as the source is.
+     *
+     * The browsed source's client used to be the only one, built on a switch
+     * and closed on the next. Downloads run for every source at once now, so
+     * a track from a server you are not looking at needs that server's client
+     * to fetch it with — and it needs the *same* one the library uses when
+     * you switch there, not a second connection pool to the same host. Keyed
+     * on the whole record, as the switch always was, so a renewed token or a
+     * changed address rebuilds it; closed only when the source is removed.
+     */
+    private val clients = mutableMapOf<String, Pair<MusicSource, MusicServer>>()
+
+    /** The client that talks to [source], or null for the phone's own music. */
+    fun clientFor(source: MusicSource): MusicServer? {
+        if (source.kind == SourceKind.LOCAL) return null
+        synchronized(clients) {
+            val held = clients[source.id]
+            if (held != null && held.first == source) return held.second
+            held?.second?.close()
+            val built = source.toClient()
+            if (built == null) clients.remove(source.id) else clients[source.id] = source to built
+            return built
+        }
+    }
+
+    private fun forgetClient(sourceId: String) {
+        synchronized(clients) { clients.remove(sourceId)?.second?.close() }
+    }
+
+    /**
+     * Every downloaded track on the phone, source by source.
+     *
+     * Each source keeps its own database, and the app only ever has one of them
+     * open as *the* library — so nothing else can answer this. Read directly
+     * here rather than through LibraryRepository, which is built around whichever
+     * source is active and rightly so: everywhere else in the app, a track you
+     * can see is a track you can play.
+     *
+     * Which is exactly what these are not. The page that shows this is an
+     * inventory of what the phone is holding; playing them would mean resolving
+     * files and streams through a source that isn't the current one, and the
+     * page names no source at all until you have more than one.
+     *
+     * A download whose track row is missing — the library cache cleared, no sync
+     * since — is left out. Its bytes are still counted in the storage figure,
+     * which is read off the disk.
+     */
+    suspend fun downloadsBySource(): List<Pair<String, List<Track>>> =
+        settings.sources.first().mapNotNull { source ->
+            val dao = databaseFor(source).libraryDao()
+            val ids = runCatching { dao.downloadedIds() }
+                .noteOom("downloads of ${source.name}").getOrDefault(emptyList())
+            if (ids.isEmpty()) return@mapNotNull null
+            val tracks = runCatching { downloadedTracks(dao, ids) }
+                .noteOom("downloaded tracks of ${source.name}")
+                .getOrDefault(emptyList())
+            if (tracks.isEmpty()) null else source.name to tracks
+        }
+
+    /**
+     * The songs of [ids] that [dao] holds, in id order: the order its query
+     * has always handed them back in, which the page's sort keeps among equals.
+     *
+     * The browsed source's come out of the library already in memory, as the
+     * objects its lists hold. Read afresh, they were a second copy of every
+     * downloaded song — of the whole library, in Everything mode — built again
+     * each time a download landed. Only what that library hasn't read yet is
+     * asked for.
+     */
+    private suspend fun downloadedTracks(dao: LibraryDao, ids: List<String>): List<Track> {
+        val unread = ids.toHashSet()
+        val loaded = library.loadedTracks(dao).filter { unread.remove(it.id) }
+        val read = unread.toList().chunked(MAX_BOUND_IDS).flatMap { dao.tracksByIds(it) }
+        return (loaded + read).sortedBy { it.id }
     }
 
     /**
@@ -122,128 +264,706 @@ object App {
      * or a source added and dropped a few times quietly fills the phone.
      */
     suspend fun forgetSource(source: MusicSource) {
+        // Whatever it still had queued goes first, so nothing below is undone
+        // by a transfer landing a moment later.
+        downloader.cancelSource(source.id)
         val db = databaseFor(source)
+        // Named before the tables go: the covers on disk can only be found
+        // through the ids this database holds — see ArtworkLoader.forget.
+        val covers = runCatching { db.libraryDao().allCoverArtIds() }
+            .noteOom("covers of ${source.name}").getOrDefault(emptyList())
         db.libraryDao().apply {
             clearTracks()
             clearAlbums()
             clearLikedArtists()
             clearDownloads()
+            clearAllTopSongs()
         }
+        downloads.deleteSource(source.id)
+        artwork.forget(source.id, covers)
+        backgroundPlaylistTracks.remove(source.id)
+        backgroundPlaylistFailedAt.keys.removeAll { it.startsWith("${source.id}/") }
+        forgetClient(source.id)
+    }
+
+    /**
+     * The cover files the artwork budget must never evict: one per downloaded
+     * song's album, across every source. These are the offline sleeves, and
+     * they are tied to their songs — removing the downloads is what frees them,
+     * not the budget.
+     */
+    private suspend fun protectedCoverFiles(): Set<String> =
+        settings.sources.first().flatMap { source ->
+            runCatching { databaseFor(source).libraryDao().downloadedCoverArtIds() }
+                .noteOom("protected covers of ${source.name}")
+                .getOrDefault(emptyList())
+                .map { artwork.fileNameFor(source.id, it) }
+        }.toSet()
+
+    /**
+     * Every cover file some source's library points at — what the cache's
+     * monthly expiry must leave alone. See ArtworkLoader.expireUnclaimed.
+     *
+     * Null if any source's database couldn't be read: an unreadable library
+     * looks exactly like an empty one from here, and the difference is every
+     * cover it owns. Nothing is expired on a launch that can't tell.
+     */
+    private suspend fun claimedCoverFiles(): Set<String>? {
+        val claimed = HashSet<String>()
+        for (source in settings.sources.first()) {
+            val ids = runCatching { databaseFor(source).libraryDao().allCoverArtIds() }
+                .noteOom("claimed covers of ${source.name}").getOrNull() ?: return null
+            ids.mapTo(claimed) { artwork.fileNameFor(source.id, it) }
+        }
+        return claimed
+    }
+
+    /** The cover sync in flight, if one is — see [syncCovers]. */
+    private var coverSync: Job? = null
+
+    /**
+     * Fetch the covers the library on screen has and the phone doesn't, while
+     * bytes are free.
+     *
+     * Lists draw only the covers already on the phone once the link costs
+     * money, so this is what decides what a library looks like on cellular.
+     * Run whenever there might be something to fetch and a free link to fetch
+     * it on: after a sync, when the link becomes free, at launch. Finding
+     * nothing missing costs a look at the disk and no request.
+     *
+     * Unmetered only, in every data mode. Make it Hurt spends cellular data
+     * on what is asked for; this is asked for by nobody, and the covers it
+     * would fetch still load as they are looked at.
+     *
+     * One at a time and replaced, not queued: a second trigger is either the
+     * same library — and the disk already holds what the first run fetched —
+     * or a different one, which the first run has just stopped being for.
+     */
+    private fun syncCovers() {
+        synchronized(this) {
+            coverSync?.cancel()
+            coverSync = scope.launch {
+                // The stored setting, not [hideArtwork]: at launch that flow
+                // still holds its placeholder, and "off" has to mean not one.
+                if (settings.artwork.first() == ArtworkMode.NONE) return@launch
+                val source = settings.activeSource.first() ?: return@launch
+                val client = clientFor(source) ?: return@launch
+                // The chosen library, as the lists filter it — see
+                // LibraryRepository.allAlbums — newest first: those are the
+                // covers a run cut short is most likely to be asked for.
+                val wanted = runCatching { databaseFor(source).libraryDao().allAlbumsSnapshot() }
+                    .noteOom("cover sync of ${source.name}")
+                    .getOrDefault(emptyList())
+                    .filter { source.libraryId == null || it.libraryId == null || it.libraryId == source.libraryId }
+                    .sortedByDescending { it.createdMs }
+                    .mapNotNull { it.coverArtId }
+                if (wanted.isEmpty()) return@launch
+                val startedMs = System.currentTimeMillis()
+                val result = artwork.syncCovers(
+                    sourceId = source.id,
+                    client = client,
+                    coverArtIds = wanted,
+                    protectedFiles = protectedCoverFiles(),
+                    mayContinue = {
+                        yieldToPlayback()
+                        // Asked of the system, not of the flow: this is the
+                        // last look before bytes that must not cost anything.
+                        val now = rulesNow()
+                        now.unmetered && now.mayStream && _source.value.id == source.id
+                    },
+                )
+                if (result.missing > 0) {
+                    android.util.Log.i(
+                        "AmpArt",
+                        "cover sync: ${source.name}: ${result.fetched} of ${result.missing} missing fetched " +
+                            "(${result.wanted} in the library), ${result.fetchedBytes shr 10} KB in " +
+                            "${(System.currentTimeMillis() - startedMs) / 1000} s" +
+                            (result.stopped?.let { " — stopped: $it" } ?: ""),
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Delete every source's downloaded audio, whichever source is active.
+     *
+     * The Offline page's Delete All row. The queue is dropped whole, and then
+     * every source's index and folder is walked the way [forgetSource] does —
+     * the downloader knows the queue, not what is already on the disk.
+     */
+    suspend fun deleteAllDownloads() {
+        downloader.cancelAll()
+        settings.sources.first().forEach { wipeDownloads(it) }
+    }
+
+    /**
+     * Delete one source's downloaded audio — the per-server Delete on the
+     * Offline page. Only that source's queue goes with it: every source's
+     * downloads share one worker, and the others carry on.
+     */
+    suspend fun deleteDownloadsFor(source: MusicSource) {
+        downloader.cancelSource(source.id)
+        wipeDownloads(source)
+    }
+
+    private suspend fun wipeDownloads(source: MusicSource) {
+        // A database that won't open shouldn't save its files: the bytes are
+        // what fills the phone, and the index is rebuilt from them.
+        runCatching { databaseFor(source).libraryDao().clearDownloads() }
         downloads.deleteSource(source.id)
     }
 
     /**
-     * Whether the server looks reachable. Inferred from whether requests succeed —
-     * a tool can't query connectivity directly (ConnectivityManager is blocked by
-     * the plugin sandbox), so the sync path reports into this rather than us
-     * observing the network.
+     * Whether the browsed server is answering — see [Reachability], which finds
+     * out by asking rather than by waiting for a sync to say so.
      */
-    private val _serverReachable = MutableStateFlow(true)
-    val serverReachable: StateFlow<Boolean> = _serverReachable
+    val reachability: Reachability by lazy {
+        Reachability(
+            scope,
+            client = { serverClient.value },
+            mayAsk = { rules.value.mayTalkToServer },
+            route = PlexRoute(
+                source = { settings.activeSource.first() },
+                advertised = { s -> PlexAccount.advertised(s.machineIdentifier, s.token, s.plexClientIdentifier) },
+                firstAnswering = { uris, s -> PlexAccount.firstReachable(uris, s.token, s.plexClientIdentifier) },
+                save = { s -> settings.saveSource(s) },
+                onLan = { rules.value.let { it.connected && it.wifi } },
+            ),
+        )
+    }
+    val serverReachable: StateFlow<Boolean> get() = reachability.reachable
 
+    /**
+     * True is proof, and is taken as such. False is a *suspicion* — one stream
+     * that died, one sync that failed — and is settled by asking the server,
+     * at once, instead of being believed until the next sync.
+     */
     fun reportServerReachable(reachable: Boolean) {
-        _serverReachable.value = reachable
+        if (!reachable) Trace.i("reach", "suspicion from ${Trace.caller("App.reportServerReachable")} → asking now")
+        if (reachable) reachability.report(true) else reachability.check(delayMs = 0L)
     }
 
     /**
-     * True when the library should show only downloaded media: the user asked for
-     * Wi-Fi only *and* there is no Wi-Fi, or the server isn't answering at all.
+     * What the connection and the mode allow right now — see [LinkRules]. The
+     * one state the library, the queue, playback, downloads and artwork read,
+     * so that a network or mode change reaches all of them in the same moment.
      */
-    val offlineOnly: Flow<Boolean> by lazy {
-        combine(
-            settings.dataMode,
-            serverReachable,
-            Connectivity.wifiConnected,
-        ) { mode, reachable, onWifi ->
-            // "Wi-Fi only" restricts the library on *cellular*, not everywhere. It
-            // used to hide the streamable library unconditionally, because there was
-            // no way to see the network — Connectivity works that out from the
-            // interface list instead of taking the setting at its word.
-            (mode == DataMode.WIFI_ONLY && !onWifi) || !reachable
+    val rules: StateFlow<LinkRules> by lazy {
+        combine(Connectivity.network, dataMode, reachability.reachable) { net, mode, reachable ->
+            LinkRules(
+                connected = net.isConnected,
+                unmetered = net.isConnected && !net.isMetered,
+                mode = mode,
+                serverReachable = reachable,
+                wifi = net.isConnected && net.isWifi,
+            )
         }
+            .distinctUntilChanged()
+            .onEach { r ->
+                Trace.i(
+                    "rules",
+                    "connected=${r.connected} wifi=${r.wifi} unmetered=${r.unmetered} mode=${r.mode} " +
+                        "serverReachable=${r.serverReachable} → talk=${r.mayTalkToServer} " +
+                        "stream=${r.mayStream} heavy=${r.mayMoveHeavyBytes} waitingFor=${r.waitingFor}",
+                )
+            }
+            .stateIn(scope, SharingStarted.Eagerly, LinkRules.UNKNOWN)
     }
 
+    /**
+     * True when the library should show only what is on the phone: nothing
+     * else can be played right now, whatever the reason — the mode's rule, no
+     * link, or a server that isn't answering.
+     */
+    @OptIn(FlowPreview::class)
+    val offlineOnly: Flow<Boolean> by lazy {
+        // Two reasons, two speeds. The link or the mode forbidding streams is
+        // a fact, and the lists follow it at once. The server not answering
+        // is a *suspicion* until it has lasted: on poor reception one ping in
+        // six seconds is missed all the time, and the library used to shrink
+        // to downloads on that one miss and grow back on the next ping — a
+        // flicker that reads as the app not knowing what it has. Playback
+        // still reacts to the first miss (a track that can't be had parks or
+        // is skipped); only the lists wait to see whether the silence holds.
+        combine(
+            rules.map { !it.mayTalkToServer }.distinctUntilChanged(),
+            rules.map { !it.serverReachable }.distinctUntilChanged()
+                .debounce { gone -> if (gone) SERVER_GONE_SETTLE_MS else 0L },
+        ) { link, server -> link || server }.distinctUntilChanged()
+    }
+
+    /** How long the server must stay silent before the lists narrow to downloads. */
+    private const val SERVER_GONE_SETTLE_MS = 20_000L
+
+    /** How long a new link settles before parked download servers are asked about it. */
+    private const val PARKED_PROBE_SETTLE_MS = 2_000L
+
+    /** The mode as it stands, for gates that must answer synchronously. */
+    val dataMode: StateFlow<DataMode> by lazy {
+        settings.dataMode.stateIn(scope, SharingStarted.Eagerly, DataMode.WIFI_ONLY)
+    }
+
+    /**
+     * Whether the server may be spoken to at all — sync, playlists, lyrics.
+     *
+     * Wi-Fi Only's own words are "assume no usable connection", and a sync
+     * alone is hundreds of requests: off an unmetered link it means none. The
+     * other modes allow metadata anywhere; what they restrict is real bytes.
+     */
+    fun metadataAllowed(): Boolean = rules.value.mayTalkToServer
+
+    /**
+     * Step aside while the player is trying to start a stream.
+     *
+     * The player fetches on the same link as everything else, and on a slow
+     * one a launch sync six requests wide leaves it a sixth of very little:
+     * the song takes a minute to start, looks like nothing happened, gets
+     * tapped again, and starts over. Background loops call this between
+     * requests. Bounded, so a stream that never starts can't hold them for
+     * ever — and free when nothing is starting, which is nearly always.
+     */
+    suspend fun yieldToPlayback() {
+        if (!coreReady || !playback.buffering.value) return
+        withTimeoutOrNull(YIELD_TO_PLAYBACK_MS) { playback.buffering.first { !it } }
+    }
+
+    private const val YIELD_TO_PLAYBACK_MS = 20_000L
+
+    /** The loopback door between the platform player and the music server — see [StreamProxy]. */
+    val streamProxy: StreamProxy by lazy {
+        StreamProxy(
+            gateOpen = { NetworkGate.isOpen() },
+            upstream = { proxyUpstream },
+            log = { android.util.Log.i("AmpProxy", it) },
+            // Less slack on a link that costs money: read-ahead spent on a
+            // track that is then skipped is data spent on nothing.
+            readAheadBytes = {
+                if (Connectivity.isUnmetered()) StreamProxy.READ_AHEAD_BYTES else StreamProxy.READ_AHEAD_METERED_BYTES
+            },
+        )
+    }
+    /**
+     * No more patient than the player is. It gives a connection eight seconds
+     * and then tries again through the door; an upstream request still waiting
+     * after that is one the player has already abandoned, and on a slow link
+     * each retry would otherwise stack another stream — another transcode —
+     * on top of the ones still trickling in.
+     */
+    private val proxyUpstream by lazy { NetworkGate.transferClient(connectTimeoutMs = 7_000L, readTimeoutMs = 8_000L) }
+
+    /**
+     * [rules], computed on the spot from a fresh look at the link.
+     *
+     * The flow is a few dispatch hops behind its inputs — it is combined on a
+     * background thread — and a decision made in the same breath as the event
+     * that changed them reads the old answer. Playback decides exactly then:
+     * a stream has just been refused, or a ping has just failed, and the next
+     * track to try is chosen on the spot. Two binder reads.
+     */
+    fun rulesNow(): LinkRules {
+        Connectivity.refresh()
+        val net = Connectivity.network.value
+        return LinkRules(
+            connected = net.isConnected,
+            unmetered = net.isConnected && !net.isMetered,
+            mode = dataMode.value,
+            serverReachable = reachability.reachable.value,
+            wifi = net.isConnected && net.isWifi,
+        )
+    }
+
+    /**
+     * Something happened that the connectivity callback may have missed — the
+     * app came back to the front. Re-read the link, and if the server was last
+     * seen silent, ask it again. Cheap enough to call on every return.
+     */
+    fun linkMayHaveChanged() {
+        if (!coreReady) return
+        Connectivity.refresh()
+        if (!serverReachable.value) reachability.check(delayMs = 0L)
+        // Nothing, unless a download server is parked — see Downloader.wakeParked.
+        scope.launch { downloader.wakeParked() }
+    }
+
+    /**
+     * The one rule every byte answers to: may the network be used right now?
+     * False only in Wi-Fi Only on a metered link — or with no link at all.
+     *
+     * The same answer as [metadataAllowed], enforced rather than consulted.
+     * That one is the courtesy: the early return that saves building work
+     * which would only be refused. This one is the wall behind it — every
+     * HTTP client is built through NetworkGate, the platform player asks
+     * through the SDK's LightAudioNetworkPolicy, and the raw download and
+     * discovery paths ask directly — so a path that never asked is refused
+     * all the same. Before this, Wi-Fi Only was a set of courtesy checks,
+     * and a stream already in the queue played over cellular.
+     *
+     * Asked of the system each time, not of the last callback: a phone at
+     * the edge of Wi-Fi moves its default to cellular without either network
+     * going away, and a report of that can arrive after the socket would.
+     */
+    fun networkAllowed(): Boolean =
+        dataMode.value != DataMode.WIFI_ONLY || Connectivity.isUnmeteredNow()
+
+    /**
+     * Whether real bytes may move — downloads, cover art.
+     *
+     * Free on an unmetered link. On a metered one, only Make it Hurt, whose
+     * name is the consent: everything passes through there, by design.
+     */
+    fun heavyDataAllowed(): Boolean = rules.value.mayMoveHeavyBytes
+
+    // Volatile: set at the end of boot on the main thread, and read by the
+    // collectors boot starts, which run on others — see topUpDownloads.
+    @Volatile
     private var coreReady = false
     val isReady: Boolean get() = coreReady
 
     const val SYNC_JOB_KEY = "library-sync"
 
     fun boot(sealedActivity: SealedLightActivity, context: SealedLightContext) {
+        // First, before anything below can make or release a player handle,
+        // and outside the once-only block because it keeps its own flag — see
+        // LateUnbindGuard for why it has to be a raw post from right here.
+        LateUnbindGuard.install()
         if (!coreReady) {
+            // First, so the boot itself is in it — see LogFile.
+            LogFile.start(context.filesDir)
             scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
             settings = AppSettings(context.dataStore)
             lightContext = context
-            artwork = ArtworkLoader(context.filesDir, serverClient) { _source.value.id }
+            Connectivity.bind(context, scope)
+            // The wall goes up before anything exists to be built behind it:
+            // every client below is made through NetworkGate, and the player
+            // — attached or the detached service, same process — asks the
+            // same rule at its own connections.
+            NetworkGate.policy = ::networkAllowed
+            // The door the player streams through — see StreamProxy. Started
+            // here, before anything builds a queue, and proven before it is
+            // used: until its self-test passes, the player gets the server's
+            // own URLs, which the SDK patch below still stands in front of.
+            streamProxy.start(scope)
+            NetworkGate.isMetered = { Connectivity.network.value.let { !it.isConnected || it.isMetered } }
+            // DLNA is a Wi-Fi feature, full stop: no search, no cast, no probe
+            // and no control call anywhere else. Asked of the system each time
+            // — a cast is a handful of calls a second, not a stream of bytes.
+            DlnaCast.allowsNetwork = { rulesNow().mayUseLan }
+            LightAudioNetworkPolicy.allowsNetwork = ::networkAllowed
+            artwork = ArtworkLoader(
+                context.filesDir,
+                serverClient,
+                fetchAllowed = { need ->
+                    when (need) {
+                        ArtworkNeed.FOCUSED -> rules.value.mayFetchFocusedArt
+                        ArtworkNeed.BROWSING -> rules.value.mayMoveHeavyBytes
+                    }
+                },
+                artworkOff = { hideArtwork.value },
+            ) { _source.value.id }
             // Whatever was last in use, resolved before anything reads the
             // library — the DAO has to exist before the repository is built.
+            // The download budget became one for the whole tool; carry the
+            // largest of the old per-source ones up to it.
+            runBlocking { settings.migrateDownloadLimit() }
             val first = runBlocking { settings.activeSource.first() }
                 ?: MusicSource(AppSettings.LEGACY_SOURCE_ID, SourceKind.SUBSONIC, "Server")
             _source.value = first
             _dao.value = databaseFor(first).libraryDao()
-            downloads = DownloadStore(context.filesDir) { source.value.id }
+            downloads = DownloadStore(context.filesDir)
             // One-time: audio downloaded before sources existed sits in the old
             // flat folder, and belongs to whichever source inherited that server.
-            if (first.id == AppSettings.LEGACY_SOURCE_ID) downloads.adoptLegacyFiles()
+            if (first.id == AppSettings.LEGACY_SOURCE_ID) downloads.adoptLegacyFiles(first.id)
             pending = PendingActions(settings)
             library = LibraryRepository(
                 daos = _dao,
                 serverClient = serverClient,
                 libraryId = settings.libraryId,
                 offlineOnly = offlineOnly,
+                metadataAllowed = ::metadataAllowed,
+                bulkAllowed = ::heavyDataAllowed,
+                yieldToPlayback = ::yieldToPlayback,
                 pending = pending,
+                tell = ::tell,
                 settings = settings,
                 scope = scope,
             )
-            downloader = Downloader(::dao, downloads, serverClient, settings, scope, context)
-            playback = PlaybackController(settings, serverClient, ::dao, downloads, scope)
+            downloader = Downloader(
+                activeSource = { _source.value },
+                daoFor = { databaseFor(it).libraryDao() },
+                clientFor = ::clientFor,
+                store = downloads,
+                settings = settings,
+                scope = scope,
+                lightContext = context,
+                heavyDataAllowed = ::heavyDataAllowed,
+                waitingLabel = { rules.value.heavyWaitingFor ?: NetworkGate.WAITING_FOR_WIFI },
+                yieldToPlayback = ::yieldToPlayback,
+            )
+            playback = PlaybackController(
+                settings, serverClient, ::dao, downloads, scope,
+                metadataAllowed = ::metadataAllowed,
+            )
 
-            // Sync is our only reliable connectivity signal, and the moment fresh
-            // library data exists is also the right moment to top up downloads.
+            // A finished sync is proof the server is there. (Its end tops up the
+            // downloads too, as any sync's end does — see the size collector
+            // below; asked again here as well, it was a second pass.)
             library.onSyncSucceeded = {
                 reportServerReachable(true)
+                // Its downloads too, if they were parked — the reachability
+                // flow only speaks on a change, and a download failing never
+                // tells it anything. See Downloader.parkings.
+                downloader.tryNow(source.value.id)
                 scope.launch {
                     // Fresh library rows are also the first chance to work out
                     // which album a reindexed download belongs to.
-                    runCatching { dao().backfillDownloadAlbums() }
-                    topUpDownloads()
+                    runCatching { dao().backfillDownloadAlbums() }.noteOom("download album backfill")
+                    // ...and the first chance to put back the words a rebuilt
+                    // download row lost, which the files themselves don't carry.
+                    runCatching { downloader.refillMissingLyrics() }
                 }
+                // And the covers of whatever the sync just brought in.
+                syncCovers()
             }
+            library.onCoversDropped = { sourceId, ids -> artwork.drop(sourceId, ids) }
             // A sync that worked is proof the server is answering, which is the
             // one moment worth retrying everything that happened while it wasn't.
             scope.launch { library.primePlaylists() }
             scope.launch {
                 pending.refreshCount()
                 serverReachable.collect { reachable ->
-                    // Downloads stop dead when the server goes, and pick up where
-                    // they were when it comes back.
-                    downloader.setOffline(!reachable)
+                    // That server's downloads stop dead when it goes, and pick
+                    // up where they were when it comes back. Reachability is
+                    // inferred from the browsed source's sync, so it is that
+                    // source this says anything about — the others are judged
+                    // by their own transfers.
+                    downloader.setOffline(source.value.id, !reachable)
                     if (reachable) library.flushPending()
                 }
             }
-            scope.launch { downloader.setUserPaused(settings.downloadsPaused.first()) }
-            // The colour workaround's switch. See LightDisplayColor: this is an
-            // off-SDK spike, and this is what turns it off again.
+            // ...and again whenever there is both a server to tell and a
+            // connection able to carry it.
             //
-            // Hidden artwork forces it off regardless: with no covers on screen
-            // there is nothing for colour to do, and the control that would turn
-            // it back on isn't visible either — leaving the device switched to
-            // colour from a setting the user can no longer see would be the
-            // worst of both.
+            // The line above cannot see this: reachability is inferred from a
+            // sync succeeding, and it starts out true, so it never transitions
+            // and never fires after boot. A like or a rating held back in
+            // Wi-Fi Only therefore sat in the queue until something else
+            // happened to talk to the server — up to half an hour after Wi-Fi
+            // came back, with nothing on screen to say so.
+            //
+            // Both halves are needed. Watching the connection alone fires at
+            // launch, before the client is built, and then never again because
+            // nothing about the connection has changed; watching the client
+            // alone misses Wi-Fi arriving later. Cheap when it is not the
+            // moment — flushPending asks whether it may send before it sends.
+            // One line per change of the rules, for the log: which of the
+            // inputs moved and what it now allows. This is the first thing to
+            // read when the library or the player did something unexpected.
             scope.launch {
-                combine(settings.monochromeArtwork, settings.artwork) { mono, artwork ->
-                    !mono && artwork != ArtworkMode.NONE
-                }.collect { LightDisplayColor.enabled = it }
-            }
-            library.onSyncFailed = { reportServerReachable(false) }
-
-            // One client per source, of whichever kind that source is. Keyed on
-            // the whole record so a changed token or address rebuilds it.
-            scope.launch {
-                settings.activeSource.collect { active ->
-                    val previous = _serverClient.value
-                    _serverClient.value = active?.toClient()
-                    previous?.close()
+                rules.collect { r ->
+                    android.util.Log.i(
+                        "AmpNet",
+                        "rules: connected=${r.connected} unmetered=${r.unmetered} wifi=${r.wifi} " +
+                            "mode=${r.mode} server=${r.serverReachable} → talk=${r.mayTalkToServer} " +
+                            "stream=${r.mayStream} heavy=${r.mayMoveHeavyBytes} lan=${r.mayUseLan}",
+                    )
                 }
+            }
+            // Closing the wall is not only refusing new connections. A socket
+            // opened over cellular in another mode stays usable for minutes,
+            // and the rule answers for the phone's default network, not for
+            // the network a socket is on — so entering Wi-Fi Only shuts every
+            // connection there is, as does the rule reading closed.
+            //
+            // Only on those two edges, and only as much as each needs. Closing
+            // shuts everything. *Entering* the mode shuts just what was opened
+            // on a metered link: on Wi-Fi the rest is free, and shutting it
+            // would fail the downloads and the sync in flight and tell the
+            // reachability ping that a server which is plainly there has gone.
+            // The rule *opening* shuts nothing — that is the moment everything
+            // held back starts again.
+            scope.launch {
+                var wasWifiOnly = false
+                var wasClosed = false
+                rules.map { (it.mode == DataMode.WIFI_ONLY) to (it.mode == DataMode.WIFI_ONLY && !it.unmetered) }
+                    .distinctUntilChanged()
+                    .collect { (wifiOnly, closed) ->
+                        when {
+                            closed && !wasClosed -> NetworkGate.slam()
+                            wifiOnly && !wasWifiOnly -> NetworkGate.slamMetered()
+                        }
+                        wasWifiOnly = wifiOnly
+                        wasClosed = closed
+                    }
+            }
+            // Downloads held for a quality their server couldn't meet go the
+            // moment that changes — whether the user picked another quality or
+            // a sync re-checked the server and found the call there after all.
+            // Either way the worker had ended (see Downloader.drain), and
+            // nothing else would start it for a source on Manual.
+            scope.launch {
+                settings.sources
+                    .map { list -> list.filterNot { it.downloadFormatAvailable }.map { it.id }.toSet() }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect { downloader.retry() }
+            }
+            // And those a server refused, once their record changes — signed
+            // in again, say. See Downloader.refusals. Or parked, when an address
+            // changed is the reason it stopped answering: Downloader.parkings.
+            scope.launch {
+                settings.sources
+                    .drop(1)
+                    .collect {
+                        if (downloader.refused.value.isNotEmpty() || downloader.parked.value.isNotEmpty()) downloader.retry()
+                    }
+            }
+            // Bulk work put off on a metered link — every playlist's contents,
+            // and with them the playlist downloads and badges — is picked up
+            // the moment the link stops costing money, not at the next launch.
+            // A server parked while bytes could move is asked again once they
+            // may — a mode change with no change of link included, say Low Data
+            // to Make it Hurt on cellular. After the same settle as a change of
+            // link (below): when the link did change too, the one ping should
+            // not go out in its first seconds. See Downloader.wakeParked.
+            scope.launch {
+                rules.map { it.mayMoveHeavyBytes }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect { may ->
+                        if (may) {
+                            scope.launch {
+                                delay(PARKED_PROBE_SETTLE_MS)
+                                downloader.wakeParked()
+                            }
+                            topUpDownloads()
+                        }
+                    }
+            }
+            // A queue held for everyone by the rule has no worker waiting on
+            // it — see Downloader.drain — so the rule moving is what starts
+            // one: opening, or now waiting for something else, which the
+            // Downloads page says.
+            scope.launch {
+                rules.map { it.heavyWaitingFor }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect { downloader.holdChanged() }
+            }
+            // The covers a sync on cellular couldn't fetch, or a run that Wi-Fi
+            // dropping cut short. Its own edge rather than the one above:
+            // in Make it Hurt heavy bytes are always allowed, so that one never
+            // moves, and the cover sync is for free bytes whatever the mode.
+            scope.launch {
+                rules.map { it.unmetered && it.mayStream }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect { free -> if (free) syncCovers() }
+            }
+            // The permission to ask opening is a reason to ask, whatever opened
+            // it. A network change is covered below; a *mode* change is not a
+            // network change, and without this a server last seen silent on a
+            // dying Wi-Fi stayed "gone" after switching to a mode that may use
+            // the cellular link it is perfectly reachable on.
+            scope.launch {
+                rules.map { it.mayTalkToServer }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect { may -> if (may) reachability.check(delayMs = 0L) }
+            }
+            // A change of link is the end of every connection: they all belong
+            // to the network the phone just left. Dropped here, on the same
+            // emission that tells the rest of the app — before the 400 ms the
+            // reachability check waits, so its ping goes out on a fresh one.
+            scope.launch {
+                Connectivity.network
+                    .map { Triple(it.isConnected, it.isMetered, it.isWifi) }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect {
+                        android.util.Log.i("AmpNet", "link changed → dropping every connection")
+                        NetworkGate.linkChanged()
+                    }
+            }
+            // Every change of connection is a reason to ask the server again:
+            // a LAN address stops answering on cellular, and starts again at
+            // home, and neither is something a sync should have to discover.
+            scope.launch {
+                Connectivity.network
+                    .map { Triple(it.isConnected, it.isMetered, it.isWifi) }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collect { reachability.check() }
+            }
+            // ...and so is every parked download server, not only the browsed
+            // one: nothing else asks them. After a settle, because the first
+            // seconds on a new link are the worst moment to ask (see
+            // NetworkGate.linkChanged), and a server that has been gone ten
+            // minutes is in no hurry.
+            scope.launch {
+                Connectivity.network
+                    .map { Triple(it.isConnected, it.isMetered, it.isWifi) }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .collectLatest {
+                        delay(PARKED_PROBE_SETTLE_MS)
+                        downloader.wakeParked()
+                    }
+            }
+            // Tracing: the moment the lists narrow to downloads, and which
+            // address the browsed server is being reached at.
+            scope.launch {
+                offlineOnly.collect { off ->
+                    val r = rules.value
+                    Trace.i(
+                        "offline",
+                        if (!off) "lists show the whole library"
+                        else "lists narrowed to downloads (talk=${r.mayTalkToServer}, serverReachable=${r.serverReachable})",
+                    )
+                }
+            }
+            scope.launch {
+                _source.collect { s ->
+                    val others = (s.connections - s.baseUrl).joinToString { Trace.host(it) }
+                    Trace.i(
+                        "source",
+                        "${s.kind} \"${s.name}\" at ${Trace.host(s.baseUrl)}" +
+                            if (others.isEmpty()) "" else "; other addresses: $others",
+                    )
+                }
+            }
+            scope.launch {
+                combine(serverClient, Connectivity.changed) { client, (connected, _) ->
+                    client != null && connected
+                }
+                    .distinctUntilChanged()
+                    .collect { ready -> if (ready) runCatching { library.flushPending() } }
+            }
+            scope.launch { downloader.setUserPaused(settings.downloadsPaused.first()) }
+            // The colour workaround follows the artwork switch. See LightDisplayColor:
+            // this is an off-SDK spike, and hiding artwork is what turns it off —
+            // with no covers on screen there is nothing for colour to do. It used
+            // to have a switch of its own ("Monochrome Artwork"); a sleeve you
+            // chose to see is a sleeve you want in colour, so the switch went.
+            scope.launch {
+                settings.artwork.collect { LightDisplayColor.enabled = it != ArtworkMode.NONE }
+            }
+            // A refused login is not the server being gone. Marking it
+            // unreachable narrows the library to downloads, which on a source
+            // with none blanks a perfectly good cached library and explains
+            // nothing — the credentials are stale, and the rows are still there
+            // to browse until they are renewed.
+            library.onSyncFailed = { authFailure -> if (!authFailure) reportServerReachable(false) }
+
+            // The client is built by the source-switch collector below rather
+            // than by a collector of its own. Three of them watched
+            // activeSource — one for the client, one for the source and its
+            // database, one to top up downloads — and nothing ordered them, so
+            // the source could flip while the client and the tables still
+            // belonged to the server being left. What ran in that gap held one
+            // server's identity and another's music: see [swapSource].
+            scope.launch {
+                settings.activeSource.collect { active -> swapSource(active) }
             }
             // Whatever folders the server reports, remembered on the source so
             // the Sources page can list them instantly and offline.
@@ -269,59 +989,63 @@ object App {
                     )
                 }
             }
-            // Swapping the source swaps the database under everything that reads
-            // it; the repository's flows follow _dao, so the whole library
-            // changes over without anything else being told.
+            // Re-run when any source's mode changes, so switching one to e.g.
+            // Favorites starts fetching without waiting for the next sync. Any
+            // source, not the browsed one: the Offline page sets this per
+            // server, and downloads run for all of them.
             scope.launch {
-                settings.activeSource.collect { active ->
-                    val next = active ?: return@collect
-                    if (next.id == _source.value.id) {
-                        _source.value = next
-                        return@collect
-                    }
-                    // Everything in flight belongs to the source being left, and
-                    // none of it survives the change: a queued track's id only
-                    // means something to the server it came from, and the stream
-                    // URLs already handed to the player are signed for that
-                    // server. Left alone, playback fails on the next track, the
-                    // failure trips the offline fallback, and the app spends a
-                    // while looking broken before a reachability check lets it
-                    // recover.
-                    playback.stop()
-                    downloader.clearQueue()
-                    // Popular songs, the playlists, the search index and the
-                    // artist ids are all keyed by name rather than by source, so
-                    // they answer for the wrong server until they're dropped.
-                    // Cleared *before* the source changes over, so nothing that
-                    // recomposes on the new source can catch the old data.
-                    library.forgetDerived()
-                    // Which tabs were showing their liked list is a fact about
-                    _source.value = next
-                    _dao.value = databaseFor(next).libraryDao()
-                }
-            }
-            // Re-run when the mode changes so switching to e.g. Favorites starts
-            // fetching without waiting for the next sync.
-            scope.launch {
-                settings.activeSource
-                    .map { it?.offlineMode }
+                settings.sources
+                    .map { list -> list.map { it.id to it.offlineMode } }
                     .distinctUntilChanged()
                     .collect { topUpDownloads() }
             }
-            // ...and again once the cached library actually exists. The collector
-            // above runs at boot, when Room has usually not finished loading, so it
-            // returns early with nothing to queue. Without this the only other
-            // trigger is a *successful* sync — so a launch where the sync is a
-            // no-op leaves the queue empty and downloads quietly stop.
             // Rebuild the download index from disk before anything reads it: a
             // schema bump wipes the table, and without this the app would re-fetch
             // audio it already has.
             scope.launch { downloader.reindexFromDisk() }
-            // Downloads yield to the sync: both hit the same server, and the sync
-            // is hundreds of small sequential requests that a saturated
-            // transcoder turns into a crawl.
+            // The artwork budget, applied at launch — which is also what trims an
+            // install from before there was one. Tracks are pointed at their
+            // album's cover first, so the protected set is one file per
+            // downloaded album rather than one per downloaded song, and the
+            // per-song copies fall to the budget. See ArtworkLoader.trimToBudget.
+            //
+            // Before the budget, the expiry: what no library names and nobody
+            // has looked at in a month goes whether or not there is room for
+            // it, so the cache is a copy of the libraries and not a history of
+            // them. After both, whatever the library has that the phone
+            // doesn't is fetched, if the link is free — a launch inside the
+            // sync floor has no sync to do that for it.
             scope.launch {
-                library.syncState.collect { downloader.setSyncing(it.syncing) }
+                settings.sources.first().forEach { source ->
+                    runCatching { databaseFor(source).libraryDao().collapseTrackCovers() }
+                        .noteOom("cover collapse of ${source.name}")
+                        .onSuccess { if (it > 0) android.util.Log.i("AmpArt", "${source.name}: $it tracks now share their album's cover") }
+                }
+                claimedCoverFiles()?.let { artwork.expireUnclaimed(it) }
+                artwork.trimToBudget(protectedCoverFiles())
+                syncCovers()
+            }
+            // TEMPORARY, REMOVE BEFORE COMMUNITY REVIEW — the one-time repair
+            // of mp3s downloaded before Amp wrote their index. Runs once per
+            // install and never again; everything downloaded since is indexed
+            // as it lands, in Downloader. Delete this block together with
+            // DownloadStore.indexMp3s and AppSettings.mp3IndexRepairNeeded /
+            // markMp3IndexRepaired — see the removal list on indexMp3s.
+            scope.launch(Dispatchers.IO) {
+                if (!settings.mp3IndexRepairNeeded()) return@launch
+                val n = downloads.indexMp3s()
+                // Only now: see markMp3IndexRepaired for why not before.
+                settings.markMp3IndexRepaired()
+                android.util.Log.i("AmpMp3", "one-time repair: indexed $n downloaded mp3(s) that had none")
+            }
+            // A source's downloads yield to its sync: both hit the same server,
+            // and the sync is hundreds of small sequential requests that a
+            // saturated transcoder turns into a crawl. Only the browsed source
+            // syncs, so it is that one that waits; the others carry on.
+            scope.launch {
+                library.syncState.collect {
+                    downloader.setSyncing(if (it.syncing) source.value.id else null)
+                }
             }
             // Cue up whatever was playing when the app last went away. Waits for
             // the cache because the saved queue is only ids — and for the player,
@@ -330,7 +1054,6 @@ object App {
             // one silently does nothing and is never retried, so the order of
             // those two is not something to leave to chance.
             scope.launch {
-                val tracks = library.fullTracks.filter { it.isNotEmpty() }.first()
                 playback.bound.first { it }
                 // And for the client, when this source has one. Restoring builds
                 // the whole queue as audio items up front, and an item's stream
@@ -348,23 +1071,63 @@ object App {
                 if (active?.kind != SourceKind.LOCAL) {
                     serverClient.filter { it != null }.first()
                 }
-                playback.restoreState(tracks)
+                // Waited for last and not kept: the restore waits on more
+                // besides, and a list held across those waits is a whole
+                // library kept alive once a write replaces it. It is read
+                // again at the moment the ids are matched.
+                library.fullTracks.first { it.isNotEmpty() }
+                playback.restoreState { library.fullTracks.value }
             }
+            // The download top-up again once the cached library actually exists,
+            // at the end of every sync, and whenever the library changes size
+            // outside one — a library shown again, an album page that found new
+            // songs. The mode collector above runs at boot, before there may be
+            // anything to queue; with only a *successful* sync behind it, a
+            // launch whose sync did nothing, or failed, left the queue empty and
+            // downloads quietly stopped.
+            //
+            // The first library counts the moment it lands, sync or not: it is
+            // read while a launch's sync is starting, and held for that sync's
+            // end it waited on a sync that might fail, and on every other
+            // source's downloads with it. After that a sync's batches, which
+            // move the size forty albums at a time, wait for its end — any end,
+            // since one that failed may still have written songs.
+            //
+            // Sizes only, and nothing awaited in the collector: a collector
+            // suspended on a list holds it, and this one used to hold a whole
+            // library through every pass it started.
             scope.launch {
-                library.fullTracks
-                    .filter { it.isNotEmpty() }
-                    .distinctUntilChangedBy { it.size }
-                    .collect { topUpDownloads() }
+                var requestedAt = 0
+                var wasSyncing = false
+                combine(library.fullTracks.map { it.size }, library.syncState.map { it.syncing }, ::Pair)
+                    .distinctUntilChanged()
+                    .collect { (size, syncing) ->
+                        val syncEnded = wasSyncing && !syncing
+                        wasSyncing = syncing
+                        val firstLibrary = requestedAt == 0 && size > 0
+                        val moved = !syncing && size > 0 && size != requestedAt
+                        if (!syncEnded && !firstLibrary && !moved) return@collect
+                        if (size > 0) requestedAt = size
+                        scope.launch { topUpDownloads() }
+                    }
             }
+            // Once per process like the rest. Started on every boot, as it
+            // was, each new activity left one more of these running for good.
+            scope.launch { settings.replayGain.collect { playback.replayGain.value = it } }
             coreReady = true
             // Periodic background library refresh (min 15 min on WorkManager).
             LightWork.enqueuePeriodic(context, SYNC_JOB_KEY, 30.minutes)
         }
-        playback.bind(DefaultLightAudio(sealedActivity))
+        playback.attach(DefaultLightAudio(sealedActivity))
     }
 
-    fun shutdown() {
-        playback.release()
+    /**
+     * The screen that booted [sealedActivity] is backing out. Named, so that an
+     * old activity's back-out can't release the handle a newer one has taken
+     * over — see PlaybackController.attach.
+     */
+    fun shutdown(sealedActivity: SealedLightActivity) {
+        playback.release(owner = DefaultLightAudio(sealedActivity))
     }
 
     /**
@@ -427,16 +1190,50 @@ object App {
         settings.likedArtistsOnly.stateIn(scope, SharingStarted.Eagerly, false)
     }
 
-    val tagSort: StateFlow<TagSort> by lazy {
-        settings.tagSort.stateIn(scope, SharingStarted.Eagerly, TagSort.NAME)
+    /**
+     * Which tag each list is narrowed to, as one value so the views below stay
+     * inside `combine`'s five-flow form.
+     *
+     * Blank means "all of it", which is the absence of a filter rather than a
+     * tag that happens to be named nothing.
+     */
+    val songsTagFilter: StateFlow<TagFilter> by lazy {
+        combine(settings.songsGenre, settings.songsComposer) { g, c -> TagFilter(g, c) }
+            .stateIn(scope, SharingStarted.Eagerly, TagFilter())
     }
-    val tagSortReversed: StateFlow<Boolean> by lazy {
-        settings.tagSortReversed.stateIn(scope, SharingStarted.Eagerly, false)
+    val albumsTagFilter: StateFlow<TagFilter> by lazy {
+        combine(settings.albumsGenre, settings.albumsComposer) { g, c -> TagFilter(g, c) }
+            .stateIn(scope, SharingStarted.Eagerly, TagFilter())
+    }
+
+    /**
+     * The albums a tag filter leaves standing, or null when nothing is filtered.
+     *
+     * An album carries one genre of its own and no composer at all, so the
+     * question is really about its songs: an album is a Bach album because Bach
+     * wrote what is on it. Derived from the tracks for that reason, which also
+     * guarantees every value the picker offers actually leads somewhere.
+     */
+    val albumsMatchingTags: StateFlow<Set<String>?> by lazy {
+        combine(library.tracks, albumsTagFilter) { tracks, filter ->
+            if (filter.isEmpty) return@combine null
+            tracks.asSequence()
+                .filter { filter.genre.isEmpty() || it.hasGenre(filter.genre) }
+                .filter { filter.composer.isEmpty() || it.hasComposer(filter.composer) }
+                .mapNotNull { it.albumId }
+                .toSet()
+        }.stateIn(scope, SharingStarted.Eagerly, null)
     }
 
     val sortedSongs: StateFlow<SortedView<Track>> by lazy {
-        combine(library.tracks, songSort, songSortReversed, likedSongsOnly) { list, sort, rev, liked ->
-            val sorted = sortSongs(list.filter { !liked || it.liked }, sort, rev)
+        combine(library.tracks, songSort, songSortReversed, likedSongsOnly, songsTagFilter) {
+                list, sort, rev, liked, tags ->
+            val narrowed = list.asSequence()
+                .filter { !liked || it.liked }
+                .filter { tags.genre.isEmpty() || it.hasGenre(tags.genre) }
+                .filter { tags.composer.isEmpty() || it.hasComposer(tags.composer) }
+                .toList()
+            val sorted = sortSongs(narrowed, sort, rev)
             SortedView(
                 sorted,
                 when (sort) {
@@ -475,6 +1272,17 @@ object App {
             .stateIn(scope, SharingStarted.Eagerly, false)
     }
 
+    /**
+     * Which shape the bottom bar takes — see [AppSettings.layoutMode].
+     *
+     * Eager, like its neighbours, because the bar is drawn on every screen: read
+     * as a plain preference Flow it would show the standard bar for a frame on
+     * the way to every page, on a phone set to the simplified one.
+     */
+    val layoutMode: StateFlow<LayoutMode> by lazy {
+        settings.layoutMode.stateIn(scope, SharingStarted.Eagerly, LayoutMode.STANDARD)
+    }
+
 
     /**
      * Artists' own pictures off, sleeves untouched — see
@@ -482,8 +1290,10 @@ object App {
      * wholesale, so the one place that reads it needs only the one answer.
      */
     val hideArtistImages: StateFlow<Boolean> by lazy {
+        // Initial matches the stored default, so the first frame doesn't flash
+        // a row of photos that are about to be hidden.
         combine(settings.hideArtistImages, hideArtwork) { off, all -> off || all }
-            .stateIn(scope, SharingStarted.Eagerly, false)
+            .stateIn(scope, SharingStarted.Eagerly, true)
     }
 
     /**
@@ -496,8 +1306,13 @@ object App {
     }
 
     val sortedAlbums: StateFlow<SortedView<Album>> by lazy {
-        combine(library.albums, albumSort, albumSortReversed, likedAlbumsOnly) { list, sort, rev, liked ->
-            val sorted = sortAlbums(list.filter { !liked || it.liked }, sort, rev)
+        // The three order settings fold into one flow first: combine takes five
+        // flows at most, and the reshuffle nonce made six.
+        val order = combine(albumSort, albumSortReversed, settings.shuffleNonce, ::Triple)
+        combine(library.albums, order, likedAlbumsOnly, albumsMatchingTags) {
+                list, (sort, rev, nonce), liked, tagged ->
+            val narrowed = list.filter { (!liked || it.liked) && (tagged == null || it.id in tagged) }
+            val sorted = sortAlbums(narrowed, sort, rev, nonce)
             // The bucket follows whatever the list is ordered by, so sorting by
             // artist gives an index over artist names rather than no index at all.
             // Both use the same key the sort itself used, or the letters would
@@ -533,41 +1348,321 @@ object App {
         }.stateIn(scope, SharingStarted.Eagerly, SortedView())
     }
 
-    /** Queue whatever the current offline mode wants that isn't downloaded yet. */
+    /**
+     * Change over to [active]: the client, the database, then the source.
+     *
+     * In that order, and in one place, because the order is the whole point.
+     * The source is what everything else keys on — the download top-up, the
+     * screens, anything asking "which server is this" — so it changes *last*,
+     * once the client and the tables it implies are already the new one's.
+     *
+     * Split across three collectors of the same flow, as this was, nothing
+     * ordered them: the source flipped first and the rest caught up over the
+     * next few hundred milliseconds. Work that ran in the gap held one
+     * server's identity and another's music, and asked the new server for the
+     * old one's ids — a download top-up queued sixteen thousand Navidrome
+     * tracks against Plex, and cover art went to the wrong server entirely.
+     * Nothing downstream can defend itself against that; it has to not happen.
+     */
+    private suspend fun swapSource(active: MusicSource?) {
+        val next = active ?: return
+        if (next.id == _source.value.id) {
+            // The same source — either unchanged, or changed in place by a
+            // renewed token or a new address. The client is keyed on the whole
+            // record, so a change rebuilds it; the database is the same one and
+            // the library does not move.
+            //
+            // `== null` is not belt and braces: at boot, [boot] sets _source to
+            // the stored source *before* this collector starts, so its first
+            // emission is this branch with nothing changed. Without this the
+            // client was never built at all until the user happened to switch
+            // sources — which left playback failing with "Source error",
+            // downloads fetching "via null", and everything the mode gates
+            // looking innocent because there was nothing to send with.
+            if (next != _source.value || _serverClient.value == null) {
+                _serverClient.value = clientFor(next)
+            }
+            _source.value = next
+            return
+        }
+        // The playing queue belongs to the source being left and doesn't
+        // survive the change: the stream URLs already handed to the player are
+        // signed for that server. Left alone, playback fails on the next
+        // track, the failure trips the offline fallback, and the app spends a
+        // while looking broken before a reachability check lets it recover.
+        //
+        // The download queue, deliberately, does survive. Every entry in it
+        // names its own source and is fetched from that source whichever one
+        // is on screen — selecting a source is a browsing choice, not a
+        // download scope. It used to be cleared here, which threw away an
+        // hour's worth of queue on every switch, and it was cleared because a
+        // queued track *didn't* know its source and the worker assumed the
+        // browsed one; see Downloader.
+        playback.stop()
+        // A sync for the source being left has nothing to tell us, and its
+        // failure would be reported against the new one. Its hold on that
+        // source's downloads goes with it.
+        library.cancelSync()
+        downloader.setSyncing(null)
+        // And whatever it said about syncing — see LibraryRepository.adoptSource.
+        library.adoptSource(runCatching { settings.lastSyncedMs(next.id) }.getOrDefault(0L))
+        // Popular songs, the playlists, the search index and the artist ids are
+        // all keyed by name rather than by source, so they answer for the wrong
+        // server until they're dropped. Cleared *before* the source changes
+        // over, so nothing that recomposes on the new source can catch the old
+        // data.
+        library.forgetDerived()
+        // So are the liked switches and the genre and composer filters: they
+        // narrow *this* library's lists, and a genre chosen on one server means
+        // nothing on the next. Left in place, "Ambient" from Plex applied to a
+        // Navidrome that spells its genres differently emptied every list, the
+        // page said nothing about being narrowed, and the row to clear it hid
+        // itself because the new library had no such tag to offer.
+        settings.clearLibraryFilters()
+        // The pool keeps the previous client open: its source may well have
+        // downloads still to fetch.
+        _serverClient.value = clientFor(next)
+        _dao.value = databaseFor(next).libraryDao()
+        // Last, so that anything it wakes finds the rest already in place.
+        _source.value = next
+        // What was known about the server being left says nothing about this
+        // one: assume it is there, and ask.
+        reachability.reset()
+        // Its own sync, now that everything it pins is in place, rather than
+        // whenever the root screen next happens to ask: that ask races this
+        // switch, and losing it left a server just added empty for minutes.
+        // The floor still applies, so a source synced a moment ago isn't
+        // fetched again. On Main, where every other caller is, because the
+        // check-then-claim inside isn't atomic.
+        withContext(Dispatchers.Main) { library.syncInBackground() }
+    }
+
+    /**
+     * One top-up pass at a time, and a burst of requests is one more pass, not
+     * one each.
+     *
+     * Three triggers ask for a top-up — a sync finishing, a source's mode
+     * changing, the browsed library's size changing — and a source switch fires
+     * two of them within a second. Each pass reads every source's tables and
+     * asks a background server for its playlists, so with the requests simply
+     * queued behind a lock, a minute of switching between servers on the
+     * device became three minutes of back-to-back passes doing the same work.
+     * A request that arrives mid-pass now just marks the pass as needing to run
+     * again; whatever it would have found, the rerun finds.
+     */
+    private val topUpRunning = Mutex()
+    private val topUpRequested = AtomicBoolean(false)
+
+    /**
+     * How long a pass waits after being asked for, before it starts.
+     *
+     * The triggers fire at the moments the screen is busiest — a source switch
+     * blanks every list and refills it from the database, and a pass that
+     * started in the same instant read every source's whole tables on the same
+     * database thread the refill was queued behind. Background work goes after
+     * the screen. The wait also folds a burst of triggers into one pass.
+     */
+    private const val TOP_UP_SETTLE_MS = 3_000L
+
+    /**
+     * How long a playlist that would not answer is left alone before being
+     * asked again — a fetch that just failed is not improved by repeating it on
+     * the next pass, and one that failed for want of memory took the heap to
+     * its ceiling each time it was tried.
+     */
+    private const val PLAYLIST_RETRY_MS = 30 * 60 * 1000L
+
+    /** When a background source's playlist last failed to answer, by "source/playlist". */
+    private val backgroundPlaylistFailedAt = ConcurrentHashMap<String, Long>()
+
+    /**
+     * Playlist membership for the sources not being browsed, by source id, for
+     * the life of the process.
+     *
+     * The repository knows the browsed source's playlists and shares them with
+     * the Playlists tab; a source in the background has no repository, so its
+     * membership is asked of its own server here and remembered. The list of
+     * playlists once per session, like the repository's own cache, and each
+     * playlist's songs once they have answered — null until then, so one that
+     * fails is asked again alone on the next pass rather than taking every
+     * other playlist's fetch with it. That was the nine seconds every pass
+     * spent on Plex: one playlist not answering meant none were remembered. A
+     * playlist changed on a server you are not looking at is picked up at the
+     * next launch, or the next time you look. Dropped with the source — see
+     * [forgetSource].
+     */
+    private val backgroundPlaylistTracks = ConcurrentHashMap<String, MutableMap<String, List<String>?>>()
+
+    /**
+     * Queue whatever each source's offline mode wants that isn't downloaded yet.
+     *
+     * Every source with a mode set, not the one being browsed. Downloads run
+     * for all of them at once, and the Offline page sets the mode per server —
+     * so "Everything" on Plex means Plex's library arrives while you listen to
+     * Navidrome or to the phone's own files, and "Manual" on Navidrome means
+     * Navidrome fetches only what you asked for by hand, whichever is on screen.
+     */
     private suspend fun topUpDownloads() {
         if (!coreReady) return
+        topUpRequested.set(true)
+        while (true) {
+            // Someone else is running the pass; the flag tells them to go round
+            // once more when they finish.
+            if (!topUpRunning.tryLock()) return
+            try {
+                while (topUpRequested.get()) {
+                    // After the screen, and once for a burst — see TOP_UP_SETTLE_MS.
+                    delay(TOP_UP_SETTLE_MS)
+                    topUpRequested.set(false)
+                    topUpPass()
+                }
+            } finally {
+                topUpRunning.unlock()
+            }
+            // A request that landed between the last check and the unlock has
+            // nobody running for it — unless this loop picks it up.
+            if (!topUpRequested.get()) return
+        }
+    }
 
-        // Nothing to download on the phone's own music: the files are already
-        // here, put there by Light's own transfer, and this app has no business
-        // fetching anything on their behalf or writing into that folder.
-        if (!source.value.supportsDownloads) return
+    private suspend fun topUpPass() {
+        for (source in settings.sources.first()) {
+            // Nothing to download on the phone's own music: the files are
+            // already here, put there by Light's own transfer, and this app
+            // has no business fetching anything on their behalf.
+            if (!source.mayDownload || source.offlineMode == OfflineMode.MANUAL) continue
+            runCatching { topUpDownloads(source) }
+                .noteOom("top-up ${source.name}")
+                .onFailure { android.util.Log.w("AmpDl", "top-up failed for ${source.name}", it) }
+        }
+    }
 
-        // Only ever download from the library chosen in download settings.
+    private suspend fun topUpDownloads(source: MusicSource) {
+        val startedMs = System.currentTimeMillis()
+        // This source's own tables. Not the repository's lists — those follow
+        // the browsed source, and a top-up that read them for another source
+        // would hold one server's identity and another's music. Asked for ids,
+        // not read whole: the whole table as tracks was a second copy of the
+        // library, held through the playlist fetch below.
+        val dao = databaseFor(source).libraryDao()
+        // Only ever download from the libraries kept on the Sources page.
         //
-        // The Room cache holds just the library being browsed — switching library
-        // clears and re-syncs it — so when the download library is a *different*
-        // one there is nothing legitimate here to enumerate. Downloading whatever
-        // happens to be in view instead is how a "Music Library" setting quietly
-        // filled up with tracks from another library. Better to fetch nothing than
-        // the wrong thing. (null means "follow whatever the app is browsing", which
-        // is what the picker offers, so that case always proceeds.)
-        val chosen = settings.activeSource.first()?.downloadLibraryId
-        if (chosen != null && chosen != settings.libraryId.first()) return
-
-        // The unfiltered library: `library.tracks` hides everything not yet
-        // downloaded whenever the offline view is on, which would reduce this to
-        // "download what is already downloaded".
-        val tracks = library.fullTracks.value
-        if (tracks.isEmpty()) return
-        val playlistTrackIds = library.playlists.value.flatMap { it.trackIds }.toSet()
+        // Which libraries this covers is that page's "Shown on" setting, not
+        // one of its own: downloads used to have a library setting that
+        // restated a choice already made a level up and could disagree with
+        // it. Hiding a library there says you are not interested in it;
+        // fetching it anyway, in the background, onto a phone with a size
+        // limit, is not a reading of that. Not the browsed library either —
+        // what to *keep* is a wider question than what to look at right now.
+        val hidden = source.hiddenLibraryIds.filterNotNull().distinct()
+        val noneHidden = hidden.isEmpty()
+        if (!dao.hasKeptTracks(hidden, noneHidden)) return
+        // Playlists count in both modes — Favorites promises them outright, and
+        // Everything fetches them first — so what they hold has to be known
+        // here, not just on the Playlists tab. No server sends membership with
+        // the list, so each playlist's songs are asked for, once.
+        val playlistTrackIds = playlistTrackIdsFor(source)
+        // Starred on the server, whatever is on screen — not derived from
+        // the artists list, which narrows with the offline view.
+        val likedArtists = dao.likedArtistNames().toSet()
         downloader.applyAutoMode(
-            allTracks = tracks,
-            likedTracks = tracks.filter { it.liked },
-            likedAlbumIds = library.fullAlbums.value.filter { it.liked }.map { it.id }.toSet(),
-            playlistTracks = tracks.filter { it.id in playlistTrackIds },
-            likedArtistNames = library.artists.value.filter { it.liked }.map { it.name }.toSet(),
+            source = source,
+            likedTrackIds = dao.likedKeptTrackIds(hidden, noneHidden),
+            playlistTrackIds = playlistTrackIds.toList().chunked(MAX_BOUND_IDS)
+                .flatMap { dao.keptTrackIdsAmong(it, hidden, noneHidden) },
+            // Scoped as the rest are: a liked record in a hidden library is
+            // not fetched, and one in a library not being browsed is.
+            likedAlbumTrackIds = dao.likedAlbumTrackIds(hidden),
+            likedArtistTrackIds = trackIdsCreditedTo(dao, likedArtists, hidden, noneHidden),
+            everyTrackId = { dao.keptTrackIdsNotDownloaded(hidden, noneHidden) },
+        )
+        // One line per source per pass — the cost of a pass is the thing worth
+        // knowing about this, and the playlists are where it goes.
+        android.util.Log.i(
+            "AmpDl",
+            "top-up ${source.name} (${source.offlineMode}): " +
+                "${playlistTrackIds.size} in playlists, ${System.currentTimeMillis() - startedMs} ms",
         )
     }
+
+    /**
+     * The tracks of [dao]'s library credited to any of [artists], as
+     * Track.albumArtistNames reads a credit — worked out over the distinct
+     * credits rather than over every row, then asked for by the credits that
+     * matched. A blank credit stands for the track artist, as it does there.
+     */
+    private suspend fun trackIdsCreditedTo(
+        dao: LibraryDao,
+        artists: Set<String>,
+        hidden: List<String>,
+        noneHidden: Boolean,
+    ): List<String> {
+        if (artists.isEmpty()) return emptyList()
+        val (blank, credits) = dao.albumArtistCredits().partition { it.isBlank() }
+        val matched = credits.filter { credit -> creditNames(credit).any { it in artists } }
+        val byCredit = matched.chunked(MAX_BOUND_IDS).flatMap { dao.keptTrackIdsCredited(it, hidden, noneHidden) }
+        if (blank.isEmpty()) return byCredit
+        val byArtist = dao.artistsCreditedAs(blank)
+            .filter { artist -> creditNames(artist).any { it in artists } }
+            .chunked(MAX_BOUND_IDS)
+            .flatMap { dao.keptTrackIdsByArtist(blank, it, hidden, noneHidden) }
+        return byCredit + byArtist
+    }
+
+    /** Every track id in any of [source]'s playlists, as far as they can be known. */
+    private suspend fun playlistTrackIdsFor(source: MusicSource): Set<String> {
+        if (source.id == _source.value.id) {
+            // The browsed source: the repository's cache, shared with the
+            // Playlists tab. The list is fetched if it hasn't been yet, then
+            // each playlist's songs, once — reading Playlist.trackIds, always
+            // empty for a server playlist, had both modes quietly downloading
+            // no playlist at all.
+            if (library.playlists.value.isEmpty()) runCatching { library.refreshPlaylists() }
+            runCatching { library.primePlaylistTrackIds(library.playlists.value.map { it.id }) }
+                .noteOom("playlists of ${source.name}")
+            return library.playlistTrackIds.value.values.flatten().toHashSet()
+        }
+        val client = clientFor(source) ?: return emptySet()
+        // The list, once. Metadata, so the metadata gate — the same one a
+        // sync waits on.
+        val known = backgroundPlaylistTracks[source.id] ?: run {
+            if (!metadataAllowed()) return emptySet()
+            val playlists = runCatching { client.getPlaylists(source.libraryId) }.getOrNull()
+                ?: return emptySet()
+            HashMap<String, List<String>?>()
+                .also { map -> playlists.forEach { map[it.id] = null } }
+                .also { backgroundPlaylistTracks[source.id] = it }
+        }
+        // Then whichever playlists haven't answered yet — leaving alone, for a
+        // while, the ones that were asked and failed. One request per playlist
+        // is unavoidable; running them one after another is not. Same width as
+        // the repository gives the sync.
+        val now = System.currentTimeMillis()
+        val missing = known.filterValues { it == null }.keys.filter { id ->
+            now - (backgroundPlaylistFailedAt["${source.id}/$id"] ?: 0L) > PLAYLIST_RETRY_MS
+        }
+        if (missing.isNotEmpty() && metadataAllowed()) {
+            val gate = Semaphore(PLAYLIST_PRIME_CONCURRENCY)
+            val fetched = coroutineScope {
+                missing.map { id ->
+                    async {
+                        gate.withPermit {
+                            id to runCatching { client.getPlaylistTracks(id) }
+                                .noteOom("playlist $id of ${source.name}").getOrNull()?.map { it.id }
+                        }
+                    }
+                }.awaitAll()
+            }
+            // A failed fetch stays null: cached as "empty" it would stand for
+            // the rest of the session. It is dated, so the next pass skips it.
+            fetched.forEach { (id, ids) ->
+                if (ids != null) known[id] = ids else backgroundPlaylistFailedAt["${source.id}/$id"] = now
+            }
+        }
+        return known.values.flatMapTo(HashSet()) { it.orEmpty() }
+    }
+
+    private const val PLAYLIST_PRIME_CONCURRENCY = 6
 
     private const val DB_NAME = "amp-library.db"
 }

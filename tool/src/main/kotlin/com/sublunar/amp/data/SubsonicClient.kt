@@ -1,13 +1,20 @@
 package com.sublunar.amp.data
 
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.isSuccess
 import java.net.URLEncoder
 import java.time.Instant
+import io.ktor.client.request.header
+import io.ktor.client.request.prepareGet
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.http.contentType
+import kotlinx.serialization.SerializationException
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlin.random.Random
 
 /** Connection + credentials for a Navidrome/Subsonic server. */
@@ -20,23 +27,63 @@ data class SubsonicConfig(
 ) {
     companion object {
         /**
-         * Base URLs to try for a raw input, in order. When the user omits a
-         * scheme, prefer HTTPS and fall back to HTTP (for LAN servers). Drops a
-         * trailing slash and a `/rest` suffix.
+         * Base URLs to try for a raw input, in order — see [ServerAddress] for
+         * when http:// follows https://. Drops a trailing slash and a `/rest`
+         * suffix.
          */
-        fun candidates(raw: String): List<String> {
-            var url = raw.trim().trimEnd('/')
-            url = url.replace(Regex("/rest$", RegexOption.IGNORE_CASE), "")
-            return if (url.matches(Regex("^https?://.*", RegexOption.IGNORE_CASE))) {
-                listOf(url)
-            } else {
-                listOf("https://$url", "http://$url")
-            }
-        }
+        fun candidates(raw: String): List<String> =
+            ServerAddress.candidates(
+                raw.trim().trimEnd('/').replace(Regex("/rest$", RegexOption.IGNORE_CASE), ""),
+            )
     }
 }
 
-class SubsonicException(message: String) : Exception(message)
+/** An id no server can hold, for a probe that must not touch anything real. */
+private const val PROBE_ID = "amp-capability-probe"
+
+/** What a Subsonic error says when the server gave no message of its own. */
+internal const val SUBSONIC_REQUEST_FAILED = "Request failed."
+
+/** [status] is the HTTP status when the server gave one — see Reachability, which reads a 5xx as "not there". */
+class SubsonicException(
+    message: String,
+    val status: Int? = null,
+    /**
+     * The server answered in JSON, but not in Subsonic's envelope — what
+     * Bandcamp sends for an endpoint it doesn't have (`{"error":true,
+     * "error_message":"bad version"}`), where a full server would say
+     * `status: failed` inside one.
+     */
+    val notSubsonic: Boolean = false,
+    /**
+     * Whatever answered didn't answer in JSON at all: a reverse proxy's login
+     * page, a portal, a web server that routes unknown paths to a page. That
+     * is something *in front of* the server talking, so it says nothing about
+     * what the server itself implements.
+     */
+    val notJson: Boolean = false,
+    /** Subsonic's own error code, when the server sent one (40 = wrong credentials, 70 = not found…). */
+    val code: Int? = null,
+    /**
+     * The reply was a Subsonic envelope — `status: failed`, or one in a shape
+     * this client couldn't read. Either way the endpoint exists: something on
+     * the server answered for it in Subsonic's own words.
+     */
+    val envelope: Boolean = false,
+    cause: Throwable? = null,
+) : Exception(message, cause) {
+    /**
+     * The server has no such endpoint — as opposed to having one and refusing.
+     *
+     * A Subsonic reply of any kind, an error included, means the endpoint is
+     * there. This is the other case: JSON that isn't Subsonic, or the HTTP
+     * status of a route that doesn't exist. An answer that isn't JSON at all
+     * does NOT count — a proxy's login page would otherwise read as a server
+     * missing everything — and neither does anything the network or a login
+     * can throw.
+     */
+    val endpointMissing: Boolean get() = (notSubsonic && !notJson) || status == 404 || status == 501
+}
 
 /**
  * Navidrome / Subsonic API client. Ported from the React Native `navidrome.ts`.
@@ -45,9 +92,22 @@ class SubsonicException(message: String) : Exception(message)
  */
 class SubsonicClient(val config: SubsonicConfig) : MusicServer {
 
-    private val http = HttpClient(OkHttp) {
+    private val http = NetworkGate.httpClient {
         expectSuccess = false
     }
+
+    /**
+     * A second, small client for the two calls a person is waiting on — the
+     * reachability ping and the stream decision. A separate client is a
+     * separate request queue: on the shared one they stood behind a launch
+     * sync's hundreds of requests (five at a time per host), and a ping that
+     * waited out its turn there was read as "the server is gone" — which
+     * narrowed the library to downloads in the very minutes the user was
+     * trying to start a song. Built on first use; most sessions never need it
+     * more than a handful of times.
+     */
+    private val quickClient = lazy { NetworkGate.httpClient(isolated = true) { expectSuccess = false } }
+    private val quick get() = quickClient.value
 
     private val json = Json {
         ignoreUnknownKeys = true
@@ -68,7 +128,10 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
         }
     }
 
-    override fun close() = http.close()
+    override fun close() {
+        http.close()
+        if (quickClient.isInitialized()) quick.close()
+    }
 
     // --- URL builders --------------------------------------------------------
 
@@ -79,6 +142,30 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
             for ((key, value) in params) {
                 append('&').append(key).append('=').append(enc(value))
             }
+        }
+
+    /**
+     * A copy to keep, rather than something to play.
+     *
+     * At original quality that is `download`, which is the endpoint for exactly
+     * this and hands back the stored file untouched. `stream` would serve the
+     * same bytes, but it is a *playback* endpoint — a Subsonic server is
+     * entitled to treat a request to it as a play, and filling the phone with a
+     * library should not rewrite its play counts.
+     *
+     * At any other quality there is nothing to switch to: `download` never
+     * transcodes, so the streaming endpoint is the only way to a smaller file.
+     * That is sound here in a way it was not on Plex — Navidrome and friends
+     * transcode mp3 at a constant bitrate, where a player's size ÷ bitrate
+     * fallback is arithmetic rather than a guess, so the missing duration
+     * header costs nothing. A server configured for a *variable* rate would
+     * land in Plex's hole, and this is the seam where that would be fixed.
+     */
+    override fun downloadUrl(track: Track, format: StreamFormat): String =
+        if (format == StreamFormat.RAW) {
+            restUrl("download", listOf("id" to track.id))
+        } else {
+            streamUrl(track, format, estimateContentLength = false)
         }
 
     /** Streaming URL for a song in the given format, with optional server-side time seek. */
@@ -131,24 +218,195 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
     private suspend fun request(
         endpoint: String,
         params: List<Pair<String, String>> = emptyList(),
+        via: HttpClient = http,
     ): SubsonicBody {
-        val response = http.get(restUrl(endpoint, params))
+        val response = via.get(restUrl(endpoint, params))
         if (!response.status.isSuccess()) {
-            throw SubsonicException("Server returned HTTP ${response.status.value}.")
+            // A page behind an error status is something in front of the
+            // server (a gateway, an auth portal) — not the server's own 500,
+            // which is how Bandcamp says "not this login".
+            val page = response.contentType()?.match(ContentType.Text.Html) == true
+            throw SubsonicException(
+                "Server returned HTTP ${response.status.value}.",
+                response.status.value,
+                notJson = page,
+            )
         }
-        val body = json.decodeFromString<SubsonicEnvelope>(response.bodyAsText()).response
-            ?: throw SubsonicException("Unexpected response from server.")
+        val text = response.bodyAsText()
+        // Three different things can fail to decode, and they mean different
+        // things: no JSON at all is something in front of the server (see
+        // notJson); JSON without an envelope is the server saying it has no
+        // such endpoint (notSubsonic); an envelope this client can't read is
+        // the server answering in a shape we didn't expect (envelope).
+        val parsed = try {
+            json.decodeFromString<SubsonicEnvelope>(text)
+        } catch (e: SerializationException) {
+            // A bare top-level value ("Forbidden", "OK") parses as a JSON
+            // literal, but it is plain text from something in front of the
+            // server — a page in all but name — not a JSON reply.
+            val tree = runCatching { json.parseToJsonElement(text) }.getOrNull()
+                ?.takeUnless { it is JsonPrimitive }
+            val hasEnvelope = (tree as? JsonObject)?.containsKey("subsonic-response") == true
+            throw SubsonicException(
+                "Unexpected response from server.",
+                notJson = tree == null,
+                notSubsonic = tree != null && !hasEnvelope,
+                envelope = hasEnvelope,
+                cause = e,
+            )
+        }
+        val body = parsed.response
+            ?: throw SubsonicException("Unexpected response from server.", notSubsonic = true)
         if (body.status != "ok") {
-            throw SubsonicException(body.error?.message ?: "Request failed.")
+            throw SubsonicException(
+                body.error?.message?.takeIf { it.isNotBlank() } ?: SUBSONIC_REQUEST_FAILED,
+                code = body.error?.code ?: 0,
+                envelope = true,
+            )
         }
         return body
     }
 
     /** Verify credentials by pinging the server. Throws on failure. */
     override suspend fun ping() {
-        request("ping")
+        request("ping", via = quick)
     }
 
+    /**
+     * What this server implements, asked of it and kept — see [ServerFeatures].
+     *
+     * Every probe is a well-formed request that cannot change anything and does
+     * not need to succeed, because only the shape of the answer is read. The
+     * radio and download probes name a song the library already holds and only
+     * read; the ratings probe rates a song id no server can have, so a server
+     * that implements it answers "not found" — proof enough — and has nothing
+     * to act on.
+     *
+     * A server already asked, at the same version, with the same set of
+     * probes, is asked again only about what it said it lacked: a "no" is
+     * re-checked on every sync, so one wrong answer — a proxy that misbehaved
+     * once, a server mid-upgrade — heals by itself instead of hiding a feature
+     * for good. A full server has nothing missing, so this costs it nothing.
+     *
+     * Returns null when the server couldn't be reached — an unreachable server
+     * must never read as one missing everything, so the ping goes first and a
+     * throw from anywhere here leaves what was known alone.
+     */
+    override suspend fun probeFeatures(known: ServerFeatures?, sampleTrackId: String?): ServerFeatures? {
+        // Doubles as the guard the whole thing rests on: the address and login
+        // are working right now, so anything answering "no such endpoint" below
+        // is the server saying so, not a dead link.
+        val server = request("ping", via = quick)
+        val tag = listOfNotNull(server.version, server.type, server.serverVersion)
+            .joinToString("/")
+            .ifBlank { "unknown" }
+        val asked = known != null &&
+            known.checkedVersion == tag &&
+            known.generation == ServerFeatures.GENERATION
+        if (asked && known!!.missing.isEmpty()) return known
+
+        val questions = if (asked) known!!.missing else ServerFeatures.ALL
+        val missing = mutableListOf<String>()
+        var unanswered = false
+        for (endpoint in questions) {
+            when (implements(endpoint, sampleTrackId)) {
+                false -> missing += endpoint
+                // No evidence either way: a 500, a 429, a gateway's page, a
+                // reply this client can't read — or a probe that needs a song,
+                // on a library with none yet. On a re-check the old "no" stands
+                // until a real answer replaces it; on a first asking nothing is
+                // assumed, and the record is left unfinished so the next sync
+                // asks again. A hiccup must never flip an answer either way.
+                null -> if (asked) missing += endpoint else unanswered = true
+                true -> Unit
+            }
+        }
+        android.util.Log.i(
+            "AmpSync",
+            "features of $tag (${if (asked) "re-checked" else "asked"}): " +
+                "missing ${missing.ifEmpty { listOf("nothing") }}" +
+                if (unanswered) ", some still unanswered (no song yet, or no clear reply)" else "",
+        )
+        return ServerFeatures(
+            checkedVersion = tag,
+            missing = missing,
+            generation = if (unanswered) 0 else ServerFeatures.GENERATION,
+        )
+    }
+
+    /**
+     * Whether the server has [endpoint] at all — true or false only on real
+     * evidence, null when the answer was no evidence or the probe needs a
+     * song and there is none.
+     */
+    private suspend fun implements(endpoint: String, sampleTrackId: String?): Boolean? = when (endpoint) {
+        ServerFeatures.SCAN_STATUS -> answers(endpoint, emptyList())
+        ServerFeatures.SET_RATING -> answers(endpoint, listOf("id" to PROBE_ID, "rating" to "1"))
+        ServerFeatures.SIMILAR_SONGS -> sampleTrackId?.let { answers(endpoint, listOf("id" to it, "count" to "1")) }
+        ServerFeatures.DOWNLOAD -> sampleTrackId?.let { implementsDownload(it) }
+        else -> true
+    }
+
+    /**
+     * What one probe proved. Any Subsonic envelope — success or `status:
+     * failed` — proves the endpoint exists; JSON without one, a 404 or a 501
+     * proves it doesn't. Everything else (a 5xx, a 401 or 429, a page from
+     * something in front of the server) proves nothing, and says so with null.
+     */
+    private suspend fun answers(endpoint: String, params: List<Pair<String, String>>): Boolean? =
+        try {
+            request(endpoint, params, via = quick)
+            true
+        } catch (e: SubsonicException) {
+            when {
+                e.envelope -> true
+                e.endpointMissing -> false
+                else -> null
+            }
+        }
+
+    /**
+     * `download` without downloading — the same three-way rule as [answers].
+     *
+     * Asked for the first byte, and read from the headers: a server that
+     * ignores the range and starts sending the whole song is hung up on, never
+     * downloaded (prepareGet/execute never reads an audio body). A JSON reply
+     * is read, because it is small and it decides the matter: Subsonic's own
+     * error envelope means the call is there and only this file isn't (a song
+     * missing from the server's disk), while JSON without one is Bandcamp's
+     * way of saying it has no such call. A page is something in front of the
+     * server and proves nothing.
+     */
+    private suspend fun implementsDownload(trackId: String): Boolean? =
+        quick.prepareGet(restUrl("download", listOf("id" to trackId))) {
+            header(HttpHeaders.Range, "bytes=0-0")
+        }.execute { response ->
+            val type = response.contentType()
+            when {
+                response.status.value == 404 || response.status.value == 501 -> false
+                !response.status.isSuccess() -> null
+                type?.match(ContentType.Application.Json) == true -> {
+                    val tree = runCatching { json.parseToJsonElement(response.bodyAsText()) }
+                        .getOrNull() as? JsonObject
+                    val envelope = tree?.get("subsonic-response") as? JsonObject
+                    val code = ((envelope?.get("error") as? JsonObject)?.get("code") as? JsonPrimitive)
+                        ?.content?.toIntOrNull()
+                    when {
+                        tree == null -> null
+                        // Not authorized: the call is there, but this account
+                        // can't use it — a Navidrome with downloads switched
+                        // off. Original can't be had here, so it isn't offered;
+                        // the "no" is re-checked every sync, so it comes back
+                        // once someone turns downloads on.
+                        code == 50 -> false
+                        envelope != null -> true
+                        else -> false
+                    }
+                }
+                type?.match(ContentType.Text.Html) == true -> null
+                else -> true
+            }
+        }
     /** The server's libraries (Navidrome exposes each as a music folder). */
     override suspend fun getMusicFolders(): List<MusicFolder> {
         val body = request("getMusicFolders")
@@ -189,14 +447,50 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
         // album they have no version field of their own — so clean them with the
         // parent album's, which this response already includes.
         val albumName = body.album?.let { albumTitle(it.name ?: it.title, it.version) }
-        return body.album?.song.orEmpty().map { it.toTrack(albumName) }
+        // The record's own artist, taken from the same parent. AlbumID3.artist
+        // is the album artist by definition, where a song Child's albumArtist is
+        // whatever the file happened to carry — so this is the authoritative
+        // answer for every track on the album, and the one the app files them
+        // under. Without it a track whose file has no ALBUMARTIST tag fell back
+        // to its own artist, which is what gave every guest on a "feat." credit
+        // a row of their own in the Artists list.
+        val albumArtist = body.album?.let { a ->
+            // Joined here, with the separator the app splits on, so a record
+            // credited to more than one artist comes apart again cleanly —
+            // see Track.albumArtistNames.
+            a.artists.mapNotNull { it.name?.trim()?.takeIf(String::isNotEmpty) }
+                .takeIf { it.isNotEmpty() }
+                ?.joinToString("; ")
+                ?: a.displayArtist?.takeIf { it.isNotBlank() }
+                ?: a.artist
+        }
+        // The album's own cover for every track on it — see toTrack.
+        return body.album?.song.orEmpty().map { it.toTrack(albumName, albumArtist, body.album?.coverArt) }
     }
 
+    /**
+     * What this account has liked, asked for with `getStarred2` — and, only
+     * where the server has no such endpoint, the older `getStarred`.
+     *
+     * Bandcamp is the one found so far: it implements `getStarred`, `star` and
+     * `unstar` but not `getStarred2`, and the sync asks for likes before
+     * anything else, so without this a Bandcamp library never loaded. Only the
+     * not-Subsonic answer falls back; a full server's own error (a failed
+     * status inside the envelope) is still an error, so Navidrome and gonic
+     * take the path they always did. The two replies differ only in the shape
+     * of their album entries, and the ids are all that is read here.
+     */
     override suspend fun getStarred(musicFolderId: String?): Starred {
-        val body = request("getStarred2", musicFolderParam(musicFolderId))
-        val songs = body.starred2?.song.orEmpty().map { it.id }.toSet()
-        val albums = body.starred2?.album.orEmpty().map { it.id }.toSet()
-        val artists = body.starred2?.artist.orEmpty().mapNotNull { it.name }.toSet()
+        val params = musicFolderParam(musicFolderId)
+        val starred = try {
+            request("getStarred2", params).starred2
+        } catch (e: SubsonicException) {
+            if (!e.notSubsonic) throw e
+            request("getStarred", params).starred
+        }
+        val songs = starred?.song.orEmpty().map { it.id }.toSet()
+        val albums = starred?.album.orEmpty().map { it.id }.toSet()
+        val artists = starred?.artist.orEmpty().mapNotNull { it.name }.toSet()
         return Starred(songIds = songs, albumIds = albums, artistNames = artists)
     }
 
@@ -222,8 +516,34 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
      */
     override val streamFormats: List<StreamFormat> get() = STREAM_FORMATS
 
-    override suspend fun startServerScan(musicFolderId: String?): Boolean =
-        runCatching { request("startScan") }.isSuccess
+    override suspend fun startServerScan(musicFolderId: String?): ScanRequest =
+        try {
+            request("startScan")
+            ScanRequest.STARTED
+        } catch (e: SubsonicException) {
+            // Told apart at the moment of asking, so the first sync of a new
+            // server is already right rather than waiting on what the probes
+            // learn at the end of it — see ServerFeatures.
+            if (e.endpointMissing) ScanRequest.ABSENT else ScanRequest.REFUSED
+        } catch (e: Exception) {
+            ScanRequest.REFUSED
+        }
+
+    /**
+     * Whether a scan has run since [mark] — which is all Subsonic can say.
+     *
+     * Navidrome changes nothing between scans, so the same last scan as the
+     * mark means nothing changed. A different one means something may have,
+     * with no way to ask which songs: the sync walks the library instead. No
+     * answer (a server without getScanStatus, or one mid-scan, whose last scan
+     * is still moving) is the same as not knowing.
+     */
+    override suspend fun songChangesSince(mark: String?, libraries: List<String?>): SongChanges {
+        val status = runCatching { request("getScanStatus").scanStatus }.getOrNull()
+        val lastScan = status?.lastScan?.takeIf { it.isNotBlank() && !status.scanning }
+            ?: return SongChanges.Unknown(mark = null)
+        return if (lastScan == mark) SongChanges.Nothing(lastScan) else SongChanges.Unknown(lastScan)
+    }
 
     override suspend fun serverScanning(musicFolderId: String?): Boolean =
         runCatching { request("getScanStatus").scanStatus?.scanning }.getOrNull() ?: false
@@ -240,6 +560,26 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
                     if (count > 0) listOf("count" to count.toString()) else emptyList(),
             )
             body.topSongs?.song.orEmpty().map { it.toTrack() }
+        } catch (_: Exception) {
+            emptyList()
+        }
+    }
+
+    /**
+     * `getSimilarSongs` takes the song's own id — checked against the public
+     * demo — and Navidrome resolves it to the artist before asking its Last.fm
+     * agent for artists like them. With no agent it still answers from that
+     * artist's own catalogue, so the radio narrows rather than vanishes.
+     */
+    override suspend fun getSimilarSongs(songId: String, count: Int): List<Track> {
+        return try {
+            val body = request(
+                "getSimilarSongs",
+                // Omitted rather than sent as 0 — see getTopSongs.
+                listOf("id" to songId) +
+                    if (count > 0) listOf("count" to count.toString()) else emptyList(),
+            )
+            body.similarSongs?.song.orEmpty().map { it.toTrack() }
         } catch (_: Exception) {
             emptyList()
         }
@@ -301,13 +641,13 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
      * Set a song's or album's star rating on the server, 0–5.
      *
      * Navidrome treats 0 as "remove the rating"; Subsonic's `setRating` takes it
-     * directly, so no separate unrate call is needed. Returns false when the
-     * server refused, so the caller can avoid caching a rating that didn't stick.
+     * directly, so no separate unrate call is needed. Throws when it didn't
+     * land, as the stars do, so the caller can tell a server that refused from
+     * one it couldn't reach.
      */
-    override suspend fun setRating(id: String, stars: Int): Boolean = runCatching {
+    override suspend fun setRating(id: String, stars: Int) {
         request("setRating", listOf("id" to id, "rating" to stars.coerceIn(0, 5).toString()))
-        true
-    }.getOrDefault(false)
+    }
 
     override suspend fun getLyrics(songId: String): Lyrics? {
         return try {
@@ -381,15 +721,35 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
         request("updatePlaylist", listOf("playlistId" to id, "songIdToAdd" to songId))
     }
 
-    override suspend fun removeFromPlaylistAt(id: String, index: Int) {
-        request("updatePlaylist", listOf("playlistId" to id, "songIndexToRemove" to index.toString()))
+    /**
+     * One request however many go: `songIndexToRemove` repeats, each an index
+     * into the list as it stands. Subsonic removes by position and nothing
+     * else, so the server's copy is read first to see the expected songs are
+     * still where the positions say.
+     */
+    override suspend fun removeFromPlaylistAt(id: String, at: Map<Int, String>): Boolean {
+        if (at.isEmpty()) return true
+        val known = getPlaylist(id).trackIds
+        if (at.any { (index, songId) -> known.getOrNull(index) != songId }) return false
+        val params = mutableListOf("playlistId" to id)
+        at.keys.forEach { params.add("songIndexToRemove" to it.toString()) }
+        request("updatePlaylist", params)
+        return true
     }
 
-    /** Subsonic has no reorder; overwrite the playlist with the full ordered id list. */
-    override suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>) {
+    /**
+     * Subsonic has no reorder; overwrite the playlist with the full ordered id
+     * list. Which is why the count is checked against the server's own copy
+     * first: an overwrite with a partial list doesn't reorder a playlist, it
+     * deletes everything the list left out.
+     */
+    override suspend fun reorderPlaylist(id: String, orderedSongIds: List<String>): Boolean {
+        val known = getPlaylist(id).trackIds
+        if (known.size != orderedSongIds.size) return false
         val params = mutableListOf("playlistId" to id)
         orderedSongIds.forEach { params.add("songId" to it) }
         request("createPlaylist", params)
+        return true
     }
 
     // --- Mapping -------------------------------------------------------------
@@ -408,7 +768,6 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
         lastPlayedMs = parseInstantMs(played),
         rating = userRating ?: 0,
         genre = genre.orEmpty(),
-        compilation = isCompilation ?: compilation ?: false,
     )
 
     /**
@@ -446,14 +805,31 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
         return y * 10_000L + (date?.month ?: 0) * 100L + (date?.day ?: 0)
     }
 
-    private fun SongDto.toTrack(albumName: String? = null): Track {
-        val coverId = coverArt ?: albumId ?: id
+    private fun SongDto.toTrack(
+        albumName: String? = null,
+        albumArtistName: String? = null,
+        /**
+         * The parent album's cover id, where the caller has the album. Preferred
+         * over the song's own: Navidrome hands every file an `mf-` id of its own
+         * that resolves to the same sleeve, and keyed by it the cache held one
+         * copy per song — thousands of files for a few hundred covers.
+         */
+        albumCoverArt: String? = null,
+    ): Track {
+        val coverId = albumCoverArt ?: coverArt ?: albumId ?: id
         return Track(
             id = id,
             title = title ?: "Unknown Title",
             artist = artist ?: "Unknown Artist",
             album = albumName ?: album ?: "Unknown Album",
-            albumArtist = albumArtist ?: artist ?: "Unknown Artist",
+            // The album's answer first — see getAlbumTracks. The track's own
+            // artist is the last resort rather than the second, because it is
+            // the one value here that is known not to be an album artist.
+            albumArtist = albumArtistName
+                ?: displayAlbumArtist?.takeIf { it.isNotBlank() }
+                ?: albumArtist
+                ?: artist
+                ?: "Unknown Artist",
             albumId = albumId,
             coverArtId = coverId,
             durationMs = (duration ?: 0).toLong() * 1000L,
@@ -465,7 +841,9 @@ class SubsonicClient(val config: SubsonicConfig) : MusicServer {
             liked = starred != null,
             rating = userRating ?: 0,
             genre = genre.orEmpty(),
-            composer = composer.orEmpty(),
+            composer = displayComposer?.takeIf { it.isNotBlank() } ?: composer.orEmpty(),
+            // Track gain first; a file tagged only album-wise still normalises.
+            gainDb = replayGain?.trackGain ?: replayGain?.albumGain,
         )
     }
 
