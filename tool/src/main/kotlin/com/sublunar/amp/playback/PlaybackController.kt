@@ -1300,12 +1300,11 @@ class PlaybackController(
                 }
             }
         }
-        // A stalled stream raises no error: the door drops the player's
-        // connection, the player quietly asks again, and so on for minutes.
-        // For a song that is on the phone that is minutes of silence over a
-        // file that would play now — so a start that has made no sound in
-        // this long, or that the door says can't reach the server, plays the
-        // file instead. See moveStalledStreamToFile.
+        // A stalled stream raises no error: StreamProxy drops the player's
+        // connection and the player retries quietly. So a downloaded song
+        // plays from its file instead (moveStalledStreamToFile) when its
+        // stream start has made no sound after STALL_TO_FILE_MS, or when
+        // streamProxy.unreachable fires for it.
         scope.launch(bound) {
             _buffering.collectLatest { on ->
                 if (!on) return@collectLatest
