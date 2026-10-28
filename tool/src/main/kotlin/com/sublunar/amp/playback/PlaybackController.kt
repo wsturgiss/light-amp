@@ -4012,14 +4012,15 @@ class PlaybackController(
     }
 
     /**
-     * The playing song's stream is stuck — [why] — and the song is on the
-     * phone: carry on from the file, exactly as if the stream had failed (see
-     * [fallBackOffline]). Main only.
+     * The current song's stream has stalled, for the reason in [why], and the
+     * song is downloaded: play it from the file, the same as a failed stream
+     * (see [fallBackOffline]). Main only.
      *
-     * [trackId] is the song the stuck stream is of, where that is known; the
-     * door also fetches ahead, and a next song's trouble is not this one's.
-     * Nothing for a song that isn't playing from a stream, has no file, or
-     * has already been moved to it.
+     * [trackId] is the track the stalled stream belongs to, when known. It is
+     * checked against the current song because StreamProxy also fetches the
+     * next song ahead, and a failure there does not apply to this one.
+     * Does nothing if the current song isn't streaming, has no file, or has
+     * already been moved to its file.
      */
     private fun moveStalledStreamToFile(trackId: String?, why: String) {
         if (isCasting || player == null) return

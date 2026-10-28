@@ -188,7 +188,7 @@ class StreamProxyTest {
 
     @Test
     fun anUnreachableServerIsSaidForItsTrack() {
-        // A port that was open a moment ago and isn't now: nothing answers there.
+        // A port that was bound and then closed, so nothing listens on it.
         val dead = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
         val heard = scope.async(start = CoroutineStart.UNDISPATCHED) {
             withTimeout(10_000) { proxy.unreachable.first() }

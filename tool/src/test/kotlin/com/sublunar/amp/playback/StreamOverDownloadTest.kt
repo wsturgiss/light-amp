@@ -25,16 +25,16 @@ class StreamOverDownloadTest {
         assertTrue(streamsOverDownload(plex(home, StreamFormat.RAW), unmetered = true, downloaded = StreamFormat.MP3))
     }
 
-    /** 10-27: a café's Wi-Fi, the server at its public address, a FLAC that never started. */
+    /** 10-27: non-home Wi-Fi, server at its public address; the FLAC stream never started. */
     @Test
     fun `unmetered Wi-Fi away from the server keeps the download`() {
         assertFalse(streamsOverDownload(plex(away, StreamFormat.RAW), unmetered = true, downloaded = StreamFormat.MP3))
     }
 
     @Test
-    fun `the Original standing in for an unservable Opus is not an upgrade`() {
+    fun `the RAW fallback for an unservable Opus is not an upgrade`() {
         val source = plex(home)
-        assertTrue(source.wifiFormat == StreamFormat.RAW, "Plex can't serve Opus, so it reads as Original")
+        assertTrue(source.wifiFormat == StreamFormat.RAW, "Plex can't serve Opus, so it reads as RAW")
         assertFalse(streamsOverDownload(source, unmetered = true, downloaded = StreamFormat.MP3))
     }
 

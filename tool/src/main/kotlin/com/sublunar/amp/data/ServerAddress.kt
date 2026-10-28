@@ -35,14 +35,13 @@ object ServerAddress {
     }
 
     /**
-     * Whether the server at [url] is on the network the phone is on — the one
-     * case where streaming a song instead of playing its download is quick as
-     * well as free. Judged by spelling, like [isLocal], and a plex.direct name
-     * by the address it spells: `192-168-1-5.<hash>.plex.direct` resolves to
-     * 192.168.1.5.
+     * Whether the server at [url] has a local-network address. Read from the
+     * host as written, like [isLocal]; a plex.direct host is read as the IP in
+     * its first label (`192-168-1-5.<hash>.plex.direct` is 192.168.1.5).
      *
-     * Tailscale's range is not counted, though [isLocal] counts it: its tunnel
-     * crosses whatever network the phone is on, hotel Wi-Fi included.
+     * Tailscale addresses (100.64.0.0/10) are excluded, unlike in [isLocal]:
+     * that traffic goes over whatever network the phone is on, so it can be
+     * as slow as the public route.
      */
     fun isOnLan(url: String): Boolean {
         val host = url.trim().toHttpUrlOrNull()?.host?.lowercase() ?: return false
