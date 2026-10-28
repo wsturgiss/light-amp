@@ -12,11 +12,18 @@ import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
 import kotlin.test.assertIs
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.OkHttpClient
 
 /**
@@ -177,6 +184,26 @@ class StreamProxyTest {
     @Test
     fun serverStatusIsTheServers() {
         assertEquals(404, fetch(proxy.wrap(originUrl("/gone"))).first)
+    }
+
+    @Test
+    fun anUnreachableServerIsSaidForItsTrack() {
+        // A port that was bound and then closed, so nothing listens on it.
+        val dead = ServerSocket(0, 1, InetAddress.getByName("127.0.0.1")).use { it.localPort }
+        val heard = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            withTimeout(10_000) { proxy.unreachable.first() }
+        }
+        runCatching { fetch(proxy.wrap("http://127.0.0.1:$dead/file", group = "track-u")) }
+        assertEquals("track-u", runBlocking { heard.await() })
+    }
+
+    @Test
+    fun aServersNoIsNotUnreachable() {
+        val heard = scope.async(start = CoroutineStart.UNDISPATCHED) {
+            withTimeoutOrNull(1_000) { proxy.unreachable.first() }
+        }
+        assertEquals(404, fetch(proxy.wrap(originUrl("/gone"), group = "track-n")).first)
+        assertNull(runBlocking { heard.await() })
     }
 
     @Test

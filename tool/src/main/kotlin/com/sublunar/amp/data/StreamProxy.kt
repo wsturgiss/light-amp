@@ -15,7 +15,10 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -72,6 +75,19 @@ class StreamProxy(
 
     private val _state = MutableStateFlow<State>(State.Starting)
     val state: StateFlow<State> = _state
+
+    /**
+     * Emits the track (group) of a stream when the upstream can't be reached:
+     * the first request fails, or a pickup after a break fails.
+     *
+     * The player retries a dropped connection quietly and never raises an error,
+     * so this is the signal that lets playback fall back to the file.
+     */
+    private val _unreachable = MutableSharedFlow<String>(
+        extraBufferCapacity = 8,
+        onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    val unreachable: SharedFlow<String> = _unreachable
 
     private var server: ServerSocket? = null
     private val tokens = TokenTable()
@@ -250,6 +266,7 @@ class StreamProxy(
             // Dropping the connection is the answer — see above — but the
             // player only ever learns "network error", so the cause is said here.
             log("upstream unreachable for ${firstCall.request().url.encodedPath}: $e")
+            if (group != null) _unreachable.tryEmit(group)
             throw e
         }
         if (!first.isSuccessful) log("upstream ${first.code} for ${first.request.url.encodedPath}")
@@ -279,7 +296,7 @@ class StreamProxy(
         }
 
         val pipe = Pipe(readAheadBytes())
-        val feeder = Feeder(url, firstCall, first, pipe)
+        val feeder = Feeder(url, group, firstCall, first, pipe)
         if (group != null) live[group] = feeder
         val feeding = Thread(feeder::run, "amp-proxy-feed").apply {
             isDaemon = true
@@ -335,6 +352,7 @@ class StreamProxy(
      */
     private inner class Feeder(
         private val url: String,
+        private val group: String?,
         firstCall: Call,
         private val first: Response,
         private val pipe: Pipe,
@@ -432,6 +450,7 @@ class StreamProxy(
                             } catch (e: IOException) {
                                 if (cancelled) return
                                 log("upstream broke at $at, pickup #$pickups failed: $e")
+                                if (group != null) _unreachable.tryEmit(group)
                                 runCatching { response.close() }
                             }
                         }

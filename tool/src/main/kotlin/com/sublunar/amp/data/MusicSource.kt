@@ -207,6 +207,13 @@ data class MusicSource(
     val wifiFormat: StreamFormat get() = supported(streamFormatId)
     val cellularFormat: StreamFormat get() = supported(cellularFormatId ?: streamFormatId)
     /**
+     * Whether [wifiFormat] is the format that was chosen, not the RAW fallback
+     * [supported] returns for a format this server can't serve. Plex can't
+     * serve the default Opus, so an unset Plex source reads as RAW; that
+     * fallback is not a reason to stream instead of playing a download.
+     */
+    val wifiFormatChosen: Boolean get() = wifiFormat == StreamFormat.fromId(streamFormatId)
+    /**
      * Downloading quality — exactly what was chosen, even where this server
      * turns out not to be able to serve it. Quietly reading a stored Original
      * as something smaller would be a silent substitution: files would come

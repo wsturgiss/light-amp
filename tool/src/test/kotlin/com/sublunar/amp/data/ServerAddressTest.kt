@@ -80,4 +80,31 @@ class ServerAddressTest {
         )
         assertEquals(listOf("https://music.example.com"), SubsonicConfig.candidates("music.example.com/REST"))
     }
+
+    @Test
+    fun `a server is on this network by its own address, or the one a plex direct name spells`() {
+        for (url in listOf(
+            "http://192.168.1.10:4533",
+            "https://192-168-1-10.deadbeef.plex.direct:32400",
+            "http://nas:8096",
+            "http://music.local",
+        )) {
+            assertTrue(ServerAddress.isOnLan(url), url)
+        }
+    }
+
+    @Test
+    fun `a public address, a public plex direct name and Tailscale are not this network`() {
+        for (url in listOf(
+            "https://198-51-100-1.deadbeef.plex.direct:32400",
+            "https://music.example.com",
+            "https://198.51.100.7:4533",
+            "http://100.64.0.10:4533",
+            "https://100-64-0-10.deadbeef.plex.direct:32400",
+            "",
+            "not a url",
+        )) {
+            assertFalse(ServerAddress.isOnLan(url), url)
+        }
+    }
 }

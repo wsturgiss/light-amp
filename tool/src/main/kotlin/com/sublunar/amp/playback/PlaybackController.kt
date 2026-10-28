@@ -31,7 +31,6 @@ import com.sublunar.amp.data.PlexQueue
 import com.sublunar.amp.data.TimelineState
 import com.sublunar.amp.data.Track
 import com.sublunar.amp.data.db.LibraryDao
-import com.sublunar.amp.data.qualityRank
 import com.thelightphone.sdk.audio.LightAudio
 import com.thelightphone.sdk.audio.LightAudioItem
 import com.thelightphone.sdk.audio.LightAudioPlayer
@@ -1298,6 +1297,27 @@ class PlaybackController(
                     val elapsed = android.os.SystemClock.elapsedRealtime() - bufferingSinceMs
                     delay(BUFFERING_LIMIT_MS - elapsed)
                     _buffering.value = false
+                }
+            }
+        }
+        // A stalled stream raises no error: StreamProxy drops the player's
+        // connection and the player retries quietly. So a downloaded song
+        // plays from its file instead (moveStalledStreamToFile) when its
+        // stream start has made no sound after STALL_TO_FILE_MS, or when
+        // streamProxy.unreachable fires for it.
+        scope.launch(bound) {
+            _buffering.collectLatest { on ->
+                if (!on) return@collectLatest
+                delay(STALL_TO_FILE_MS - (android.os.SystemClock.elapsedRealtime() - bufferingSinceMs))
+                withContext(Dispatchers.Main.immediate) {
+                    moveStalledStreamToFile(trackId = null, why = "made no sound in ${STALL_TO_FILE_MS / 1000}s")
+                }
+            }
+        }
+        scope.launch(bound) {
+            App.streamProxy.unreachable.collect { trackId ->
+                withContext(Dispatchers.Main.immediate) {
+                    moveStalledStreamToFile(trackId, why = "can't reach the server")
                 }
             }
         }
@@ -3992,6 +4012,28 @@ class PlaybackController(
     }
 
     /**
+     * The current song's stream has stalled, for the reason in [why], and the
+     * song is downloaded: play it from the file, the same as a failed stream
+     * (see [fallBackOffline]). Main only.
+     *
+     * [trackId] is the track the stalled stream belongs to, when known. It is
+     * checked against the current song because StreamProxy also fetches the
+     * next song ahead, and a failure there does not apply to this one.
+     * Does nothing if the current song isn't streaming, has no file, or has
+     * already been moved to its file.
+     */
+    private fun moveStalledStreamToFile(trackId: String?, why: String) {
+        if (isCasting || player == null) return
+        val track = _queue.value.getOrNull(_index.value) ?: return
+        if (trackId != null && track.id != trackId) return
+        if (queuedSources.getOrNull(_index.value) !is LightAudioSource.UrlSource) return
+        if (!localFiles.containsKey(track.id) || track.id in streamFailed) return
+        android.util.Log.i("AmpNet", "stream of ${track.id} $why — playing its file instead")
+        _buffering.value = false
+        fallBackOffline(serverAnswered = false)
+    }
+
+    /**
      * A stream died — carry on from the downloaded copy, at the same second.
      *
      * Losing the network mid-track otherwise just stops the music: the player
@@ -4323,8 +4365,9 @@ class PlaybackController(
      *
      * Downloads win by default — that's the point of having them. A download is
      * abandoned only when the user's chosen streaming format is genuinely better
-     * than the copy on disk, *and* the bytes are free: an unmetered connection,
-     * whatever the mode. Even Make it Hurt — which spends cellular data on
+     * than the copy on disk, the bytes are free — an unmetered connection,
+     * whatever the mode — and the server is on this same network: see
+     * [streamsOverDownload]. Even Make it Hurt — which spends cellular data on
      * everything else — plays a downloaded track from its file: a copy on the
      * phone beats paying for the same song again.
      */
@@ -4335,9 +4378,8 @@ class PlaybackController(
         val local = localFiles[id]
         if (local != null) {
             val (file, downloadedFormat) = local
-            val streamed = effectiveFormat()
-            val preferStream = !forceOffline && id !in streamFailed && unmetered &&
-                streamed.qualityRank > downloadedFormat.qualityRank
+            val preferStream = !forceOffline && id !in streamFailed &&
+                streamsOverDownload(App.source.value, unmetered, downloadedFormat)
             if (!preferStream) return LightAudioSource.FileSource(file)
         }
         return LightAudioSource.UrlSource(playerUrl(this, effectiveFormat()))
@@ -4481,6 +4523,13 @@ class PlaybackController(
 
         /** The longest a stream start is treated as "in progress" — see [buffering]. */
         private const val BUFFERING_LIMIT_MS = 45_000L
+
+        /**
+         * How long a stream start may go without sound before a song that is
+         * on the phone plays from its file instead — see moveStalledStreamToFile.
+         * The player gives a connection eight seconds before asking again.
+         */
+        private const val STALL_TO_FILE_MS = 8_000L
 
         /** How long a dead stream waits on the reachability ping before treating it as a no. */
         private const val VERIFY_WAIT_MS = 2_500L
