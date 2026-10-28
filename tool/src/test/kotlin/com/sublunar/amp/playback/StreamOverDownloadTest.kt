@@ -17,8 +17,8 @@ class StreamOverDownloadTest {
         streamFormatId = (wifi ?: StreamFormat.DEFAULT).id,
     )
 
-    private val home = "https://192-168-200-124.0123abcd.plex.direct:32400"
-    private val away = "https://216-196-143-224.0123abcd.plex.direct:25324"
+    private val home = "https://192-168-1-10.deadbeef.plex.direct:32400"
+    private val away = "https://198-51-100-1.deadbeef.plex.direct:32400"
 
     @Test
     fun `an Original chosen on the home network passes over an MP3 download`() {

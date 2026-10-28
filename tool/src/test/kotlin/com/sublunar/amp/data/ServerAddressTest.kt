@@ -85,7 +85,7 @@ class ServerAddressTest {
     fun `a server is on this network by its own address, or the one a plex direct name spells`() {
         for (url in listOf(
             "http://192.168.1.10:4533",
-            "https://192-168-200-124.0123abcd.plex.direct:32400",
+            "https://192-168-1-10.deadbeef.plex.direct:32400",
             "http://nas:8096",
             "http://music.local",
         )) {
@@ -96,11 +96,11 @@ class ServerAddressTest {
     @Test
     fun `a public address, a public plex direct name and Tailscale are not this network`() {
         for (url in listOf(
-            "https://216-196-143-224.0123abcd.plex.direct:25324",
+            "https://198-51-100-1.deadbeef.plex.direct:32400",
             "https://music.example.com",
-            "https://8.8.8.8:4533",
-            "http://100.101.102.103:4533",
-            "https://100-101-102-103.0123abcd.plex.direct:32400",
+            "https://198.51.100.7:4533",
+            "http://100.64.0.10:4533",
+            "https://100-64-0-10.deadbeef.plex.direct:32400",
             "",
             "not a url",
         )) {
