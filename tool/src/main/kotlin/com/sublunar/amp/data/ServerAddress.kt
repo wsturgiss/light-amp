@@ -34,6 +34,24 @@ object ServerAddress {
         return '.' !in name || LOCAL_SUFFIXES.any { name.endsWith(it) }
     }
 
+    /**
+     * Whether the server at [url] is on the network the phone is on — the one
+     * case where streaming a song instead of playing its download is quick as
+     * well as free. Judged by spelling, like [isLocal], and a plex.direct name
+     * by the address it spells: `192-168-1-5.<hash>.plex.direct` resolves to
+     * 192.168.1.5.
+     *
+     * Tailscale's range is not counted, though [isLocal] counts it: its tunnel
+     * crosses whatever network the phone is on, hotel Wi-Fi included.
+     */
+    fun isOnLan(url: String): Boolean {
+        val host = url.trim().toHttpUrlOrNull()?.host?.lowercase() ?: return false
+        val spelled = if (host.endsWith(".plex.direct")) host.substringBefore('.').replace('-', '.') else host
+        ipv4(spelled)?.let { (a, b) -> if (a == 100 && b in 64..127) return false }
+        if (spelled != host) return ipv4(spelled)?.let(::isLocalV4) == true
+        return isLocal(spelled)
+    }
+
     private fun ipv4(name: String): List<Int>? {
         val parts = name.split('.')
         if (parts.size != 4) return null

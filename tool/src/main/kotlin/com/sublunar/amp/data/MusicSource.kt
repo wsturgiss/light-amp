@@ -207,6 +207,13 @@ data class MusicSource(
     val wifiFormat: StreamFormat get() = supported(streamFormatId)
     val cellularFormat: StreamFormat get() = supported(cellularFormatId ?: streamFormatId)
     /**
+     * Whether [wifiFormat] is what was chosen, rather than the Original standing
+     * in for a choice this server can't serve — see [supported]. Plex can't
+     * serve the default Opus, so a Plex source nobody has set reads as
+     * Original, and that stand-in is no reason to pass over a download.
+     */
+    val wifiFormatChosen: Boolean get() = wifiFormat == StreamFormat.fromId(streamFormatId)
+    /**
      * Downloading quality — exactly what was chosen, even where this server
      * turns out not to be able to serve it. Quietly reading a stored Original
      * as something smaller would be a silent substitution: files would come
