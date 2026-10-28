@@ -77,14 +77,11 @@ class StreamProxy(
     val state: StateFlow<State> = _state
 
     /**
-     * The group — the track — of a stream whose server couldn't be reached:
-     * the first request failed, or a pickup after a break did.
+     * Emits the track (group) of a stream when the upstream can't be reached:
+     * the first request fails, or a pickup after a break fails.
      *
-     * The player is only ever shown a dropped connection, which it retries
-     * quietly and for as long as it likes, so a stalled stream raises no error
-     * for anyone to act on. This is the door saying so instead. Not a
-     * server's "no", which the player is shown as itself, and not a stream
-     * without a group, which nobody could act on.
+     * The player retries a dropped connection quietly and never raises an error,
+     * so this is the signal that lets playback fall back to the file.
      */
     private val _unreachable = MutableSharedFlow<String>(
         extraBufferCapacity = 8,
